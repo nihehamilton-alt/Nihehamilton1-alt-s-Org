@@ -1,0 +1,458 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: 'Chakra Petch', 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  :root {
+    --op-primary: #f59e0b;
+    --op-accent: #dc2626;
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #05070f;
+    color: #f4f4f5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--op-primary, #f59e0b);
+    outline-offset: 2px;
+  }
+
+  canvas,
+  [data-game-surface] {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+/* ============================================================================
+   REI RUN — AAA ARENA GAME DESIGN SYSTEM
+   ============================================================================ */
+
+.arena-stage-night {
+  background-color: #05070f;
+  background-image:
+    radial-gradient(ellipse 80% 45% at 50% -10%, rgba(245, 158, 11, 0.14) 0%, transparent 65%),
+    radial-gradient(ellipse 65% 40% at 12% 22%, rgba(14, 165, 233, 0.09) 0%, transparent 60%),
+    radial-gradient(ellipse 65% 40% at 88% 72%, rgba(220, 38, 38, 0.08) 0%, transparent 60%),
+    linear-gradient(180deg, #060914 0%, #05070f 55%, #070b17 100%);
+}
+
+.arena-stage-day {
+  background-color: #0b1424;
+  background-image:
+    radial-gradient(ellipse 85% 45% at 50% -8%, rgba(56, 189, 248, 0.18) 0%, transparent 65%),
+    radial-gradient(ellipse 60% 40% at 85% 20%, rgba(245, 158, 11, 0.11) 0%, transparent 60%),
+    linear-gradient(180deg, #0c172a 0%, #09111f 55%, #070c16 100%);
+}
+
+/* Machined Obsidian Game Panel */
+.game-panel {
+  background: linear-gradient(168deg, rgba(22, 26, 40, 0.96) 0%, rgba(11, 14, 24, 0.98) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    0 18px 42px -12px rgba(0, 0, 0, 0.72);
+}
+
+/* Championship Gold-Trimmed Game Panel */
+.game-panel-gold {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(245, 158, 11, 0.12) 0%, transparent 58%),
+    linear-gradient(168deg, rgba(25, 24, 34, 0.97) 0%, rgba(10, 12, 20, 0.99) 100%);
+  border: 1px solid rgba(245, 158, 11, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(254, 240, 138, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.65),
+    0 20px 50px -12px rgba(0, 0, 0, 0.8),
+    0 0 28px -8px rgba(245, 158, 11, 0.22);
+}
+
+/* Recessed Telemetry / Grid Subplate */
+.game-subplate {
+  background: linear-gradient(180deg, rgba(6, 8, 15, 0.92) 0%, rgba(11, 14, 23, 0.86) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  box-shadow:
+    inset 0 2px 7px rgba(0, 0, 0, 0.65),
+    0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* Luminous Forged Gold Primary CTA */
+.game-btn-gold {
+  background: linear-gradient(180deg, #fde047 0%, #f59e0b 48%, #d97706 100%);
+  border: 1px solid #fef08a;
+  color: #09090b;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.65),
+    0 4px 0 #92400e,
+    0 12px 28px -4px rgba(245, 158, 11, 0.45);
+  transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.15s ease;
+}
+
+.game-btn-gold:hover:not(:disabled) {
+  filter: brightness(1.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 4px 0 #92400e,
+    0 14px 34px -4px rgba(250, 204, 21, 0.58);
+}
+
+.game-btn-gold:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 2px 0 #92400e,
+    0 6px 16px -4px rgba(245, 158, 11, 0.45);
+}
+
+/* Machined Gunmetal Secondary Action Button */
+.game-btn-secondary {
+  background: linear-gradient(180deg, rgba(39, 43, 58, 0.95) 0%, rgba(22, 25, 36, 0.98) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 2px 6px rgba(0, 0, 0, 0.45);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+.game-btn-secondary:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(51, 56, 74, 0.98) 0%, rgba(28, 32, 46, 0.98) 100%);
+  border-color: rgba(245, 158, 11, 0.45);
+}
+
+/* Custom sleek dark scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(9, 9, 11, 0.75);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(245, 158, 11, 0.4);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.72);
+}
+
+/* ============================================================================
+   RESULTS PODIUM — RANK-RESPONSIVE CSS ANIMATED BACKGROUNDS
+   ============================================================================ */
+
+@keyframes podiumAuroraShift {
+  0% {
+    transform: translate3d(-4%, -3%, 0) scale(1);
+    opacity: 0.78;
+  }
+  50% {
+    transform: translate3d(4%, 3%, 0) scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(-4%, -3%, 0) scale(1);
+    opacity: 0.78;
+  }
+}
+
+@keyframes podiumConicSweep {
+  0% {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+.podium-bg-base {
+  position: fixed;
+  isolation: isolate;
+  overscroll-behavior: contain;
+  contain: layout style;
+}
+
+.podium-bg-base::before,
+.podium-bg-base::after {
+  content: '';
+  position: fixed;
+  pointer-events: none;
+  z-index: -1;
+  backface-visibility: hidden;
+}
+
+/* 1st Place: High-intensity Championship Gold & Solar Burst */
+.podium-bg-rank-1 {
+  background-color: #070502;
+}
+
+.podium-bg-rank-1::before {
+  top: 50%;
+  left: 50%;
+  width: 140vmax;
+  height: 140vmax;
+  background: conic-gradient(
+    from 0deg at 50% 50%,
+    rgba(250, 204, 21, 0.28) 0deg,
+    transparent 38deg,
+    rgba(245, 158, 11, 0.22) 90deg,
+    transparent 130deg,
+    rgba(253, 224, 71, 0.26) 180deg,
+    transparent 225deg,
+    rgba(234, 88, 12, 0.2) 275deg,
+    transparent 320deg,
+    rgba(250, 204, 21, 0.28) 360deg
+  );
+  animation: podiumConicSweep 18s linear infinite;
+  will-change: transform;
+}
+
+.podium-bg-rank-1::after {
+  inset: -12%;
+  background:
+    radial-gradient(circle at 50% 24%, rgba(250, 204, 21, 0.42) 0%, rgba(245, 158, 11, 0.16) 36%, transparent 66%),
+    radial-gradient(circle at 18% 78%, rgba(245, 158, 11, 0.28) 0%, transparent 52%),
+    radial-gradient(circle at 82% 76%, rgba(234, 88, 12, 0.24) 0%, transparent 52%);
+  animation: podiumAuroraShift 5.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+@keyframes podiumGoldShimmer {
+  0% {
+    transform: translate3d(-115%, -10%, 0) rotate(-18deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.42;
+  }
+  50% {
+    opacity: 0.62;
+  }
+  80% {
+    opacity: 0.28;
+  }
+  100% {
+    transform: translate3d(115%, 10%, 0) rotate(-18deg);
+    opacity: 0;
+  }
+}
+
+@keyframes podiumLensFlare {
+  0%,
+  100% {
+    transform: translate3d(-50%, -50%, 0) scale(0.92);
+    opacity: 0.36;
+  }
+  25% {
+    transform: translate3d(-49%, -50.5%, 0) scale(1.06);
+    opacity: 0.68;
+  }
+  50% {
+    transform: translate3d(-50%, -50%, 0) scale(0.98);
+    opacity: 0.44;
+  }
+  75% {
+    transform: translate3d(-51%, -49.5%, 0) scale(1.1);
+    opacity: 0.75;
+  }
+}
+
+@keyframes podiumLensGlint {
+  0%,
+  100% {
+    transform: scaleX(0.82) scaleY(0.9);
+    opacity: 0.28;
+  }
+  50% {
+    transform: scaleX(1.14) scaleY(1.12);
+    opacity: 0.72;
+  }
+}
+
+/* 1st-place high-frequency diagonal specular shimmer */
+.podium-rank1-shimmer {
+  position: fixed;
+  inset: -40%;
+  pointer-events: none;
+  z-index: -1;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 38%,
+    rgba(254, 240, 138, 0.08) 45%,
+    rgba(253, 224, 71, 0.24) 50%,
+    rgba(255, 255, 255, 0.14) 52%,
+    rgba(245, 158, 11, 0.08) 56%,
+    transparent 64%,
+    transparent 100%
+  );
+  animation: podiumGoldShimmer 2.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  will-change: transform, opacity;
+}
+
+/* 1st-place rapid subtle anamorphic lens flare & glint */
+.podium-rank1-flare {
+  position: fixed;
+  top: 22%;
+  left: 50%;
+  width: min(92vw, 760px);
+  height: 180px;
+  pointer-events: none;
+  z-index: -1;
+  backface-visibility: hidden;
+  background:
+    radial-gradient(ellipse 52% 28% at 50% 50%, rgba(254, 249, 195, 0.45) 0%, rgba(250, 204, 21, 0.22) 38%, transparent 72%),
+    radial-gradient(ellipse 50% 10% at 50% 50%, rgba(255, 255, 255, 0.42) 0%, rgba(253, 224, 71, 0.24) 45%, transparent 82%);
+  animation: podiumLensFlare 1.45s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.podium-rank1-glint {
+  position: fixed;
+  top: 14%;
+  right: 16%;
+  width: 210px;
+  height: 54px;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255, 251, 235, 0.65) 0%, rgba(250, 204, 21, 0.25) 28%, transparent 68%),
+    linear-gradient(90deg, transparent 0%, rgba(254, 240, 138, 0.4) 50%, transparent 100%);
+  animation: podiumLensGlint 0.95s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* 2nd Place: Medium-High Intensity Platinum Silver & Electric Sky */
+.podium-bg-rank-2 {
+  background-color: #04070e;
+}
+
+.podium-bg-rank-2::before {
+  top: 50%;
+  left: 50%;
+  width: 165vmax;
+  height: 165vmax;
+  background: conic-gradient(
+    from 45deg at 50% 50%,
+    rgba(226, 232, 240, 0.17) 0deg,
+    transparent 52deg,
+    rgba(56, 189, 248, 0.16) 120deg,
+    transparent 175deg,
+    rgba(203, 213, 225, 0.15) 240deg,
+    transparent 305deg,
+    rgba(226, 232, 240, 0.17) 360deg
+  );
+  animation: podiumConicSweep 26s linear infinite;
+  will-change: transform;
+}
+
+.podium-bg-rank-2::after {
+  inset: -10%;
+  background:
+    radial-gradient(circle at 50% 26%, rgba(226, 232, 240, 0.28) 0%, rgba(56, 189, 248, 0.14) 38%, transparent 66%),
+    radial-gradient(circle at 20% 80%, rgba(56, 189, 248, 0.18) 0%, transparent 50%),
+    radial-gradient(circle at 82% 72%, rgba(148, 163, 184, 0.16) 0%, transparent 50%);
+  animation: podiumAuroraShift 7.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* 3rd Place: Moderate Warm Forged Bronze & Copper Ember */
+.podium-bg-rank-3 {
+  background-color: #090504;
+}
+
+.podium-bg-rank-3::before {
+  top: 50%;
+  left: 50%;
+  width: 160vmax;
+  height: 160vmax;
+  background: conic-gradient(
+    from 90deg at 50% 50%,
+    rgba(217, 119, 6, 0.13) 0deg,
+    transparent 65deg,
+    rgba(180, 83, 9, 0.12) 160deg,
+    transparent 230deg,
+    rgba(245, 158, 11, 0.1) 295deg,
+    transparent 360deg
+  );
+  animation: podiumConicSweep 34s linear infinite;
+  will-change: transform;
+}
+
+.podium-bg-rank-3::after {
+  inset: -8%;
+  background:
+    radial-gradient(circle at 50% 28%, rgba(217, 119, 6, 0.22) 0%, rgba(180, 83, 9, 0.11) 38%, transparent 65%),
+    radial-gradient(circle at 24% 80%, rgba(180, 83, 9, 0.14) 0%, transparent 48%),
+    radial-gradient(circle at 78% 76%, rgba(120, 53, 15, 0.14) 0%, transparent 48%);
+  animation: podiumAuroraShift 9.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+/* 4th / 5th Place: Low-Intensity Midnight Arena Ambient */
+.podium-bg-rank-other {
+  background-color: #05060b;
+}
+
+.podium-bg-rank-other::before {
+  top: 50%;
+  left: 50%;
+  width: 150vmax;
+  height: 150vmax;
+  background: conic-gradient(
+    from 0deg at 50% 50%,
+    rgba(113, 113, 122, 0.06) 0deg,
+    transparent 90deg,
+    rgba(59, 130, 246, 0.05) 180deg,
+    transparent 270deg,
+    rgba(113, 113, 122, 0.06) 360deg
+  );
+  animation: podiumConicSweep 44s linear infinite;
+  will-change: transform;
+}
+
+.podium-bg-rank-other::after {
+  inset: -6%;
+  background:
+    radial-gradient(circle at 50% 30%, rgba(82, 82, 91, 0.16) 0%, transparent 60%),
+    radial-gradient(circle at 50% 85%, rgba(30, 41, 59, 0.14) 0%, transparent 55%);
+  animation: podiumAuroraShift 12s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .podium-bg-base::before,
+  .podium-bg-base::after,
+  .podium-rank1-shimmer,
+  .podium-rank1-flare,
+  .podium-rank1-glint {
+    animation: none;
+  }
+}

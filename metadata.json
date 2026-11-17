@@ -1,0 +1,6 @@
+{
+  "name": "REI RUN",
+  "description": "REI RUN — O Jogo Oficial do Rei Zero, criado por HAMILTON DAVID NIHEFE MUENDA - O ZERO. Corre Rei. Desvia. Coroa é de quem merece.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
