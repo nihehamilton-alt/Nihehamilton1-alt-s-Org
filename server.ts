@@ -64,7 +64,7 @@ interface ServerDatabase {
 }
 
 const PORT = Number(process.env.PORT) || 3000;
-const DATA_DIR = path.resolve('data');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data');
 const DB_FILE = path.join(DATA_DIR, 'rei-run-db.json');
 
 function ensureDb(): ServerDatabase {
