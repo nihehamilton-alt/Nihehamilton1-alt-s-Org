@@ -1,8 +1,13 @@
 import { CurrencyCode, ThreeTorneirasSplit } from '../types/game';
 
-export const MIN_BET_KZ = 100;
+export const MIN_BET_KZ = 50;
 export const MAX_BET_KZ = 100_000;
 export const PASSE_DO_REI_MONTHLY_KZ = 5000;
+
+export function clampBetKz(amountKz: number): number {
+  const safe = Math.round(Number.isFinite(amountKz) ? amountKz : MIN_BET_KZ);
+  return Math.max(MIN_BET_KZ, Math.min(MAX_BET_KZ, safe));
+}
 
 export interface CurrencyMeta {
   code: CurrencyCode;
@@ -257,7 +262,7 @@ export interface QuickBetChip {
   label: string;
 }
 
-const BASE_KZ_CHIPS = [100, 250, 500, 1000, 2500, 5000, 10000];
+const BASE_KZ_CHIPS = [50, 100, 250, 500, 1000, 5000, 10000];
 
 export function getQuickBetChipsKz(
   currency: CurrencyCode,

@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express from 'express';
 import type { Request, Response } from 'express';
 import http from 'http';
@@ -6,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { loadServerConfig } from './config/env.ts';
 
 interface MatchRecord {
   id: string;
@@ -63,9 +63,10 @@ interface ServerDatabase {
   rooms: Record<string, ServerRoom>;
 }
 
-const PORT = Number(process.env.PORT) || 3000;
-const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data');
-const DB_FILE = path.join(DATA_DIR, 'rei-run-db.json');
+const config = loadServerConfig();
+const PORT = config.port;
+const DATA_DIR = config.dataDir;
+const DB_FILE = config.dbFile;
 
 function ensureDb(): ServerDatabase {
   try {
@@ -119,11 +120,7 @@ async function startServer() {
       serverTime: Date.now(),
       storedMatches: db.matches.length,
       activeRooms: Object.keys(db.rooms).length,
-      aiConfigured: Boolean(
-        process.env.GEMINI_API_KEY &&
-          process.env.GEMINI_API_KEY.trim() !== '' &&
-          process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'
-      ),
+      aiConfigured: config.isAiConfigured,
     });
   });
 
@@ -132,8 +129,8 @@ async function startServer() {
   // ============================================================================
   app.post('/api/ai/coach', async (req: Request, res: Response) => {
     try {
-      const apiKey = process.env.GEMINI_API_KEY?.trim();
-      if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+      const apiKey = config.geminiApiKey;
+      if (!apiKey) {
         res.status(503).json({
           ok: false,
           code: 'MISSING_API_KEY',
@@ -290,6 +287,15 @@ async function startServer() {
   // ============================================================================
   // 2. SALAS PRIVADAS & ARENA DOS AMIGOS (MULTIJOGADOR EM TEMPO REAL)
   // ============================================================================
+  const MIN_BET_KZ = 50;
+  const MAX_BET_KZ = 100_000;
+
+  const clampRoomBet = (val: unknown, fallback = 500): number => {
+    const n = Number(val);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(MIN_BET_KZ, Math.min(MAX_BET_KZ, Math.round(n)));
+  };
+
   const clampMaxPlayers = (val: unknown, fallback = 5): number => {
     const n = Number(val);
     if (!Number.isFinite(n)) return fallback;
@@ -326,7 +332,7 @@ async function startServer() {
         title: (body.title || 'Arena do Hamilton').trim(),
         hostName: (body.hostName || 'Hamilton O Zero').trim(),
         maxPlayers: requestedMax,
-        betAmount: Number(body.betAmount) || 500,
+        betAmount: clampRoomBet(body.betAmount, 500),
         fillWithBots: body.fillWithBots ?? true,
         isDemo: body.isDemo ?? true,
         accessMode: normalizeAccessMode(body.accessMode),
@@ -345,7 +351,9 @@ async function startServer() {
       if (typeof body.maxPlayers === 'number') {
         room.maxPlayers = clampMaxPlayers(body.maxPlayers, room.maxPlayers || 5);
       }
-      if (typeof body.betAmount === 'number') room.betAmount = body.betAmount;
+      if (typeof body.betAmount === 'number') {
+        room.betAmount = clampRoomBet(body.betAmount, room.betAmount || 500);
+      }
       if (typeof body.fillWithBots === 'boolean') room.fillWithBots = body.fillWithBots;
       if (body.accessMode === 'random' || body.accessMode === 'invite-only') {
         room.accessMode = body.accessMode;
@@ -466,7 +474,7 @@ async function startServer() {
         title: (body.title || `Arena ${code}`).trim(),
         hostName: (body.hostName || 'Anfitrião').trim(),
         maxPlayers: clampMaxPlayers(body.maxPlayers, 5),
-        betAmount: Number(body.betAmount) || 500,
+        betAmount: clampRoomBet(body.betAmount, 500),
         fillWithBots: body.fillWithBots ?? true,
         isDemo: body.isDemo ?? true,
         accessMode: normalizeAccessMode(body.accessMode),
@@ -501,6 +509,9 @@ async function startServer() {
         const isExistingHost = room.participants[existingIdx].isHost;
         if (isExistingHost && (body.accessMode === 'random' || body.accessMode === 'invite-only')) {
           room.accessMode = body.accessMode;
+        }
+        if (isExistingHost && typeof body.betAmount === 'number') {
+          room.betAmount = clampRoomBet(body.betAmount, room.betAmount || 500);
         }
         room.participants[existingIdx] = {
           ...room.participants[existingIdx],
@@ -787,14 +798,7 @@ async function startServer() {
   // ============================================================================
   // 3. VITE MIDDLEWARE EM DEV OU ESTÁTICO EM PRODUÇÃO
   // ============================================================================
-  const isHostedProduction =
-    process.env.NODE_ENV === 'production' ||
-    Boolean(
-      process.env.RENDER ||
-        process.env.RAILWAY_ENVIRONMENT ||
-        process.env.FLY_APP_NAME ||
-        process.env.KOYEB_APP_NAME
-    );
+  const isHostedProduction = config.isProduction;
 
   // Qualquer rota /api/* não encontrada retorna JSON 404 em vez de cair no SPA fallback
   app.use('/api', (_req: Request, res: Response) => {
@@ -802,7 +806,7 @@ async function startServer() {
   });
 
   const httpServer = http.createServer(app);
-  const disableHmr = process.env.DISABLE_HMR === 'true';
+  const disableHmr = config.disableHmr;
 
   if (!isHostedProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -982,8 +986,10 @@ async function startServer() {
     });
   });
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`REI RUN server running on http://0.0.0.0:${PORT} (WebSocket /ws/voice enabled)`);
+  httpServer.listen(PORT, config.host, () => {
+    console.log(
+      `REI RUN server running on http://${config.host}:${PORT} [${config.nodeEnv}] (WebSocket /ws/voice enabled)`
+    );
   });
 }
 

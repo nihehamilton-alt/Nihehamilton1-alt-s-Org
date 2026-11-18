@@ -18,16 +18,25 @@ import {
   Trash2,
   Shuffle,
   Lock,
+  Mic,
+  MicOff,
+  Volume2,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { Competitor, RoomAccessMode, RoomConfig } from '../types/game';
 import {
+  MIN_BET_KZ,
+  MAX_BET_KZ,
+  clampBetKz,
   calculateThreeTorneiras,
+  convertCurrencyToKz,
+  convertKzToCurrency,
   getCrossBorderStakeParity,
   getQuickBetChipsKz,
 } from '../data/currency';
 import { useI18n } from '../contexts/I18nContext';
+import { useVoiceChat } from '../contexts/VoiceChatContext';
 import { VoiceChatPanel } from './VoiceChatPanel';
 import { AvatarDoll } from './AvatarDoll';
 
@@ -65,6 +74,14 @@ interface LobbyRoomProps {
   streak?: number;
 }
 
+function formatEditableRoomBet(kz: number, decimals: number, rate: number): string {
+  const localVal = kz / (rate || 1);
+  if (decimals === 0) {
+    return String(Math.round(localVal));
+  }
+  return Number(localVal.toFixed(decimals)).toString();
+}
+
 export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   roomConfig,
   competitors,
@@ -87,7 +104,14 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   onCloseLobby,
   streak = 0,
 }) => {
-  const { currency, t, rates, formatMoney } = useI18n();
+  const { currency, currencyMeta, t, rates, formatMoney } = useI18n();
+  const {
+    isJoined: isVoiceActive,
+    peers: voicePeers,
+    isMicMuted,
+    isLocalSpeaking,
+    mutedPeerIds,
+  } = useVoiceChat();
 
   const maxPlayers = Math.max(2, Math.min(5, roomConfig.maxPlayers || 5)) as 2 | 3 | 4 | 5;
   const currentAccessMode: RoomAccessMode = roomConfig.accessMode || 'invite-only';
@@ -108,9 +132,16 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  const rateForCurrency = rates[currency] || currencyMeta.defaultKzPerUnit || 1;
+  const initialRoomBet = clampBetKz(roomConfig.betAmount || 500);
   const [newTitle, setNewTitle] = useState<string>(roomConfig.title || 'Arena do Hamilton');
   const [newHost, setNewHost] = useState<string>(roomConfig.hostName || 'Hamilton O Zero');
-  const [newBet, setNewBet] = useState<number>(roomConfig.betAmount || 500);
+  const [newBet, setNewBet] = useState<number>(initialRoomBet);
+  const [newBetInput, setNewBetInput] = useState<string>(() =>
+    formatEditableRoomBet(initialRoomBet, currencyMeta.decimals, rateForCurrency)
+  );
+  const [isEditingNewBet, setIsEditingNewBet] = useState<boolean>(false);
+  const [newBetError, setNewBetError] = useState<string | null>(null);
   const [newMaxPlayers, setNewMaxPlayers] = useState<2 | 3 | 4 | 5>(maxPlayers);
   const [newAccessMode, setNewAccessMode] = useState<RoomAccessMode>(currentAccessMode);
   const [fillBotsOption, setFillBotsOption] = useState<boolean>(roomConfig.fillWithBots);
@@ -119,8 +150,31 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     setNewMaxPlayers(maxPlayers);
   }, [maxPlayers]);
 
+  useEffect(() => {
+    if (activeTab !== 'create' && !isEditingNewBet) {
+      const synced = clampBetKz(roomConfig.betAmount || 500);
+      setNewBet(synced);
+      setNewBetError(null);
+    }
+  }, [roomConfig.betAmount, activeTab, isEditingNewBet]);
+
+  useEffect(() => {
+    if (!isEditingNewBet) {
+      setNewBetInput(formatEditableRoomBet(newBet, currencyMeta.decimals, rateForCurrency));
+    }
+  }, [newBet, currency, currencyMeta.decimals, rateForCurrency, isEditingNewBet]);
+
+  const minLocalBet = useMemo(
+    () => convertKzToCurrency(MIN_BET_KZ, currency, rates),
+    [currency, rates]
+  );
+  const maxLocalBet = useMemo(
+    () => convertKzToCurrency(MAX_BET_KZ, currency, rates),
+    [currency, rates]
+  );
+
   const presetChips = useMemo(
-    () => getQuickBetChipsKz(currency, rates).slice(0, 4),
+    () => getQuickBetChipsKz(currency, rates),
     [currency, rates]
   );
 
@@ -128,6 +182,30 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     () => getCrossBorderStakeParity(roomConfig.betAmount, rates, ['AOA', 'USD', 'EUR', 'BRL', 'COP', 'MXN', 'CNY', 'EGP']),
     [roomConfig.betAmount, rates]
   );
+
+  const activeSpeakerNames = useMemo(() => {
+    if (!isVoiceActive) return [];
+    const names: string[] = [];
+    if (isLocalSpeaking && !isMicMuted) {
+      const localPlayer = competitors.find((c) => c.isPlayer);
+      names.push(localPlayer?.name || playerName || t.lobby.youBadge);
+    }
+    for (const peer of voicePeers) {
+      if (peer.speaking && !peer.muted && !mutedPeerIds.includes(peer.peerId)) {
+        names.push(peer.name);
+      }
+    }
+    return names;
+  }, [
+    isVoiceActive,
+    isLocalSpeaking,
+    isMicMuted,
+    competitors,
+    playerName,
+    t.lobby.youBadge,
+    voicePeers,
+    mutedPeerIds,
+  ]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -168,7 +246,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
               hostName: url.searchParams.get('host') || undefined,
               title: url.searchParams.get('title') || undefined,
               maxPlayers: !isNaN(maxNum) ? Math.max(2, Math.min(5, maxNum)) : undefined,
-              betAmount: isNaN(betNum) ? undefined : betNum,
+              betAmount: isNaN(betNum) ? undefined : clampBetKz(betNum),
               isDemo: url.searchParams.get('mode') ? url.searchParams.get('mode') !== 'real' : undefined,
               accessMode: accessParam === 'random' ? 'random' : 'invite-only',
               viaInvite: true,
@@ -374,8 +452,67 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     await handleCopyLink();
   };
 
+  const rangeLabel = `${formatMoney(MIN_BET_KZ)} – ${formatMoney(MAX_BET_KZ)}`;
+
+  const handleManualRoomBetChange = (raw: string) => {
+    setNewBetInput(raw);
+    const normalized = raw.replace(',', '.').trim();
+    if (!normalized) {
+      setNewBetError(rangeLabel);
+      return;
+    }
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setNewBetError(rangeLabel);
+      return;
+    }
+    const rawKz = convertCurrencyToKz(parsed, currency, rates);
+    if (rawKz < MIN_BET_KZ || rawKz > MAX_BET_KZ) {
+      setNewBetError(rangeLabel);
+      return;
+    }
+    setNewBetError(null);
+    setNewBet(clampBetKz(rawKz));
+  };
+
+  const handleManualRoomBetBlur = () => {
+    setIsEditingNewBet(false);
+    const normalized = newBetInput.replace(',', '.').trim();
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      const clampedKz = clampBetKz(convertCurrencyToKz(parsed, currency, rates));
+      setNewBet(clampedKz);
+      setNewBetInput(formatEditableRoomBet(clampedKz, currencyMeta.decimals, rateForCurrency));
+      setNewBetError(null);
+      return;
+    }
+    setNewBetInput(formatEditableRoomBet(newBet, currencyMeta.decimals, rateForCurrency));
+    setNewBetError(null);
+  };
+
+  const applyQuickRoomBetKz = (targetKz: number) => {
+    const clamped = clampBetKz(targetKz);
+    setIsEditingNewBet(false);
+    setNewBetError(null);
+    setNewBet(clamped);
+    setNewBetInput(formatEditableRoomBet(clamped, currencyMeta.decimals, rateForCurrency));
+  };
+
   const handleSaveNewRoom = (e: React.FormEvent) => {
     e.preventDefault();
+    const normalized = newBetInput.replace(',', '.').trim();
+    const parsed = Number(normalized);
+    const parsedKz = Number.isFinite(parsed) && parsed > 0 ? convertCurrencyToKz(parsed, currency, rates) : NaN;
+
+    if (!Number.isFinite(parsedKz) || parsedKz < MIN_BET_KZ || parsedKz > MAX_BET_KZ) {
+      setNewBetError(rangeLabel);
+      return;
+    }
+
+    const validatedBet = clampBetKz(parsedKz);
+    setNewBetError(null);
+    setNewBet(validatedBet);
+
     const cleanTitle = newTitle.trim() || 'Arena do Hamilton';
     const cleanHost = newHost.trim() || 'Hamilton O Zero';
     const cleanCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -386,7 +523,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
       hostName: cleanHost,
       maxPlayers: newMaxPlayers,
       minPlayers: 2,
-      betAmount: newBet,
+      betAmount: validatedBet,
       fillWithBots: fillBotsOption,
       isDemo: roomConfig.isDemo,
       isPrivate: newAccessMode === 'invite-only',
@@ -781,6 +918,39 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
               </div>
             </div>
 
+            {isVoiceActive && (
+              <div
+                className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-mono flex items-center justify-between gap-2 transition-colors ${
+                  activeSpeakerNames.length > 0
+                    ? 'bg-emerald-950/65 border-emerald-400/70 text-emerald-200 shadow-[0_0_16px_rgba(16,185,129,0.25)]'
+                    : 'bg-zinc-950/75 border-emerald-500/25 text-zinc-400'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  {activeSpeakerNames.length > 0 ? (
+                    <span className="inline-flex items-center gap-1 text-emerald-400 shrink-0">
+                      <Mic size={13} className="animate-pulse" />
+                      <span className="flex items-end gap-0.5 h-3" aria-hidden="true">
+                        <span className="w-0.5 h-2 bg-emerald-400 rounded-full animate-bounce" />
+                        <span className="w-0.5 h-3 bg-emerald-300 rounded-full animate-pulse" />
+                        <span className="w-0.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" />
+                      </span>
+                    </span>
+                  ) : (
+                    <Volume2 size={13} className="text-emerald-400/75 shrink-0" />
+                  )}
+                  <span className="truncate font-bold">
+                    {activeSpeakerNames.length > 0
+                      ? activeSpeakerNames.join(', ')
+                      : t.voice.lobbyTitle}
+                  </span>
+                </div>
+                <span className="text-[10px] text-emerald-300/90 shrink-0 tabular-nums">
+                  {activeSpeakerNames.length > 0 ? t.voice.micOn : `${1 + voicePeers.length}/5`}
+                </span>
+              </div>
+            )}
+
             <div
               className={`grid gap-2 ${
                 maxPlayers === 2
@@ -795,17 +965,80 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
               {Array.from({ length: maxPlayers }).map((_, idx) => {
                 const comp = competitors[idx];
                 if (comp) {
+                  const matchedVoicePeer =
+                    isVoiceActive && !comp.isPlayer && !comp.isBot
+                      ? voicePeers.find(
+                          (p) =>
+                            p.peerId === comp.id ||
+                            p.name.trim().toLowerCase() === comp.name.trim().toLowerCase()
+                        )
+                      : undefined;
+
+                  const isPlayerInVoice =
+                    isVoiceActive && (comp.isPlayer || Boolean(matchedVoicePeer));
+                  const isVoiceMuted = comp.isPlayer
+                    ? isMicMuted
+                    : Boolean(
+                        matchedVoicePeer &&
+                          (matchedVoicePeer.muted ||
+                            mutedPeerIds.includes(matchedVoicePeer.peerId))
+                      );
+                  const isTalkingNow = comp.isPlayer
+                    ? isVoiceActive && isLocalSpeaking && !isMicMuted
+                    : Boolean(matchedVoicePeer && matchedVoicePeer.speaking && !isVoiceMuted);
+
                   return (
                     <div
                       key={comp.id}
-                      className={`p-2.5 rounded-2xl border flex flex-col items-center justify-between text-center relative ${
-                        comp.isPlayer
+                      className={`p-2.5 rounded-2xl border flex flex-col items-center justify-between text-center relative transition-all ${
+                        isTalkingNow
+                          ? 'bg-gradient-to-b from-emerald-500/25 to-emerald-950/50 border-emerald-400 shadow-[0_0_22px_rgba(16,185,129,0.45)] ring-2 ring-emerald-400/50'
+                          : comp.isPlayer
                           ? 'bg-gradient-to-b from-amber-500/20 to-amber-950/35 border-amber-400 shadow-[0_0_18px_rgba(245,158,11,0.28)]'
                           : 'game-subplate'
                       }`}
                     >
+                      {isPlayerInVoice && (
+                        <div
+                          className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-full border flex items-center gap-1 text-[9px] font-mono font-bold z-10 ${
+                            isTalkingNow
+                              ? 'bg-emerald-500 text-zinc-950 border-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.8)]'
+                              : isVoiceMuted
+                              ? 'bg-zinc-900/90 text-rose-300 border-rose-500/40'
+                              : 'bg-zinc-900/90 text-emerald-300 border-emerald-500/35'
+                          }`}
+                          title={
+                            isTalkingNow
+                              ? t.voice.youSpeaking
+                              : isVoiceMuted
+                              ? t.voice.micOff
+                              : t.voice.micOn
+                          }
+                        >
+                          {isTalkingNow ? (
+                            <>
+                              <Mic size={9} className="animate-pulse" />
+                              <span className="flex items-end gap-0.5 h-2" aria-hidden="true">
+                                <span className="w-0.5 h-1.5 bg-zinc-950 rounded-full animate-bounce" />
+                                <span className="w-0.5 h-2 bg-zinc-950 rounded-full animate-pulse" />
+                              </span>
+                            </>
+                          ) : isVoiceMuted ? (
+                            <MicOff size={9} />
+                          ) : (
+                            <Volume2 size={9} />
+                          )}
+                        </div>
+                      )}
+
                       <div className="flex flex-col items-center w-full">
-                        <div className="mb-1">
+                        <div
+                          className={`mb-1 rounded-full p-0.5 transition-all ${
+                            isTalkingNow
+                              ? 'ring-2 ring-emerald-400 shadow-[0_0_14px_rgba(16,185,129,0.75)]'
+                              : ''
+                          }`}
+                        >
                           <AvatarDoll
                             avatarId={comp.avatarId}
                             name={comp.name}
@@ -819,7 +1052,9 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                         </span>
                         <span
                           className={`text-[9px] font-mono px-1.5 py-0.5 rounded mt-0.5 ${
-                            comp.isPlayer
+                            isTalkingNow
+                              ? 'bg-emerald-500 text-zinc-950 font-black'
+                              : comp.isPlayer
                               ? 'bg-amber-500 text-zinc-950 font-black'
                               : comp.isBot
                               ? 'bg-sky-950 text-sky-400 border border-sky-800/60'
@@ -928,25 +1163,87 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             />
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-bold text-zinc-300">
-              {t.lobby.betPerRunnerLabel} ({currency})
-            </label>
-            <div className="grid grid-cols-4 gap-2">
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="text-xs font-bold text-zinc-300">
+                {t.lobby.betPerRunnerLabel} ({currencyMeta.flag} {currency})
+              </label>
+              <span className="text-[10px] font-mono text-amber-300/90">
+                {formatMoney(MIN_BET_KZ)} – {formatMoney(MAX_BET_KZ)}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <div className="relative flex-1">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-amber-400 font-black font-mono">
+                  {currencyMeta.symbol}
+                </span>
+                <input
+                  type="number"
+                  min={Number(minLocalBet.toFixed(currencyMeta.decimals))}
+                  max={Number(maxLocalBet.toFixed(currencyMeta.decimals))}
+                  step={currencyMeta.decimals === 0 ? 1 : 0.01}
+                  value={newBetInput}
+                  onFocus={() => setIsEditingNewBet(true)}
+                  onChange={(e) => handleManualRoomBetChange(e.target.value)}
+                  onBlur={handleManualRoomBetBlur}
+                  className={`w-full game-subplate rounded-xl pl-12 pr-3 py-2.5 text-zinc-100 font-mono font-black text-sm focus:outline-none ${
+                    newBetError ? 'border-rose-500 focus:border-rose-400' : 'focus:border-amber-500'
+                  }`}
+                  required
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => applyQuickRoomBetKz(MIN_BET_KZ)}
+                className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-[11px] font-mono rounded-xl cursor-pointer shrink-0"
+              >
+                MIN
+              </button>
+              <button
+                type="button"
+                onClick={() => applyQuickRoomBetKz(Math.floor(newBet / 2))}
+                className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer shrink-0"
+              >
+                ½
+              </button>
+              <button
+                type="button"
+                onClick={() => applyQuickRoomBetKz(newBet * 2)}
+                className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer shrink-0"
+              >
+                2X
+              </button>
+              <button
+                type="button"
+                onClick={() => applyQuickRoomBetKz(MAX_BET_KZ)}
+                className="px-2.5 py-2.5 game-btn-secondary text-amber-400 font-bold text-[11px] font-mono rounded-xl cursor-pointer shrink-0"
+              >
+                {t.betting.maxBtn}
+              </button>
+            </div>
+
+            {newBetError && (
+              <span className="text-[11px] font-mono font-bold text-rose-400">
+                {newBetError}
+              </span>
+            )}
+
+            <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
               {presetChips.map((chip) => {
-                const isSelected = Math.abs(newBet - chip.kz) <= Math.max(2, chip.kz * 0.01);
+                const isSelected = !newBetError && Math.abs(newBet - chip.kz) <= Math.max(1, chip.kz * 0.01);
                 return (
                   <button
                     key={chip.label}
                     type="button"
-                    onClick={() => setNewBet(chip.kz)}
-                    className={`py-2 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer ${
+                    onClick={() => applyQuickRoomBetKz(chip.kz)}
+                    className={`py-1.5 px-1 rounded-xl text-[11px] font-mono font-bold border transition-all cursor-pointer truncate ${
                       isSelected
                         ? 'bg-amber-500 text-zinc-950 border-amber-300 font-black shadow'
                         : 'game-subplate text-zinc-400 hover:text-white'
                     }`}
                   >
-                    {formatMoney(chip.kz)}
+                    {chip.label}
                   </button>
                 );
               })}

@@ -1096,6 +1096,57 @@ class SoundEngine {
     }
   }
 
+  // Efeito sonoro comemorativo imediato ao cruzar a meta no Top 3 (1.º, 2.º ou 3.º lugar)
+  playTopThreeCelebration(rank: number = 3) {
+    if (rank < 1 || rank > 3) return;
+    if (!this.enabled || this.volume <= 0) return;
+    this.initContext();
+    if (!this.ctx) return;
+
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const vol = this.volume;
+
+    // Progressão harmónica distinta por posição no pódio (1.º Ouro, 2.º Prata, 3.º Bronze)
+    const notesByRank: Record<number, number[]> = {
+      1: [523.25, 659.25, 783.99, 1046.5, 1318.51], // Dó Maior Real até Mi6
+      2: [440.0, 554.37, 659.25, 880.0],            // Lá Maior Prata
+      3: [392.0, 493.88, 587.33, 783.99],           // Sol Maior Bronze
+    };
+
+    const notes = notesByRank[rank] || notesByRank[3];
+    const stepSec = rank === 1 ? 0.055 : 0.065;
+
+    notes.forEach((freq, idx) => {
+      const t0 = now + idx * stepSec;
+      const osc = ctx.createOscillator();
+      const harmonic = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, t0);
+
+      harmonic.type = 'sine';
+      harmonic.frequency.setValueAtTime(freq * 2, t0);
+
+      const peak = (idx === notes.length - 1 ? 0.28 : 0.2) * vol;
+      const dur = idx === notes.length - 1 ? 0.45 : 0.24;
+
+      gain.gain.setValueAtTime(0.0005, t0);
+      gain.gain.linearRampToValueAtTime(peak, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+
+      osc.connect(gain);
+      harmonic.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(t0);
+      harmonic.start(t0);
+      osc.stop(t0 + dur + 0.02);
+      harmonic.stop(t0 + dur + 0.02);
+    });
+  }
+
   // Contagem regressiva (3, 2, 1, CORRE REI!)
   playCountdownTick() {
     if (!this.enabled || this.volume <= 0) return;

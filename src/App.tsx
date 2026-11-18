@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   GameStatus,
@@ -11,14 +11,16 @@ import {
   RoomAccessMode,
   RacePerformanceMetrics,
 } from './types/game';
-import { Trash2, Shuffle, Lock, Users } from 'lucide-react';
+import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy, Camera } from 'lucide-react';
+import QRCode from 'qrcode';
+import jsQR from 'jsqr';
 import { TOTAL_GAME_TIME_SECONDS, LANE_CENTERS, RIVAL_LANE_SLOTS } from './game/constants';
 import { ANGOLAN_BOTS } from './data/bots';
 import { AVATARS, AvatarItem } from './data/avatars';
 import { getLocalizedAvatar, getLocalizedBot } from './data/translations';
 import { useI18n } from './contexts/I18nContext';
 import { LanguageGeoModal } from './components/LanguageGeoModal';
-import { calculateThreeTorneiras, PASSE_DO_REI_MONTHLY_KZ } from './data/currency';
+import { calculateThreeTorneiras, clampBetKz, PASSE_DO_REI_MONTHLY_KZ } from './data/currency';
 import { sounds } from './audio/soundEffects';
 import { GameHeader } from './components/GameHeader';
 import { GameCanvas } from './components/GameCanvas';
@@ -78,6 +80,27 @@ class PodiumErrorBoundary extends React.Component<
   }
 }
 
+const roomControlGridVariants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.045,
+      delayChildren: 0.03,
+    },
+  },
+};
+
+const roomControlItemVariants = {
+  hidden: { opacity: 0, y: 6, scale: 0.97 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: { duration: 0.22, ease: 'easeOut' as const },
+  },
+};
+
 export default function App() {
   // 1. Rota Restrita /admin-rei-zero (Exclusivo para Hamilton David Nihefe Muenda)
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
@@ -129,7 +152,7 @@ export default function App() {
   const [timeMode, setTimeMode] = useState<TimeMode>('day');
 
   // 3. Sistema Global de Idiomas (15), Geo-Deteção e Conversão de Moeda (11)
-  const { lang, t } = useI18n();
+  const { lang, t, formatMoney } = useI18n();
 
   // 4. Modo Demo (Treino) vs Modo Real (KZ)
   const [isDemo, setIsDemo] = useState<boolean>(() => {
@@ -162,8 +185,17 @@ export default function App() {
     localStorage.setItem('rei_zero_real_balance', realBalance.toString());
   }, [realBalance]);
 
-  // 6. Estado da Corrida e Aposta
-  const [betAmount, setBetAmount] = useState<number>(500); // 500 KZ por partida padrão
+  // 6. Estado da Corrida e Aposta (mínimo 50 Kz, máximo 100.000 Kz)
+  const [betAmount, setBetAmount] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('room') || params.get('sala')) {
+        const betParam = parseInt(params.get('bet') || '500', 10);
+        return isNaN(betParam) ? 500 : clampBetKz(betParam);
+      }
+    }
+    return 500;
+  });
   const [status, setStatus] = useState<GameStatus>('idle');
   const statusRef = useRef<GameStatus>(status);
   useEffect(() => {
@@ -307,7 +339,7 @@ export default function App() {
           hostName: hostParam,
           maxPlayers: clampRoomMax(maxParam, 5),
           minPlayers: 2,
-          betAmount: isNaN(betParam) ? 500 : betParam,
+          betAmount: isNaN(betParam) ? 500 : clampBetKz(betParam),
           fillWithBots: params.get('bots') !== 'false',
           isDemo: params.get('mode') !== 'real',
           isPrivate: accessMode === 'invite-only',
@@ -339,6 +371,189 @@ export default function App() {
   const [serverRoomConnected, setServerRoomConnected] = useState<boolean>(false);
   const [roomNotice, setRoomNotice] = useState<string | null>(null);
   const [confirmDeleteMain, setConfirmDeleteMain] = useState<boolean>(false);
+  const [roomUrlCopied, setRoomUrlCopied] = useState<boolean>(false);
+  const shareCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleShareRoomUrl = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    const urlToCopy = window.location.href;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(urlToCopy);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = urlToCopy;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = urlToCopy;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+
+    setRoomUrlCopied(true);
+    if (shareCopyTimerRef.current) {
+      clearTimeout(shareCopyTimerRef.current);
+    }
+    shareCopyTimerRef.current = setTimeout(() => {
+      setRoomUrlCopied(false);
+    }, 2500);
+  }, []);
+
+  const [showTrackQr, setShowTrackQr] = useState<boolean>(false);
+  const [trackQrDataUrl, setTrackQrDataUrl] = useState<string>('');
+  const [qrInviteCopied, setQrInviteCopied] = useState<boolean>(false);
+  const qrCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const roomInviteUrl = useMemo(() => {
+    const access = roomConfig.accessMode || 'invite-only';
+    const maxPlayers = Math.max(2, Math.min(5, roomConfig.maxPlayers || 5));
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
+        roomConfig.code
+      )}&host=${encodeURIComponent(roomConfig.hostName)}&title=${encodeURIComponent(
+        roomConfig.title
+      )}&bet=${roomConfig.betAmount}&max=${maxPlayers}&mode=${isDemo ? 'demo' : 'real'}&access=${access}`;
+    }
+    return `https://rei-run.app/?room=${encodeURIComponent(roomConfig.code)}&max=${maxPlayers}&access=${access}`;
+  }, [roomConfig.code, roomConfig.hostName, roomConfig.title, roomConfig.betAmount, roomConfig.maxPlayers, roomConfig.accessMode, isDemo]);
+
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(roomInviteUrl, {
+      width: 380,
+      margin: 2,
+      color: {
+        dark: '#000000',
+        light: '#ffffff',
+      },
+    })
+      .then((url) => {
+        if (!cancelled) setTrackQrDataUrl(url);
+      })
+      .catch((err) => {
+        console.error('Erro gerando QR Code da sala:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [roomInviteUrl]);
+
+  useEffect(() => {
+    if (!showTrackQr) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowTrackQr(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showTrackQr]);
+
+  const handleCopyQrInviteUrl = useCallback(async () => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(roomInviteUrl);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = roomInviteUrl;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = roomInviteUrl;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+
+    setQrInviteCopied(true);
+    if (qrCopyTimerRef.current) clearTimeout(qrCopyTimerRef.current);
+    qrCopyTimerRef.current = setTimeout(() => setQrInviteCopied(false), 2500);
+  }, [roomInviteUrl]);
+
+  const handleDownloadTrackQr = useCallback(() => {
+    if (!trackQrDataUrl) return;
+    const a = document.createElement('a');
+    a.href = trackQrDataUrl;
+    a.download = `REI-RUN-${roomConfig.code}-QR.png`;
+    a.click();
+  }, [trackQrDataUrl, roomConfig.code]);
+
+  const [trackQrCameraActive, setTrackQrCameraActive] = useState<boolean>(false);
+  const [trackQrCameraError, setTrackQrCameraError] = useState<string | null>(null);
+  const trackQrVideoRef = useRef<HTMLVideoElement | null>(null);
+  const trackQrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const trackQrStreamRef = useRef<MediaStream | null>(null);
+
+  const stopTrackQrCamera = useCallback(() => {
+    if (trackQrStreamRef.current) {
+      trackQrStreamRef.current.getTracks().forEach((tr) => tr.stop());
+      trackQrStreamRef.current = null;
+    }
+    if (trackQrVideoRef.current) {
+      trackQrVideoRef.current.srcObject = null;
+    }
+    setTrackQrCameraActive(false);
+  }, []);
+
+  useEffect(() => {
+    if (!showTrackQr) {
+      stopTrackQrCamera();
+      setTrackQrCameraError(null);
+    }
+  }, [showTrackQr, stopTrackQrCamera]);
+
+  useEffect(() => {
+    return () => {
+      stopTrackQrCamera();
+    };
+  }, [stopTrackQrCamera]);
+
+  const startTrackQrScanner = useCallback(async () => {
+    setTrackQrCameraError(null);
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setTrackQrCameraError(t.lobby.cameraHint);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      trackQrStreamRef.current = stream;
+      setTrackQrCameraActive(true);
+      requestAnimationFrame(() => {
+        if (trackQrVideoRef.current) {
+          trackQrVideoRef.current.srcObject = stream;
+          trackQrVideoRef.current.play().catch(() => {});
+        }
+      });
+    } catch {
+      setTrackQrCameraError(t.lobby.manualCodeLabel);
+      setTrackQrCameraActive(false);
+    }
+  }, [t.lobby.cameraHint, t.lobby.manualCodeLabel]);
   const [needsInviteOnboarding, setNeedsInviteOnboarding] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const params = new URLSearchParams(window.location.search);
@@ -579,11 +794,11 @@ export default function App() {
 
   // Início da corrida de 40 segundos (idêntico entre partida normal e partida de sala)
   const handleStartRound = (fromRoom = false) => {
-    const effectiveBet = fromRoom ? roomConfig.betAmount : betAmount;
+    const effectiveBet = clampBetKz(fromRoom ? roomConfig.betAmount : betAmount);
     if (balance < effectiveBet || status === 'running' || status === 'starting') return;
 
-    if (fromRoom && betAmount !== roomConfig.betAmount) {
-      setBetAmount(roomConfig.betAmount);
+    if (betAmount !== effectiveBet) {
+      setBetAmount(effectiveBet);
     }
 
     startedFromRoomRef.current = fromRoom;
@@ -684,8 +899,9 @@ export default function App() {
         setBalance((prev) => prev + payout);
       }
 
-      // Atualiza o contador de vitórias consecutivas no Top 3 (Hot Streak)
-      if (rank <= 3) {
+      // Atualiza o contador de vitórias consecutivas no Top 3 (Hot Streak) e dispara som comemorativo
+      if (rank >= 1 && rank <= 3) {
+        sounds.playTopThreeCelebration(rank);
         setTop3Streak((prev) => {
           const newStreak = prev + 1;
           localStorage.setItem('rei_zero_top3_streak', newStreak.toString());
@@ -910,8 +1126,10 @@ export default function App() {
   const handleCreateRoom = (newConfig: RoomConfig) => {
     const cap = clampRoomMax(newConfig.maxPlayers, 5);
     const accessMode: RoomAccessMode = newConfig.accessMode || 'invite-only';
+    const validatedBet = clampBetKz(newConfig.betAmount);
     const normalizedConfig: RoomConfig = {
       ...newConfig,
+      betAmount: validatedBet,
       maxPlayers: cap,
       accessMode,
       isPrivate: accessMode === 'invite-only',
@@ -963,6 +1181,48 @@ export default function App() {
         .catch(() => setServerRoomConnected(false));
     }
   };
+
+  const betSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (betSyncTimerRef.current) clearTimeout(betSyncTimerRef.current);
+    };
+  }, []);
+
+  const handleMainBetChange = useCallback(
+    (nextAmt: number) => {
+      const clamped = clampBetKz(nextAmt);
+      setBetAmount(clamped);
+      setRoomConfig((prev) =>
+        prev.betAmount === clamped ? prev : { ...prev, betAmount: clamped }
+      );
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('room') || url.searchParams.has('sala')) {
+          url.searchParams.set('bet', clamped.toString());
+          window.history.replaceState({}, '', url.toString());
+        }
+      }
+      if (betSyncTimerRef.current) {
+        clearTimeout(betSyncTimerRef.current);
+      }
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        const currentCode = roomConfig.code;
+        betSyncTimerRef.current = setTimeout(() => {
+          fetch('/api/rooms', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: currentCode,
+              betAmount: clamped,
+            }),
+          }).catch(() => {});
+        }, 250);
+      }
+    },
+    [roomConfig.code]
+  );
 
   const handleUpdateMaxPlayers = (newMax: 2 | 3 | 4 | 5) => {
     const cap = clampRoomMax(newMax, 5);
@@ -1093,7 +1353,7 @@ export default function App() {
       hostName: payload.hostName || roomConfig.hostName,
       maxPlayers: cap,
       minPlayers: 2,
-      betAmount: payload.betAmount || betAmount,
+      betAmount: clampBetKz(payload.betAmount ?? betAmount),
       fillWithBots: roomConfig.fillWithBots,
       isDemo: payload.isDemo ?? isDemo,
       isPrivate: accessMode === 'invite-only',
@@ -1116,6 +1376,105 @@ export default function App() {
       window.history.replaceState({}, '', url.toString());
     }
   };
+
+  const handleJoinRoomRef = useRef(handleJoinRoom);
+  handleJoinRoomRef.current = handleJoinRoom;
+
+  const parseScannedTrackQrAndJoin = useCallback(
+    (rawValue: string) => {
+      const cleaned = rawValue.trim();
+      if (!cleaned) return false;
+
+      let parsedPayload: {
+        code: string;
+        title?: string;
+        hostName?: string;
+        maxPlayers?: number;
+        betAmount?: number;
+        isDemo?: boolean;
+        accessMode?: RoomAccessMode;
+        viaInvite?: boolean;
+      } | null = null;
+
+      try {
+        if (cleaned.includes('http') || cleaned.includes('?')) {
+          const url = new URL(
+            cleaned.startsWith('http') ? cleaned : `https://rei-run.app/${cleaned}`
+          );
+          const roomCode = url.searchParams.get('room') || url.searchParams.get('sala');
+          if (roomCode) {
+            const betNum = parseInt(url.searchParams.get('bet') || '500', 10);
+            const maxNum = parseInt(url.searchParams.get('max') || '5', 10);
+            const accessParam = url.searchParams.get('access');
+            parsedPayload = {
+              code: roomCode.trim().toUpperCase(),
+              hostName: url.searchParams.get('host') || undefined,
+              title: url.searchParams.get('title') || undefined,
+              maxPlayers: !isNaN(maxNum) ? Math.max(2, Math.min(5, maxNum)) : undefined,
+              betAmount: isNaN(betNum) ? undefined : clampBetKz(betNum),
+              isDemo: url.searchParams.get('mode') ? url.searchParams.get('mode') !== 'real' : undefined,
+              accessMode: accessParam === 'random' ? 'random' : 'invite-only',
+              viaInvite: true,
+            };
+          }
+        }
+      } catch {
+        // Fallback to direct room code below
+      }
+
+      if (!parsedPayload) {
+        const fallbackCode = cleaned.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+        if (fallbackCode) {
+          parsedPayload = {
+            code: fallbackCode,
+            viaInvite: true,
+          };
+        }
+      }
+
+      if (!parsedPayload || !parsedPayload.code) return false;
+
+      stopTrackQrCamera();
+      setShowTrackQr(false);
+      handleJoinRoomRef.current(parsedPayload);
+      return true;
+    },
+    [stopTrackQrCamera]
+  );
+
+  useEffect(() => {
+    if (!showTrackQr || !trackQrCameraActive) return;
+    let rafId = 0;
+    let active = true;
+
+    const scanFrame = () => {
+      if (!active) return;
+      const video = trackQrVideoRef.current;
+      const canvas = trackQrCanvasRef.current;
+      if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth || 320;
+        canvas.height = video.videoHeight || 240;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'dontInvert',
+          });
+          if (decoded && decoded.data && parseScannedTrackQrAndJoin(decoded.data)) {
+            return;
+          }
+        }
+      }
+      rafId = requestAnimationFrame(scanFrame);
+    };
+
+    rafId = requestAnimationFrame(scanFrame);
+    return () => {
+      active = false;
+      cancelAnimationFrame(rafId);
+    };
+  }, [showTrackQr, trackQrCameraActive, parseScannedTrackQrAndJoin]);
 
   const handleFindRandomRoom = async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -1293,13 +1652,29 @@ export default function App() {
         setServerRoomConnected(true);
         const serverMax = clampRoomMax(data.room.maxPlayers, roomConfig.maxPlayers);
         const serverAccess = data.room.accessMode;
-        if (serverMax !== roomConfig.maxPlayers || (serverAccess && serverAccess !== roomConfig.accessMode)) {
+        const meOnServer = data.room.participants.find((p) => p.id === myId);
+        const isLocalHostOnServer = Boolean(meOnServer?.isHost);
+        const serverBet =
+          typeof data.room.betAmount === 'number'
+            ? clampBetKz(data.room.betAmount)
+            : roomConfig.betAmount;
+        const shouldAdoptServerBet = !isLocalHostOnServer && serverBet !== roomConfig.betAmount;
+
+        if (
+          serverMax !== roomConfig.maxPlayers ||
+          (serverAccess && serverAccess !== roomConfig.accessMode) ||
+          shouldAdoptServerBet
+        ) {
           setRoomConfig((prev) => ({
             ...prev,
             maxPlayers: serverMax,
+            betAmount: shouldAdoptServerBet ? serverBet : prev.betAmount,
             accessMode: serverAccess || prev.accessMode,
             isPrivate: (serverAccess || prev.accessMode) === 'invite-only',
           }));
+          if (shouldAdoptServerBet) {
+            setBetAmount(serverBet);
+          }
         }
 
         const remoteOthers = data.room.participants.filter(
@@ -1560,96 +1935,153 @@ export default function App() {
         {/* Pista de 5 Faixas (Modo 2D ou 3D Three.js) */}
         <section
           id="race-track-section"
-          className="w-full lg:w-[520px] shrink-0 flex flex-col items-center scroll-mt-4 gap-2"
+          className={`w-full lg:w-[520px] shrink-0 flex flex-col items-center scroll-mt-4 gap-2 rounded-2xl transition-[transform,box-shadow] duration-300 ease-out will-change-transform ${
+            status === 'starting' || countdownValue !== null
+              ? 'hover:scale-[1.015] hover:shadow-[0_16px_40px_rgba(245,158,11,0.22)]'
+              : 'hover:scale-[1.01] hover:shadow-[0_12px_30px_rgba(0,0,0,0.35)]'
+          }`}
         >
-          {/* Barra Permanente de Controlo da Sala (Aleatórios vs Convidados + Eliminar Sala) */}
-          <div className="w-full game-panel rounded-2xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="w-8 h-8 rounded-xl game-subplate flex items-center justify-center shrink-0">
-                <span className="text-base">🏟️</span>
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] uppercase font-mono font-bold text-zinc-400">
-                    {t.app.roomBarTitle}
-                  </span>
-                  <span className="text-[11px] font-mono font-black text-amber-300 truncate max-w-[110px]">
-                    {roomConfig.code}
-                  </span>
-                  <span className="text-[10px] font-mono text-zinc-400">
-                    ({competitors.length}/{roomConfig.maxPlayers})
+          {/* Barra Permanente de Controlo da Sala (Layout responsivo em 2 linhas no telemóvel + QR Code) */}
+          <div className="w-full game-panel rounded-2xl px-3 py-2.5 flex flex-col gap-2">
+            {/* Linha 1: Info da Sala + Botão Lobby */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-xl game-subplate flex items-center justify-center shrink-0">
+                  <span className="text-base">🏟️</span>
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] uppercase font-mono font-bold text-zinc-400">
+                      {t.app.roomBarTitle}
+                    </span>
+                    <span className="text-[11px] font-mono font-black text-amber-300 truncate max-w-[120px]">
+                      {roomConfig.code}
+                    </span>
+                    <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+                      ({competitors.length}/{roomConfig.maxPlayers})
+                    </span>
+                  </div>
+                  <span className="text-[9px] font-mono text-zinc-500 block leading-tight truncate">
+                    {(roomConfig.accessMode || 'invite-only') === 'random'
+                      ? t.app.accessRandomBadge
+                      : t.app.accessInviteBadge}
                   </span>
                 </div>
-                <span className="text-[9px] font-mono text-zinc-500 block leading-tight">
-                  {(roomConfig.accessMode || 'invite-only') === 'random'
-                    ? t.app.accessRandomBadge
-                    : t.app.accessInviteBadge}
-                </span>
               </div>
-            </div>
 
-            <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 disabled={status === 'running' || status === 'starting'}
+                onClick={() => setLobbyOpen(true)}
+                className="px-2.5 py-1.5 rounded-xl game-btn-secondary text-zinc-200 text-[10px] font-mono font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
+              >
+                <Users size={12} className="text-amber-400" />
+                <span>{t.app.openLobbyBtn}</span>
+              </button>
+            </div>
+
+            {/* Linha 2 (Grid 2x2 no mobile / 4 colunas em ecrãs maiores): Access Mode, Share Room, QR Code e Delete Room */}
+            <motion.div
+              variants={roomControlGridVariants}
+              initial="hidden"
+              animate="visible"
+              className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 w-full"
+            >
+              <motion.button
+                variants={roomControlItemVariants}
+                whileTap={{ scale: 0.97 }}
+                type="button"
+                disabled={status === 'running' || status === 'starting'}
                 onClick={() => handleToggleAccessMode()}
-                className={`px-2.5 py-1.5 rounded-xl border text-[10px] font-mono font-black flex items-center gap-1 cursor-pointer transition-all disabled:opacity-50 ${
+                className={`w-full px-2 py-2 sm:py-1.5 rounded-xl border text-[10px] font-mono font-black flex items-center justify-center gap-1 cursor-pointer transition-colors disabled:opacity-50 ${
                   (roomConfig.accessMode || 'invite-only') === 'random'
                     ? 'bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-400/60 text-emerald-300'
                     : 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/50 text-amber-300'
                 }`}
               >
                 {(roomConfig.accessMode || 'invite-only') === 'random' ? (
-                  <Shuffle size={12} />
+                  <Shuffle size={12} className="shrink-0" />
                 ) : (
-                  <Lock size={12} />
+                  <Lock size={12} className="shrink-0" />
                 )}
-                <span>
+                <span className="truncate">
                   {(roomConfig.accessMode || 'invite-only') === 'random'
                     ? t.app.accessRandomBtn
                     : t.app.accessInviteBtn}
                 </span>
-              </button>
+              </motion.button>
 
-              <button
+              <motion.button
+                variants={roomControlItemVariants}
+                whileTap={{ scale: 0.97 }}
                 type="button"
-                disabled={status === 'running' || status === 'starting'}
-                onClick={() => setLobbyOpen(true)}
-                className="px-2.5 py-1.5 rounded-xl game-btn-secondary text-zinc-200 text-[10px] font-mono font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                onClick={handleShareRoomUrl}
+                className={`w-full px-2 py-2 sm:py-1.5 rounded-xl border text-[10px] font-mono font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                  roomUrlCopied
+                    ? 'bg-emerald-500/20 border-emerald-400/70 text-emerald-300'
+                    : 'game-btn-secondary border-zinc-700 text-zinc-200 hover:text-amber-300'
+                }`}
               >
-                <Users size={12} className="text-amber-400" />
-                <span>{t.app.openLobbyBtn}</span>
-              </button>
+                {roomUrlCopied ? (
+                  <Check size={12} className="text-emerald-400 shrink-0" />
+                ) : (
+                  <Share2 size={12} className="text-amber-400 shrink-0" />
+                )}
+                <span className="truncate">{roomUrlCopied ? t.lobby.copiedBtn : 'Share Room'}</span>
+              </motion.button>
 
-              {confirmDeleteMain ? (
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={handleDeleteRoom}
-                    className="px-2 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-mono font-black cursor-pointer"
+              <motion.button
+                variants={roomControlItemVariants}
+                whileTap={{ scale: 0.97 }}
+                type="button"
+                onClick={() => setShowTrackQr((prev) => !prev)}
+                className={`w-full px-2 py-2 sm:py-1.5 rounded-xl border text-[10px] font-mono font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                  showTrackQr
+                    ? 'bg-amber-500 text-zinc-950 border-amber-300 font-black'
+                    : 'game-btn-secondary border-zinc-700 text-zinc-200 hover:text-amber-300'
+                }`}
+              >
+                <QrCode size={12} className={showTrackQr ? 'text-zinc-950 shrink-0' : 'text-amber-400 shrink-0'} />
+                <span className="truncate">QR Code</span>
+              </motion.button>
+
+              <motion.div variants={roomControlItemVariants} className="w-full">
+                {confirmDeleteMain ? (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.96 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration: 0.15 }}
+                    className="grid grid-cols-2 gap-1 w-full"
                   >
-                    {t.app.deleteRoomConfirm}
-                  </button>
-                  <button
+                    <button
+                      type="button"
+                      onClick={handleDeleteRoom}
+                      className="w-full px-1.5 py-2 sm:py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-mono font-black cursor-pointer truncate"
+                    >
+                      {t.app.deleteRoomConfirm}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteMain(false)}
+                      className="w-full px-1.5 py-2 sm:py-1.5 rounded-xl game-btn-secondary text-zinc-300 text-[10px] font-mono font-bold cursor-pointer truncate"
+                    >
+                      {t.app.deleteRoomCancel}
+                    </button>
+                  </motion.div>
+                ) : (
+                  <motion.button
+                    whileTap={{ scale: 0.97 }}
                     type="button"
-                    onClick={() => setConfirmDeleteMain(false)}
-                    className="px-2 py-1.5 rounded-xl game-btn-secondary text-zinc-300 text-[10px] font-mono font-bold cursor-pointer"
+                    disabled={status === 'running' || status === 'starting'}
+                    onClick={() => setConfirmDeleteMain(true)}
+                    className="w-full px-2 py-2 sm:py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 text-rose-300 text-[10px] font-mono font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
                   >
-                    {t.app.deleteRoomCancel}
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  disabled={status === 'running' || status === 'starting'}
-                  onClick={() => setConfirmDeleteMain(true)}
-                  className="px-2.5 py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 text-rose-300 text-[10px] font-mono font-bold flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
-                >
-                  <Trash2 size={12} />
-                  <span>{t.app.deleteRoomBtn}</span>
-                </button>
-              )}
-            </div>
+                    <Trash2 size={12} className="shrink-0" />
+                    <span className="truncate">{t.app.deleteRoomBtn}</span>
+                  </motion.button>
+                )}
+              </motion.div>
+            </motion.div>
           </div>
 
           {roomNotice && (
@@ -1679,7 +2111,7 @@ export default function App() {
             onRankUpdate={(rank) => setUserRank(rank)}
             onRestart={handleReturnToLobby}
             roundNonce={roundNonce}
-            pause3d={showPodium || lobbyOpen}
+            pause3d={showPodium || lobbyOpen || showTrackQr}
             isDemo={isDemo}
           />
         </section>
@@ -1737,7 +2169,7 @@ export default function App() {
             betAmountKz={betAmount}
             elapsedSeconds={elapsedSeconds}
             playerRank={userRank}
-            onBetChange={(amt) => setBetAmount(amt)}
+            onBetChange={handleMainBetChange}
             onStartRound={() => handleStartRound(false)}
             lastPayoutKz={lastPayout}
             lastRank={userRank}
@@ -1894,6 +2326,221 @@ export default function App() {
         isOpen={isProvablyFairOpen}
         onClose={() => setIsProvablyFairOpen(false)}
       />
+
+      {/* 3.2 Modal de QR Code da Sala (#race-track-section) */}
+      <AnimatePresence>
+        {showTrackQr && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowTrackQr(false);
+            }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              transition={{ duration: 0.22, ease: 'easeOut' }}
+              className="relative w-full max-w-sm rounded-3xl game-panel-gold p-5 shadow-[0_0_60px_rgba(245,158,11,0.38)] flex flex-col items-center text-center gap-3.5"
+            >
+              <button
+                type="button"
+                onClick={() => setShowTrackQr(false)}
+                className="absolute top-4 right-4 w-8 h-8 rounded-full game-btn-secondary text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer"
+                aria-label={t.rules.closeBtn}
+              >
+                <X size={16} />
+              </button>
+
+              <div className="flex items-center gap-2 pr-6">
+                <span className="text-2xl">👑</span>
+                <div className="text-left">
+                  <h4 className="text-base font-black uppercase text-amber-400 tracking-wide">
+                    {t.lobby.qrModalTitle}
+                  </h4>
+                  <span className="text-[11px] font-mono text-zinc-400 block">
+                    {roomConfig.title} · <strong className="text-amber-300">{roomConfig.code}</strong>
+                  </span>
+                </div>
+              </div>
+
+              <div className="w-full p-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono">
+                {trackQrCameraActive ? t.lobby.scanSub : t.lobby.qrModalHint}
+              </div>
+
+              <div className="relative w-60 h-60 flex items-center justify-center">
+                <AnimatePresence initial={false}>
+                  {trackQrCameraActive ? (
+                    <motion.div
+                      key="track-qr-camera"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.24, ease: 'easeInOut' }}
+                      className="absolute inset-0 w-60 h-60 rounded-2xl overflow-hidden border-4 border-amber-400/90 shadow-[0_0_28px_rgba(245,158,11,0.35)] bg-black"
+                    >
+                      <video
+                        ref={trackQrVideoRef}
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover"
+                      />
+
+                      {/* Visual Alignment Mask & Viewfinder Overlay */}
+                      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                        {/* Cutout with dimmed surround */}
+                        <div className="relative w-40 h-40 rounded-2xl border border-amber-300/35 shadow-[0_0_0_9999px_rgba(0,0,0,0.52)] overflow-hidden">
+                          {/* 4 Corner Alignment Brackets */}
+                          <span className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-amber-400 rounded-tl-xl drop-shadow-[0_0_8px_rgba(245,158,11,0.85)]" />
+                          <span className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-amber-400 rounded-tr-xl drop-shadow-[0_0_8px_rgba(245,158,11,0.85)]" />
+                          <span className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-amber-400 rounded-bl-xl drop-shadow-[0_0_8px_rgba(245,158,11,0.85)]" />
+                          <span className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-amber-400 rounded-br-xl drop-shadow-[0_0_8px_rgba(245,158,11,0.85)]" />
+
+                          {/* Center Target Crosshair */}
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <div className="relative w-5 h-5 opacity-75">
+                              <span className="absolute left-1/2 top-0 bottom-0 w-px -translate-x-1/2 bg-amber-300" />
+                              <span className="absolute top-1/2 left-0 right-0 h-px -translate-y-1/2 bg-amber-300" />
+                            </div>
+                          </div>
+
+                          {/* Animated Scan Sweep Line */}
+                          <motion.div
+                            initial={{ y: 8 }}
+                            animate={{ y: 148 }}
+                            transition={{
+                              duration: 1.7,
+                              repeat: Infinity,
+                              repeatType: 'reverse',
+                              ease: 'easeInOut',
+                            }}
+                            className="absolute inset-x-2 top-0 h-0.5 bg-gradient-to-r from-transparent via-amber-400 to-transparent shadow-[0_0_12px_rgba(251,191,36,0.95)]"
+                          />
+                        </div>
+
+                        {/* Top Live Scanner Tag */}
+                        <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-lg bg-zinc-950/85 border border-amber-400/40 flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-[9px] font-mono font-black uppercase tracking-widest text-amber-300">
+                            QR SCAN
+                          </span>
+                        </div>
+
+                        {/* Bottom Alignment Instruction */}
+                        <div className="absolute bottom-2 inset-x-2.5 px-2 py-1 rounded-lg bg-zinc-950/85 border border-white/10 text-[10px] font-mono text-zinc-200 leading-tight truncate">
+                          {t.lobby.cameraHint}
+                        </div>
+                      </div>
+
+                      <canvas ref={trackQrCanvasRef} className="hidden" />
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="track-qr-static"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.24, ease: 'easeInOut' }}
+                      className="absolute inset-0 p-2 bg-white rounded-2xl shadow-xl border-4 border-amber-500/60 flex items-center justify-center"
+                    >
+                      {trackQrDataUrl ? (
+                        <img
+                          src={trackQrDataUrl}
+                          alt={`QR ${roomConfig.code}`}
+                          className="w-full h-full object-contain"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-zinc-100 text-zinc-600 font-mono text-xs">
+                          QR...
+                        </div>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {trackQrCameraError && (
+                <div className="w-full p-2 rounded-xl bg-rose-950/75 border border-rose-700 text-rose-300 text-[11px] font-mono">
+                  {trackQrCameraError}
+                </div>
+              )}
+
+              <div className="w-full grid grid-cols-3 gap-2 text-[11px] font-mono text-zinc-300 game-subplate p-2.5 rounded-xl">
+                <div>
+                  <span className="text-zinc-500 block text-[9px] uppercase">{t.lobby.hostLabel}</span>
+                  <span className="font-bold text-amber-400 truncate block">{roomConfig.hostName}</span>
+                </div>
+                <div>
+                  <span className="text-zinc-500 block text-[9px] uppercase">{t.lobby.betLabel}</span>
+                  <span className="font-bold text-emerald-400 block">
+                    {formatMoney(roomConfig.betAmount)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-500 block text-[9px] uppercase">{t.lobby.tabArena}</span>
+                  <span className="font-bold text-zinc-100 block">
+                    {competitors.length}/{roomConfig.maxPlayers}
+                  </span>
+                </div>
+              </div>
+
+              <div className="w-full flex flex-col gap-2 pt-1">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyQrInviteUrl}
+                    className="py-2.5 px-3 rounded-xl game-btn-gold text-zinc-950 font-black text-xs uppercase tracking-wider cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    {qrInviteCopied ? <Check size={14} /> : <Copy size={14} />}
+                    <span className="truncate">{qrInviteCopied ? t.lobby.copiedBtn : t.lobby.copyBtn}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (trackQrCameraActive) stopTrackQrCamera();
+                      else startTrackQrScanner();
+                    }}
+                    className={`py-2.5 px-3 rounded-xl border font-black text-xs uppercase tracking-wider cursor-pointer flex items-center justify-center gap-1.5 transition-colors ${
+                      trackQrCameraActive
+                        ? 'bg-rose-600 hover:bg-rose-500 border-rose-400 text-white'
+                        : 'bg-emerald-500 hover:bg-emerald-400 border-emerald-300 text-zinc-950'
+                    }`}
+                  >
+                    <Camera size={14} className="shrink-0" />
+                    <span className="truncate">
+                      {trackQrCameraActive ? t.lobby.stopCamera : t.lobby.tabScan}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadTrackQr}
+                    disabled={!trackQrDataUrl}
+                    className="py-2 px-3 rounded-xl game-btn-secondary text-zinc-200 font-bold text-xs font-mono flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40"
+                  >
+                    <Download size={13} />
+                    <span>{t.lobby.downloadQr}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowTrackQr(false)}
+                    className="py-2 px-3 rounded-xl game-btn-secondary text-zinc-300 font-bold text-xs font-mono cursor-pointer"
+                  >
+                    {t.rules.closeBtn}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* 4. Tela Oficial de Carregamento (Loading Splash Screen) */}
       <AnimatePresence>
