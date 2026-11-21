@@ -62,6 +62,64 @@ export interface Player {
   stumbleTimer: number;
 }
 
+export type CompetitorSessionStatus = 'normal' | 'investigating';
+
+export type TelemetryAnomalyReason =
+  | 'impossible-speed'
+  | 'lane-switch-flood'
+  | 'position-teleport';
+
+export interface TelemetryInvestigationEntry {
+  competitorId: string;
+  competitorName: string;
+  sessionStatus: CompetitorSessionStatus;
+  reason: TelemetryAnomalyReason;
+  detectedAt: number;
+  peakSpeedMps?: number;
+  switchesPerSec?: number;
+}
+
+export interface TelemetryAnomalyLog {
+  id: string;
+  roomCode: string;
+  raceRound: number;
+  reporterId: string;
+  competitorId: string;
+  competitorName: string;
+  reason: TelemetryAnomalyReason;
+  detectedAt: number;
+  progressDistance: number;
+  lane: Lane;
+  targetLane: Lane;
+  laneX: number;
+  peakSpeedMps?: number;
+  switchesPerSec?: number;
+}
+
+export type ServerTelemetryRiskLevel = 'normal' | 'monitor' | 'investigating' | 'high-risk';
+
+export interface ServerParticipantAnomalySummary {
+  competitorId: string;
+  competitorName: string;
+  roomCode: string;
+  totalAnomalies: number;
+  reasons: Record<TelemetryAnomalyReason, number>;
+  maxSpeedMps: number;
+  maxSwitchesPerSec: number;
+  suspicionScore: number;
+  riskLevel: ServerTelemetryRiskLevel;
+  firstDetectedAt: number;
+  lastDetectedAt: number;
+}
+
+export interface BatchAnomalyReportPayload {
+  roomCode: string;
+  raceRound: number;
+  reporterId: string;
+  sentAt: number;
+  logs: TelemetryAnomalyLog[];
+}
+
 export interface Competitor {
   id: string;
   name: string;
@@ -85,6 +143,7 @@ export interface Competitor {
   isHost?: boolean;
   isRemoteHuman?: boolean;
   betAmount?: number;
+  sessionStatus?: CompetitorSessionStatus;
 }
 
 export interface RemoteRunnerSnapshot {

@@ -8,6 +8,22 @@ import React, {
   useState,
 } from 'react';
 import { getSessionPlayerId } from '../utils/offlineSync';
+import {
+  createVoiceAudioProcessor,
+  type VoiceAudioProcessorHandle,
+  type VoiceProcessorTelemetry,
+} from '../utils/voiceAudioProcessor';
+import {
+  clearVoiceActivitySessions,
+  listVoiceActivitySessions,
+  upsertVoiceActivitySession,
+  type VoiceActivitySessionLog,
+} from '../utils/voiceActivityDb';
+import type { GameStatus, TelemetryInvestigationEntry } from '../types/game';
+
+export type { VoiceActivitySessionLog };
+
+const EMPTY_INVESTIGATIONS: Record<string, TelemetryInvestigationEntry> = {};
 
 export type VoiceChannelMode = 'private' | 'public';
 export type VoiceNoiseGateMode = 'strict' | 'balanced';
@@ -33,20 +49,33 @@ interface VoiceChatContextValue {
   isMicMuted: boolean;
   isDeafened: boolean;
   isLocalSpeaking: boolean;
+  /** Nível em tempo real após filtro High-Pass + Noise Gate (0..1) */
   localMicLevel: number;
+  /** Nível captado antes do Noise Gate (para confirmar supressão de ruído ambiente) */
+  preGateMicLevel: number;
+  /** Verdadeiro quando há som ambiente detetado antes do gate mas suprimido na saída */
+  isNoiseSuppressed: boolean;
+  /** Web Audio AnalyserNode ligado após High-Pass e Noise Gate */
+  analyserNode: AnalyserNode | null;
   mutedPeerIds: string[];
   errorMsg: string | null;
   noiseGateMode: VoiceNoiseGateMode;
   hasHeadset: boolean;
   selectedMicLabel: string | null;
+  investigatingCompetitors: Record<string, TelemetryInvestigationEntry>;
+  voiceSessionHistory: VoiceActivitySessionLog[];
+  currentVoiceActivity: VoiceActivitySessionLog | null;
   setNoiseGateMode: (mode: VoiceNoiseGateMode) => void;
   joinVoice: (opts?: { mode?: VoiceChannelMode; withMic?: boolean }) => Promise<void>;
   leaveVoice: () => void;
   toggleMic: () => Promise<void>;
+  muteMicrophone: () => void;
   toggleDeafen: () => void;
   switchChannelMode: (mode: VoiceChannelMode) => void;
   toggleMutePeer: (peerId: string) => void;
   updateIdentity: (roomCode: string, playerName: string, avatar: string) => void;
+  refreshVoiceHistory: () => Promise<void>;
+  clearVoiceHistory: () => Promise<void>;
 }
 
 const VoiceChatContext = createContext<VoiceChatContextValue | null>(null);
@@ -78,13 +107,48 @@ function isHeadsetDeviceLabel(label: string): boolean {
   return HEADSET_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
+const VOICE_ACTIVITY_SAVE_INTERVAL_MS = 5000;
+
+interface ActiveVoiceActivityTracker {
+  id: string;
+  roomCode: string;
+  raceRound: number;
+  channelMode: VoiceChannelMode;
+  playerName: string;
+  startedAt: number;
+  activeVoiceConnectedMs: number;
+  micUnmutedMs: number;
+  speakingDurationMs: number;
+  speakingBurstCount: number;
+  peakLevel: number;
+  levelSum: number;
+  levelSamples: number;
+  noiseSuppressedEvents: number;
+  connectedSinceMs: number | null;
+  unmutedSinceMs: number | null;
+  speakingSinceMs: number | null;
+  wasSuppressed: boolean;
+  dirty: boolean;
+}
+
 export const VoiceChatProvider: React.FC<{
   children: React.ReactNode;
   roomCode: string;
   playerName: string;
   playerAvatar: string;
   hasInviteLink: boolean;
-}> = ({ children, roomCode, playerName, playerAvatar }) => {
+  raceRound?: number;
+  raceStatus?: GameStatus;
+  investigatingCompetitors?: Record<string, TelemetryInvestigationEntry>;
+}> = ({
+  children,
+  roomCode,
+  playerName,
+  playerAvatar,
+  raceRound = 0,
+  raceStatus = 'idle',
+  investigatingCompetitors = EMPTY_INVESTIGATIONS,
+}) => {
   const isSupported =
     typeof window !== 'undefined' &&
     typeof WebSocket !== 'undefined' &&
@@ -102,6 +166,9 @@ export const VoiceChatProvider: React.FC<{
   const [isDeafened, setIsDeafened] = useState<boolean>(false);
   const [isLocalSpeaking, setIsLocalSpeaking] = useState<boolean>(false);
   const [localMicLevel, setLocalMicLevel] = useState<number>(0);
+  const [preGateMicLevel, setPreGateMicLevel] = useState<number>(0);
+  const [isNoiseSuppressed, setIsNoiseSuppressed] = useState<boolean>(false);
+  const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
   const [mutedPeerIds, setMutedPeerIds] = useState<string[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [noiseGateMode, setNoiseGateModeState] = useState<VoiceNoiseGateMode>('strict');
@@ -110,6 +177,10 @@ export const VoiceChatProvider: React.FC<{
   const [connectionState, setConnectionState] = useState<
     'disconnected' | 'connecting' | 'connected' | 'offline-local'
   >('disconnected');
+  const [voiceSessionHistory, setVoiceSessionHistory] = useState<VoiceActivitySessionLog[]>([]);
+  const [currentVoiceActivity, setCurrentVoiceActivity] = useState<VoiceActivitySessionLog | null>(
+    null
+  );
 
   const peerIdRef = useRef<string>(getSessionPlayerId());
   const wsRef = useRef<WebSocket | null>(null);
@@ -117,11 +188,18 @@ export const VoiceChatProvider: React.FC<{
   const processedStreamRef = useRef<MediaStream | null>(null);
   const pcsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const gateGainRef = useRef<GainNode | null>(null);
-  const micMonitorRafRef = useRef<number | null>(null);
+  const audioProcessorRef = useRef<VoiceAudioProcessorHandle | null>(null);
+  const lastSpeakingEmitRef = useRef<boolean>(false);
+  const lastSpeakEmitTimeRef = useRef<number>(0);
+  const lastUiLevelEmitRef = useRef<number>(0);
+  const lastUiLevelRef = useRef<number>(0);
+  const lastPreLevelRef = useRef<number>(0);
+  const lastSuppressedRef = useRef<boolean>(false);
 
   const identityRef = useRef({ roomCode, playerName, playerAvatar });
+  const raceRoundRef = useRef<number>(raceRound);
+  const raceStatusRef = useRef<GameStatus>(raceStatus);
+  const activityTrackerRef = useRef<ActiveVoiceActivityTracker | null>(null);
   const micMutedRef = useRef(isMicMuted);
   const deafenedRef = useRef(isDeafened);
   const channelModeRef = useRef(channelMode);
@@ -131,38 +209,266 @@ export const VoiceChatProvider: React.FC<{
   const anyRemoteSpeakingRef = useRef<boolean>(false);
   const mutedPeersSetRef = useRef<Set<string>>(new Set());
 
+  const refreshVoiceHistory = useCallback(async () => {
+    const rows = await listVoiceActivitySessions(30);
+    setVoiceSessionHistory(rows);
+  }, []);
+
+  const clearVoiceHistory = useCallback(async () => {
+    await clearVoiceActivitySessions();
+    setVoiceSessionHistory([]);
+  }, []);
+
+  const buildActivitySnapshot = useCallback(
+    (tracker: ActiveVoiceActivityTracker, nowMs: number, endedAt: number | null): VoiceActivitySessionLog => {
+      const extraConnected =
+        tracker.connectedSinceMs !== null ? Math.max(0, nowMs - tracker.connectedSinceMs) : 0;
+      const extraUnmuted =
+        tracker.unmutedSinceMs !== null ? Math.max(0, nowMs - tracker.unmutedSinceMs) : 0;
+      const extraSpeaking =
+        tracker.speakingSinceMs !== null ? Math.max(0, nowMs - tracker.speakingSinceMs) : 0;
+
+      return {
+        id: tracker.id,
+        roomCode: tracker.roomCode,
+        raceRound: tracker.raceRound,
+        channelMode: tracker.channelMode,
+        playerName: tracker.playerName,
+        startedAt: tracker.startedAt,
+        lastSavedAt: nowMs,
+        endedAt,
+        activeVoiceConnectedMs: Math.round(tracker.activeVoiceConnectedMs + extraConnected),
+        micUnmutedMs: Math.round(tracker.micUnmutedMs + extraUnmuted),
+        speakingDurationMs: Math.round(tracker.speakingDurationMs + extraSpeaking),
+        speakingBurstCount: tracker.speakingBurstCount,
+        peakLevel: Number(tracker.peakLevel.toFixed(3)),
+        avgSpeakingLevel:
+          tracker.levelSamples > 0
+            ? Number((tracker.levelSum / tracker.levelSamples).toFixed(3))
+            : 0,
+        noiseSuppressedEvents: tracker.noiseSuppressedEvents,
+      };
+    },
+    []
+  );
+
+  const settleTrackerClocks = useCallback((tracker: ActiveVoiceActivityTracker, nowMs: number) => {
+    if (tracker.connectedSinceMs !== null) {
+      tracker.activeVoiceConnectedMs += Math.max(0, nowMs - tracker.connectedSinceMs);
+      tracker.connectedSinceMs = nowMs;
+      tracker.dirty = true;
+    }
+    if (tracker.unmutedSinceMs !== null) {
+      tracker.micUnmutedMs += Math.max(0, nowMs - tracker.unmutedSinceMs);
+      tracker.unmutedSinceMs = nowMs;
+      tracker.dirty = true;
+    }
+    if (tracker.speakingSinceMs !== null) {
+      tracker.speakingDurationMs += Math.max(0, nowMs - tracker.speakingSinceMs);
+      tracker.speakingSinceMs = nowMs;
+      tracker.dirty = true;
+    }
+  }, []);
+
+  const createFreshTracker = useCallback((nowMs: number): ActiveVoiceActivityTracker => {
+    const cleanCode = (identityRef.current.roomCode || 'ARENA').trim().toUpperCase();
+    const round = Math.max(0, Math.round(raceRoundRef.current || 0));
+    const isSpeakingNow = joinedRef.current && !micMutedRef.current && lastSpeakingEmitRef.current;
+    return {
+      id: `${cleanCode}:R${round}:${nowMs}`,
+      roomCode: cleanCode,
+      raceRound: round,
+      channelMode: channelModeRef.current,
+      playerName: identityRef.current.playerName || 'Corredor',
+      startedAt: nowMs,
+      activeVoiceConnectedMs: 0,
+      micUnmutedMs: 0,
+      speakingDurationMs: 0,
+      speakingBurstCount: isSpeakingNow ? 1 : 0,
+      peakLevel: 0,
+      levelSum: 0,
+      levelSamples: 0,
+      noiseSuppressedEvents: 0,
+      connectedSinceMs: joinedRef.current ? nowMs : null,
+      unmutedSinceMs: joinedRef.current && !micMutedRef.current ? nowMs : null,
+      speakingSinceMs: isSpeakingNow ? nowMs : null,
+      wasSuppressed: false,
+      dirty: false,
+    };
+  }, []);
+
+  const flushActivityToDb = useCallback(
+    async (finalizeSession = false) => {
+      const tracker = activityTrackerRef.current;
+      if (!tracker) return;
+
+      const nowMs = Date.now();
+      settleTrackerClocks(tracker, nowMs);
+
+      const hasMeaningfulActivity =
+        tracker.activeVoiceConnectedMs >= 1000 ||
+        tracker.speakingDurationMs > 0 ||
+        tracker.speakingBurstCount > 0;
+
+      if (!hasMeaningfulActivity) {
+        if (finalizeSession) {
+          activityTrackerRef.current = null;
+          setCurrentVoiceActivity(null);
+        }
+        return;
+      }
+
+      const snapshot = buildActivitySnapshot(tracker, nowMs, finalizeSession ? nowMs : null);
+      if (finalizeSession) {
+        activityTrackerRef.current = null;
+        setCurrentVoiceActivity(null);
+      } else {
+        tracker.dirty = false;
+        setCurrentVoiceActivity(snapshot);
+      }
+
+      const saved = await upsertVoiceActivitySession(snapshot);
+      if (saved) {
+        await refreshVoiceHistory();
+      }
+    },
+    [buildActivitySnapshot, refreshVoiceHistory, settleTrackerClocks]
+  );
+
+  useEffect(() => {
+    void refreshVoiceHistory();
+  }, [refreshVoiceHistory]);
+
+  const syncProcessorParams = useCallback(() => {
+    audioProcessorRef.current?.updateParams({
+      micMuted: micMutedRef.current,
+      deafened: deafenedRef.current,
+      noiseGateMode: noiseGateModeRef.current,
+      hasHeadset: hasHeadsetRef.current,
+      remoteSpeaking: anyRemoteSpeakingRef.current,
+    });
+  }, []);
+
   useEffect(() => {
     identityRef.current = { roomCode, playerName, playerAvatar };
+    if (activityTrackerRef.current) {
+      activityTrackerRef.current.playerName = playerName || activityTrackerRef.current.playerName;
+    }
   }, [roomCode, playerName, playerAvatar]);
 
   useEffect(() => {
     micMutedRef.current = isMicMuted;
-  }, [isMicMuted]);
+    const tracker = activityTrackerRef.current;
+    if (tracker) {
+      const nowMs = Date.now();
+      settleTrackerClocks(tracker, nowMs);
+      if (isMicMuted || !joinedRef.current) {
+        tracker.unmutedSinceMs = null;
+        tracker.speakingSinceMs = null;
+      } else if (tracker.unmutedSinceMs === null) {
+        tracker.unmutedSinceMs = nowMs;
+      }
+      setCurrentVoiceActivity(buildActivitySnapshot(tracker, nowMs, null));
+    }
+    syncProcessorParams();
+  }, [buildActivitySnapshot, isMicMuted, settleTrackerClocks, syncProcessorParams]);
 
   useEffect(() => {
     deafenedRef.current = isDeafened;
     for (const [pId, audioEl] of remoteAudiosRef.current.entries()) {
       audioEl.muted = isDeafened || mutedPeersSetRef.current.has(pId);
     }
-  }, [isDeafened]);
+    syncProcessorParams();
+  }, [isDeafened, syncProcessorParams]);
 
   useEffect(() => {
     channelModeRef.current = channelMode;
+    if (activityTrackerRef.current) {
+      activityTrackerRef.current.channelMode = channelMode;
+      activityTrackerRef.current.dirty = true;
+    }
   }, [channelMode]);
 
   useEffect(() => {
     joinedRef.current = isJoined;
-  }, [isJoined]);
+    const nowMs = Date.now();
+    if (isJoined) {
+      if (!activityTrackerRef.current) {
+        activityTrackerRef.current = createFreshTracker(nowMs);
+      } else {
+        settleTrackerClocks(activityTrackerRef.current, nowMs);
+        activityTrackerRef.current.connectedSinceMs = nowMs;
+        if (!micMutedRef.current) {
+          activityTrackerRef.current.unmutedSinceMs = nowMs;
+        }
+      }
+      setCurrentVoiceActivity(buildActivitySnapshot(activityTrackerRef.current, nowMs, null));
+    } else if (activityTrackerRef.current) {
+      activityTrackerRef.current.connectedSinceMs = null;
+      activityTrackerRef.current.unmutedSinceMs = null;
+      activityTrackerRef.current.speakingSinceMs = null;
+    }
+  }, [buildActivitySnapshot, createFreshTracker, isJoined, settleTrackerClocks]);
+
+  useEffect(() => {
+    const prevRound = raceRoundRef.current;
+    const prevStatus = raceStatusRef.current;
+    raceRoundRef.current = raceRound;
+    raceStatusRef.current = raceStatus;
+
+    if (!joinedRef.current) return;
+
+    const roundStarted = raceRound > 0 && raceRound !== prevRound;
+    const raceCompleted = raceStatus === 'completed' && prevStatus !== 'completed';
+
+    if (roundStarted) {
+      void (async () => {
+        await flushActivityToDb(true);
+        if (joinedRef.current) {
+          const fresh = createFreshTracker(Date.now());
+          activityTrackerRef.current = fresh;
+          setCurrentVoiceActivity(buildActivitySnapshot(fresh, Date.now(), null));
+        }
+      })();
+    } else if (raceCompleted) {
+      void flushActivityToDb(true);
+    }
+  }, [
+    buildActivitySnapshot,
+    createFreshTracker,
+    flushActivityToDb,
+    raceRound,
+    raceStatus,
+  ]);
+
+  useEffect(() => {
+    if (!isJoined) return;
+    const intervalId = setInterval(() => {
+      void flushActivityToDb(false);
+    }, VOICE_ACTIVITY_SAVE_INTERVAL_MS);
+
+    const handlePageHide = () => {
+      void flushActivityToDb(false);
+    };
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [flushActivityToDb, isJoined]);
 
   useEffect(() => {
     noiseGateModeRef.current = noiseGateMode;
-  }, [noiseGateMode]);
+    syncProcessorParams();
+  }, [noiseGateMode, syncProcessorParams]);
 
   useEffect(() => {
     anyRemoteSpeakingRef.current = peers.some(
       (p) => p.speaking && !p.muted && !mutedPeerIds.includes(p.peerId)
     );
-  }, [peers, mutedPeerIds]);
+    syncProcessorParams();
+  }, [peers, mutedPeerIds, syncProcessorParams]);
 
   const refreshAudioDevices = useCallback(async (): Promise<{
     preferredInputId?: string;
@@ -180,6 +486,7 @@ export const VoiceChatProvider: React.FC<{
       const detected = Boolean(headsetInput || headsetOutput);
       hasHeadsetRef.current = detected;
       setHasHeadset(detected);
+      syncProcessorParams();
       if (headsetInput?.label) {
         setSelectedMicLabel(headsetInput.label);
       }
@@ -190,7 +497,7 @@ export const VoiceChatProvider: React.FC<{
     } catch {
       return { detectedHeadset: false };
     }
-  }, []);
+  }, [syncProcessorParams]);
 
   useEffect(() => {
     refreshAudioDevices().catch(() => {});
@@ -223,20 +530,19 @@ export const VoiceChatProvider: React.FC<{
     }
   }, []);
 
-  const setNoiseGateMode = useCallback((mode: VoiceNoiseGateMode) => {
-    noiseGateModeRef.current = mode;
-    setNoiseGateModeState(mode);
-  }, []);
+  const setNoiseGateMode = useCallback(
+    (mode: VoiceNoiseGateMode) => {
+      noiseGateModeRef.current = mode;
+      setNoiseGateModeState(mode);
+      syncProcessorParams();
+    },
+    [syncProcessorParams]
+  );
 
   const stopAudioPipeline = useCallback(() => {
-    if (micMonitorRafRef.current) {
-      cancelAnimationFrame(micMonitorRafRef.current);
-      micMonitorRafRef.current = null;
-    }
-    gateGainRef.current = null;
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
-      audioCtxRef.current = null;
+    if (audioProcessorRef.current) {
+      audioProcessorRef.current.dispose();
+      audioProcessorRef.current = null;
     }
     if (processedStreamRef.current) {
       processedStreamRef.current.getTracks().forEach((tr) => tr.stop());
@@ -246,12 +552,19 @@ export const VoiceChatProvider: React.FC<{
       rawMicStreamRef.current.getTracks().forEach((tr) => tr.stop());
       rawMicStreamRef.current = null;
     }
+    lastSpeakingEmitRef.current = false;
+    lastUiLevelRef.current = 0;
+    lastPreLevelRef.current = 0;
+    lastSuppressedRef.current = false;
     setLocalMicLevel(0);
+    setPreGateMicLevel(0);
+    setIsNoiseSuppressed(false);
+    setAnalyserNode(null);
     setIsLocalSpeaking(false);
   }, []);
 
   const buildProcessedVocalPipeline = useCallback(
-    (rawStream: MediaStream): MediaStream => {
+    async (rawStream: MediaStream): Promise<MediaStream> => {
       stopAudioPipeline();
       rawMicStreamRef.current = rawStream;
 
@@ -264,169 +577,110 @@ export const VoiceChatProvider: React.FC<{
         }
       }
 
-      try {
-        const AudioCtx =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        if (!AudioCtx) {
-          processedStreamRef.current = rawStream;
-          return rawStream;
-        }
+      const handleTelemetry = ({
+        preGateRms,
+        postGateRms,
+        gateOpen,
+      }: VoiceProcessorTelemetry) => {
+        const nowPerf = performance.now();
+        const muted = micMutedRef.current;
 
-        const ctx = new AudioCtx({ latencyHint: 'interactive' });
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {});
-        }
-        audioCtxRef.current = ctx;
-
-        const source = ctx.createMediaStreamSource(rawStream);
-
-        // Corta ruídos graves de fundo (vento, ventoinha, trânsito, vibração)
-        const highpass = ctx.createBiquadFilter();
-        highpass.type = 'highpass';
-        highpass.frequency.value = 120;
-        highpass.Q.value = 0.707;
-
-        // Corta chiado agudo, teclas e interferência ambiente acima da faixa vocal
-        const lowpass = ctx.createBiquadFilter();
-        lowpass.type = 'lowpass';
-        lowpass.frequency.value = 3600;
-        lowpass.Q.value = 0.707;
-
-        // Realce suave de presença da voz próxima ao microfone
-        const presence = ctx.createBiquadFilter();
-        presence.type = 'peaking';
-        presence.frequency.value = 1900;
-        presence.Q.value = 1.0;
-        presence.gain.value = 2.5;
-
-        // Compressor suave para evitar picos e manter volume da voz estável
-        const compressor = ctx.createDynamicsCompressor();
-        compressor.threshold.value = -18;
-        compressor.knee.value = 14;
-        compressor.ratio.value = 3.5;
-        compressor.attack.value = 0.004;
-        compressor.release.value = 0.14;
-
-        // Analyser lê apenas a banda vocal já filtrada para não abrir com barulho grave/agudo
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 512;
-
-        // Noise Gate digital: inicia fechado (0) para não enviar ruído ambiente quando não há voz de perto
-        const gateGain = ctx.createGain();
-        gateGain.gain.value = 0;
-        gateGainRef.current = gateGain;
-
-        const dest = ctx.createMediaStreamDestination();
-        source.connect(highpass);
-        highpass.connect(lowpass);
-        lowpass.connect(presence);
-        presence.connect(analyser);
-        presence.connect(compressor);
-        compressor.connect(gateGain);
-        gateGain.connect(dest);
-
-        processedStreamRef.current = dest.stream;
-
-        const timeBuf = new Float32Array(analyser.fftSize);
-        let gateOpen = false;
-        let holdUntilMs = 0;
-        let lastSpeakingEmit = false;
-        let lastEmitTime = 0;
-        let lastUiLevelEmit = 0;
-        let lastUiLevel = 0;
-
-        const tick = () => {
-          if (audioCtxRef.current !== ctx) return;
-          if (ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-          }
-
-          analyser.getFloatTimeDomainData(timeBuf);
-          let sumSq = 0;
-          for (let i = 0; i < timeBuf.length; i++) {
-            const sample = timeBuf[i];
-            sumSq += sample * sample;
-          }
-          const rms = Math.sqrt(sumSq / timeBuf.length);
-          const nowPerf = performance.now();
-          const nowAudio = ctx.currentTime;
-
-          const strict = noiseGateModeRef.current === 'strict';
-          // Anti-eco: se não houver auriculares e outro jogador estiver falando nas colunas, exige voz mais forte/próxima
-          const speakerEchoGuard =
-            !hasHeadsetRef.current && anyRemoteSpeakingRef.current && !deafenedRef.current
-              ? 0.024
-              : 0;
-          const openThreshold = (strict ? 0.032 : 0.017) + speakerEchoGuard;
-          const closeThreshold = openThreshold * 0.65;
-          const holdDurationMs = strict ? 210 : 300;
-
-          if (micMutedRef.current) {
-            gateOpen = false;
-            holdUntilMs = 0;
-            gateGain.gain.setTargetAtTime(0, nowAudio, 0.01);
-            rawStream.getAudioTracks().forEach((tr) => {
-              tr.enabled = false;
-            });
-            dest.stream.getAudioTracks().forEach((tr) => {
-              tr.enabled = false;
-            });
-          } else {
-            rawStream.getAudioTracks().forEach((tr) => {
-              if (!tr.enabled) tr.enabled = true;
-            });
-            dest.stream.getAudioTracks().forEach((tr) => {
-              if (!tr.enabled) tr.enabled = true;
-            });
-
-            if (rms >= openThreshold) {
-              gateOpen = true;
-              holdUntilMs = nowPerf + holdDurationMs;
-            } else if (gateOpen && rms < closeThreshold && nowPerf > holdUntilMs) {
-              gateOpen = false;
-            }
-
-            const targetGain = gateOpen ? 1.0 : 0.0;
-            gateGain.gain.setTargetAtTime(targetGain, nowAudio, gateOpen ? 0.012 : 0.045);
-          }
-
-          const visualLevel = micMutedRef.current
+        // Nível final estritamente após High-Pass + Noise Gate (0 quando fechado)
+        const postVisualLevel =
+          muted || postGateRms < 0.0012
             ? 0
-            : gateOpen
-            ? Math.min(1, Math.max(0.15, rms * 10.5))
-            : Math.min(0.22, rms * 4.5);
+            : Math.min(1, Math.pow(postGateRms * 7.2, 0.72));
 
-          if (nowPerf - lastUiLevelEmit > 85 && Math.abs(visualLevel - lastUiLevel) > 0.03) {
-            lastUiLevelEmit = nowPerf;
-            lastUiLevel = visualLevel;
-            setLocalMicLevel(visualLevel);
+        // Nível após High-Pass antes do Noise Gate (para feedback visual de rejeição de ruído)
+        const preVisualLevel =
+          muted || preGateRms < 0.0015
+            ? 0
+            : Math.min(1, Math.pow(preGateRms * 6.5, 0.75));
+
+        const suppressedNow = !muted && !gateOpen && preGateRms >= 0.003;
+
+        if (
+          nowPerf - lastUiLevelEmitRef.current > 65 &&
+          (Math.abs(postVisualLevel - lastUiLevelRef.current) > 0.015 ||
+            Math.abs(preVisualLevel - lastPreLevelRef.current) > 0.025 ||
+            suppressedNow !== lastSuppressedRef.current)
+        ) {
+          lastUiLevelEmitRef.current = nowPerf;
+          lastUiLevelRef.current = postVisualLevel;
+          lastPreLevelRef.current = preVisualLevel;
+          lastSuppressedRef.current = suppressedNow;
+          setLocalMicLevel(postVisualLevel);
+          setPreGateMicLevel(preVisualLevel);
+          setIsNoiseSuppressed(suppressedNow);
+        }
+
+        const speakingNow = !muted && gateOpen;
+        const tracker = activityTrackerRef.current;
+        if (tracker && joinedRef.current) {
+          if (suppressedNow && !tracker.wasSuppressed) {
+            tracker.noiseSuppressedEvents += 1;
+            tracker.dirty = true;
+          }
+          tracker.wasSuppressed = suppressedNow;
+
+          if (speakingNow) {
+            tracker.peakLevel = Math.max(tracker.peakLevel, postVisualLevel);
+            tracker.levelSum += postVisualLevel;
+            tracker.levelSamples += 1;
+            tracker.dirty = true;
+          }
+        }
+
+        if (
+          speakingNow !== lastSpeakingEmitRef.current &&
+          (!speakingNow ? nowPerf - lastSpeakEmitTimeRef.current > 120 : true)
+        ) {
+          lastSpeakingEmitRef.current = speakingNow;
+          lastSpeakEmitTimeRef.current = nowPerf;
+          setIsLocalSpeaking(speakingNow);
+
+          if (tracker && joinedRef.current) {
+            const nowWall = Date.now();
+            settleTrackerClocks(tracker, nowWall);
+            if (speakingNow) {
+              if (tracker.speakingSinceMs === null) {
+                tracker.speakingBurstCount += 1;
+                tracker.speakingSinceMs = nowWall;
+              }
+            } else {
+              tracker.speakingSinceMs = null;
+            }
+            tracker.dirty = true;
+            setCurrentVoiceActivity(buildActivitySnapshot(tracker, nowWall, null));
           }
 
-          const speakingNow = !micMutedRef.current && gateOpen;
-          if (speakingNow !== lastSpeakingEmit && nowPerf - lastEmitTime > 160) {
-            lastSpeakingEmit = speakingNow;
-            lastEmitTime = nowPerf;
-            setIsLocalSpeaking(speakingNow);
-            sendSignal({
-              type: 'voice:state',
-              muted: micMutedRef.current,
-              deafened: deafenedRef.current,
-              speaking: speakingNow,
-            });
-          }
+          sendSignal({
+            type: 'voice:state',
+            muted,
+            deafened: deafenedRef.current,
+            speaking: speakingNow,
+          });
+        }
+      };
 
-          micMonitorRafRef.current = requestAnimationFrame(tick);
-        };
+      const handle = await createVoiceAudioProcessor(
+        rawStream,
+        {
+          micMuted: micMutedRef.current,
+          deafened: deafenedRef.current,
+          noiseGateMode: noiseGateModeRef.current,
+          hasHeadset: hasHeadsetRef.current,
+          remoteSpeaking: anyRemoteSpeakingRef.current,
+        },
+        handleTelemetry
+      );
 
-        micMonitorRafRef.current = requestAnimationFrame(tick);
-        return dest.stream;
-      } catch {
-        processedStreamRef.current = rawStream;
-        return rawStream;
-      }
+      audioProcessorRef.current = handle;
+      processedStreamRef.current = handle.outputStream;
+      setAnalyserNode(handle.analyserNode);
+      return handle.outputStream;
     },
-    [sendSignal, stopAudioPipeline]
+    [buildActivitySnapshot, sendSignal, settleTrackerClocks, stopAudioPipeline]
   );
 
   const closePeerConnection = useCallback((remotePeerId: string) => {
@@ -491,9 +745,10 @@ export const VoiceChatProvider: React.FC<{
 
   useEffect(() => {
     return () => {
+      void flushActivityToDb(true);
       cleanupAllConnections();
     };
-  }, [cleanupAllConnections]);
+  }, [cleanupAllConnections, flushActivityToDb]);
 
   const acquireMicStream = useCallback(async (): Promise<MediaStream | null> => {
     if (processedStreamRef.current && rawMicStreamRef.current) {
@@ -530,8 +785,18 @@ export const VoiceChatProvider: React.FC<{
         audio: audioConstraints,
         video: false,
       });
+      const micTrack = rawStream.getAudioTracks()[0];
+      if (micTrack?.applyConstraints) {
+        micTrack
+          .applyConstraints({
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: false,
+          })
+          .catch(() => {});
+      }
       await refreshAudioDevices();
-      const processed = buildProcessedVocalPipeline(rawStream);
+      const processed = await buildProcessedVocalPipeline(rawStream);
       return processed;
     } catch {
       setErrorMsg('Permissão de microfone recusada. Podes continuar apenas a ouvir!');
@@ -868,13 +1133,16 @@ export const VoiceChatProvider: React.FC<{
           });
           setIsMicMuted(false);
           micMutedRef.current = false;
+          audioProcessorRef.current?.updateParams({ micMuted: false });
         } else {
           setIsMicMuted(true);
           micMutedRef.current = true;
+          audioProcessorRef.current?.updateParams({ micMuted: true });
         }
       } else {
         setIsMicMuted(true);
         micMutedRef.current = true;
+        audioProcessorRef.current?.updateParams({ micMuted: true });
       }
 
       setIsJoined(true);
@@ -891,6 +1159,7 @@ export const VoiceChatProvider: React.FC<{
   );
 
   const leaveVoice = useCallback(() => {
+    void flushActivityToDb(true);
     setIsJoined(false);
     joinedRef.current = false;
     setIsMicMuted(true);
@@ -898,7 +1167,46 @@ export const VoiceChatProvider: React.FC<{
     setConnectionState('disconnected');
     setErrorMsg(null);
     cleanupAllConnections();
-  }, [cleanupAllConnections]);
+  }, [cleanupAllConnections, flushActivityToDb]);
+
+  const muteMicrophone = useCallback(() => {
+    setErrorMsg(null);
+    rawMicStreamRef.current?.getAudioTracks().forEach((t) => {
+      t.enabled = false;
+    });
+    processedStreamRef.current?.getAudioTracks().forEach((t) => {
+      t.enabled = false;
+    });
+    for (const pc of pcsRef.current.values()) {
+      pc.getSenders().forEach((sender) => {
+        if (sender.track && sender.track.kind === 'audio') {
+          sender.track.enabled = false;
+        }
+      });
+    }
+
+    setIsMicMuted(true);
+    micMutedRef.current = true;
+    audioProcessorRef.current?.updateParams({ micMuted: true });
+
+    lastSpeakingEmitRef.current = false;
+    lastUiLevelRef.current = 0;
+    lastPreLevelRef.current = 0;
+    lastSuppressedRef.current = false;
+    setIsLocalSpeaking(false);
+    setLocalMicLevel(0);
+    setPreGateMicLevel(0);
+    setIsNoiseSuppressed(false);
+
+    if (joinedRef.current) {
+      sendSignal({
+        type: 'voice:state',
+        muted: true,
+        deafened: deafenedRef.current,
+        speaking: false,
+      });
+    }
+  }, [sendSignal]);
 
   const toggleMic = useCallback(async () => {
     setErrorMsg(null);
@@ -911,8 +1219,7 @@ export const VoiceChatProvider: React.FC<{
     if (!nextMuted) {
       const stream = await acquireMicStream();
       if (!stream) {
-        setIsMicMuted(true);
-        micMutedRef.current = true;
+        muteMicrophone();
         return;
       }
       rawMicStreamRef.current?.getAudioTracks().forEach((t) => {
@@ -923,33 +1230,26 @@ export const VoiceChatProvider: React.FC<{
       });
       for (const pc of pcsRef.current.values()) {
         await attachLocalTrackToPeer(pc);
+        pc.getSenders().forEach((sender) => {
+          if (sender.track && sender.track.kind === 'audio') {
+            sender.track.enabled = true;
+          }
+        });
       }
+
+      setIsMicMuted(false);
+      micMutedRef.current = false;
+      audioProcessorRef.current?.updateParams({ micMuted: false });
+      sendSignal({
+        type: 'voice:state',
+        muted: false,
+        deafened: deafenedRef.current,
+        speaking: false,
+      });
     } else {
-      rawMicStreamRef.current?.getAudioTracks().forEach((t) => {
-        t.enabled = false;
-      });
-      processedStreamRef.current?.getAudioTracks().forEach((t) => {
-        t.enabled = false;
-      });
-      if (gateGainRef.current && audioCtxRef.current) {
-        gateGainRef.current.gain.setTargetAtTime(0, audioCtxRef.current.currentTime, 0.01);
-      }
+      muteMicrophone();
     }
-
-    setIsMicMuted(nextMuted);
-    micMutedRef.current = nextMuted;
-    if (nextMuted) {
-      setIsLocalSpeaking(false);
-      setLocalMicLevel(0);
-    }
-
-    sendSignal({
-      type: 'voice:state',
-      muted: nextMuted,
-      deafened: deafenedRef.current,
-      speaking: false,
-    });
-  }, [acquireMicStream, attachLocalTrackToPeer, joinVoice, sendSignal]);
+  }, [acquireMicStream, attachLocalTrackToPeer, joinVoice, muteMicrophone, sendSignal]);
 
   const toggleDeafen = useCallback(() => {
     const nextDeafened = !deafenedRef.current;
@@ -998,13 +1298,30 @@ export const VoiceChatProvider: React.FC<{
     (newCode: string, newName: string, newAvatar: string) => {
       const changedRoom = identityRef.current.roomCode !== newCode;
       identityRef.current = { roomCode: newCode, playerName: newName, playerAvatar: newAvatar };
-      if (joinedRef.current && changedRoom && channelModeRef.current === 'private') {
-        clearAllPeerConnections();
-        setPeers([]);
-        connectWebSocket('private');
+      if (joinedRef.current && changedRoom) {
+        void (async () => {
+          await flushActivityToDb(true);
+          if (joinedRef.current) {
+            const nowMs = Date.now();
+            const fresh = createFreshTracker(nowMs);
+            activityTrackerRef.current = fresh;
+            setCurrentVoiceActivity(buildActivitySnapshot(fresh, nowMs, null));
+          }
+        })();
+        if (channelModeRef.current === 'private') {
+          clearAllPeerConnections();
+          setPeers([]);
+          connectWebSocket('private');
+        }
       }
     },
-    [clearAllPeerConnections, connectWebSocket]
+    [
+      buildActivitySnapshot,
+      clearAllPeerConnections,
+      connectWebSocket,
+      createFreshTracker,
+      flushActivityToDb,
+    ]
   );
 
   useEffect(() => {
@@ -1025,19 +1342,28 @@ export const VoiceChatProvider: React.FC<{
       isDeafened,
       isLocalSpeaking,
       localMicLevel,
+      preGateMicLevel,
+      isNoiseSuppressed,
+      analyserNode,
       mutedPeerIds,
       errorMsg,
       noiseGateMode,
       hasHeadset,
       selectedMicLabel,
+      investigatingCompetitors,
+      voiceSessionHistory,
+      currentVoiceActivity,
       setNoiseGateMode,
       joinVoice,
       leaveVoice,
       toggleMic,
+      muteMicrophone,
       toggleDeafen,
       switchChannelMode,
       toggleMutePeer,
       updateIdentity,
+      refreshVoiceHistory,
+      clearVoiceHistory,
     }),
     [
       isSupported,
@@ -1052,19 +1378,28 @@ export const VoiceChatProvider: React.FC<{
       isDeafened,
       isLocalSpeaking,
       localMicLevel,
+      preGateMicLevel,
+      isNoiseSuppressed,
+      analyserNode,
       mutedPeerIds,
       errorMsg,
       noiseGateMode,
       hasHeadset,
       selectedMicLabel,
+      investigatingCompetitors,
+      voiceSessionHistory,
+      currentVoiceActivity,
       setNoiseGateMode,
       joinVoice,
       leaveVoice,
       toggleMic,
+      muteMicrophone,
       toggleDeafen,
       switchChannelMode,
       toggleMutePeer,
       updateIdentity,
+      refreshVoiceHistory,
+      clearVoiceHistory,
     ]
   );
 

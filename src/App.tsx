@@ -13,8 +13,10 @@ import {
   RemoteRunnerSnapshot,
   LocalRunnerTelemetry,
   RoomStandingEntry,
+  TelemetryInvestigationEntry,
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
+import { ClientTelemetryValidator } from './utils/telemetryValidator';
 import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy, Camera } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
@@ -392,9 +394,14 @@ export default function App() {
       : `AUTO_PUBLIC_${isDemo ? 'DEMO' : 'REAL'}`
   );
   const remotePlayersRef = useRef<Map<string, RemoteRunnerSnapshot>>(new Map());
+  const telemetryValidatorRef = useRef<ClientTelemetryValidator>(new ClientTelemetryValidator());
+  const [investigatingCompetitors, setInvestigatingCompetitors] = useState<
+    Record<string, TelemetryInvestigationEntry>
+  >({});
   const roomWsRef = useRef<WebSocket | null>(null);
   const serverClockOffsetRef = useRef<number>(0);
   const activeRaceRoundRef = useRef<number>(0);
+  const [activeRaceRound, setActiveRaceRound] = useState<number>(0);
   const startedRoundSetRef = useRef<Set<number>>(new Set());
   const finalizedRoundSetRef = useRef<Set<number>>(new Set());
   const activeBetForRoundRef = useRef<number>(betAmount);
@@ -409,6 +416,32 @@ export default function App() {
   const [authoritativeRankings, setAuthoritativeRankings] = useState<RoomStandingEntry[] | null>(null);
   const [pendingSyncPodium, setPendingSyncPodium] = useState<boolean>(false);
   const [wsReconnectNonce, setWsReconnectNonce] = useState<number>(0);
+
+  useEffect(() => {
+    telemetryValidatorRef.current.setSessionContext({
+      roomCode: roomConfig.code,
+      raceRound: activeRaceRoundRef.current,
+      reporterId: getSessionPlayerId(),
+    });
+  }, [roomConfig.code]);
+
+  useEffect(() => {
+    void telemetryValidatorRef.current.flushBatch();
+    telemetryValidatorRef.current.resetAll();
+    setInvestigatingCompetitors({});
+  }, [wsRoomSessionKey]);
+
+  useEffect(() => {
+    const validator = telemetryValidatorRef.current;
+    const handlePageHide = () => {
+      void validator.flushBatch(true);
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      validator.dispose();
+    };
+  }, []);
 
   const handleShareRoomUrl = useCallback(async () => {
     if (typeof window === 'undefined') return;
@@ -747,6 +780,8 @@ export default function App() {
       },
     ];
   });
+  const competitorsRef = useRef<Competitor[]>(competitors);
+  competitorsRef.current = competitors;
 
   // 11. Resultados e Histórico
   const [lastPayout, setLastPayout] = useState<number | null>(null);
@@ -1076,6 +1111,7 @@ export default function App() {
 
     startedFromRoomRef.current = fromRoom;
     activeRaceRoundRef.current = 0;
+    setActiveRaceRound(0);
     activeBetForRoundRef.current = effectiveBet;
     remotePlayersRef.current.clear();
     setAuthoritativeRankings(null);
@@ -1174,6 +1210,7 @@ export default function App() {
       setStatus('completed');
       setCompetitors(finalCompetitors);
       setLastPerformance(performance ?? null);
+      void telemetryValidatorRef.current.flushBatch();
 
       const usedBet = activeBetForRoundRef.current || betAmount;
       const roundKey = activeRaceRoundRef.current;
@@ -1936,6 +1973,7 @@ export default function App() {
       selectingProfile?: boolean;
       connected?: boolean;
       betAmount?: number;
+      sessionStatus?: 'normal' | 'investigating';
     };
 
     type ServerRoomPayload = {
@@ -2034,6 +2072,7 @@ export default function App() {
           );
           const existingBots = prev.filter((c) => c.isBot);
 
+          const activeInvestigations = telemetryValidatorRef.current.getInvestigations();
           const humanCompetitors: Competitor[] = remoteOthers.map((p, idx) => {
             const rivalLane: Lane =
               typeof p.lane === 'number' && p.lane >= 0 && p.lane <= 4
@@ -2058,6 +2097,8 @@ export default function App() {
               isRemoteHuman: true,
               profileReady: p.profileReady !== false && !p.selectingProfile,
               betAmount: typeof p.betAmount === 'number' ? clampBetKz(p.betAmount) : serverBet,
+              sessionStatus:
+                activeInvestigations[p.id]?.sessionStatus ?? p.sessionStatus ?? 'normal',
               stumbling: false,
               finished: false,
             };
@@ -2121,8 +2162,15 @@ export default function App() {
       const effectiveBet = clampBetKz(payload.betAmount ?? roomConfigRef.current.betAmount);
 
       activeRaceRoundRef.current = payload.raceRound;
+      setActiveRaceRound(payload.raceRound);
       activeBetForRoundRef.current = effectiveBet;
       remotePlayersRef.current.clear();
+      telemetryValidatorRef.current.setSessionContext({
+        roomCode: payload.room.code || roomConfigRef.current.code,
+        raceRound: payload.raceRound,
+        reporterId: myId,
+      });
+      telemetryValidatorRef.current.resetKinematicsForNewRound();
 
       if (isDemoRef.current && balanceRef.current < effectiveBet) {
         setDemoBalance((prev) => Math.max(prev, effectiveBet) - effectiveBet);
@@ -2323,7 +2371,7 @@ export default function App() {
               ? Math.max(0, Math.min(4, msg.targetLane))
               : existing?.targetLane ?? resolvedLane
           ) as Lane;
-          remotePlayersRef.current.set(msg.playerId, {
+          const nextSnapshot: RemoteRunnerSnapshot = {
             playerId: msg.playerId,
             progressDistance:
               typeof msg.progressDistance === 'number'
@@ -2340,14 +2388,34 @@ export default function App() {
             stumbling: Boolean(msg.stumbling),
             finished: Boolean(msg.finished),
             updatedAt: Date.now(),
-          });
+          };
+          remotePlayersRef.current.set(msg.playerId, nextSnapshot);
+
+          const matchedComp = competitorsRef.current.find((c) => c.id === msg.playerId);
+          const validation = telemetryValidatorRef.current.inspectTelemetry(
+            msg.playerId,
+            matchedComp?.name || msg.playerId.slice(0, 10),
+            nextSnapshot,
+            nextSnapshot.updatedAt
+          );
+          if (validation.newlyFlagged) {
+            setInvestigatingCompetitors(telemetryValidatorRef.current.getInvestigations());
+            const flaggedId = msg.playerId;
+            setCompetitors((prev) =>
+              prev.map((c) =>
+                c.id === flaggedId ? { ...c, sessionStatus: 'investigating' } : c
+              )
+            );
+          }
           return;
         }
 
         if (msg.type === 'room:race-finished' && Array.isArray(msg.rankings)) {
           if (typeof msg.raceRound === 'number') {
             activeRaceRoundRef.current = msg.raceRound;
+            setActiveRaceRound(msg.raceRound);
           }
+          void telemetryValidatorRef.current.flushBatch();
           const finalCompetitorsList = msg.rankings.map((r) => ({
             id: r.id,
             name: r.id === myId ? `${r.name} ${t.youTag}` : r.name,
@@ -2589,6 +2657,9 @@ export default function App() {
       playerName={playerName}
       playerAvatar={currentAvatar.avatar}
       hasInviteLink={hasInviteParam}
+      raceRound={activeRaceRound > 0 ? activeRaceRound : roundNonce}
+      raceStatus={status}
+      investigatingCompetitors={investigatingCompetitors}
     >
       <div
         style={

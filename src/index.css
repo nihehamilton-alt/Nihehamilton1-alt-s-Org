@@ -443,6 +443,31 @@
   will-change: transform, opacity;
 }
 
+/* Active Noise-Gate Voice Border Glow */
+@keyframes voiceBorderPulse {
+  0%,
+  100% {
+    border-color: rgba(52, 211, 153, 0.7);
+    box-shadow:
+      0 0 0 1px rgba(52, 211, 153, 0.25),
+      0 0 16px -2px rgba(16, 185, 129, 0.38),
+      inset 0 1px 0 rgba(167, 243, 208, 0.16);
+  }
+  50% {
+    border-color: rgba(110, 231, 183, 0.95);
+    box-shadow:
+      0 0 0 2px rgba(52, 211, 153, 0.42),
+      0 0 24px 0 rgba(16, 185, 129, 0.58),
+      inset 0 1px 0 rgba(167, 243, 208, 0.26);
+  }
+}
+
+.game-panel.voice-speaking-glow,
+.game-subplate.voice-speaking-glow {
+  border-color: rgba(52, 211, 153, 0.82);
+  animation: voiceBorderPulse 1.5s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -452,7 +477,9 @@
   .podium-bg-base::after,
   .podium-rank1-shimmer,
   .podium-rank1-flare,
-  .podium-rank1-glint {
+  .podium-rank1-glint,
+  .game-panel.voice-speaking-glow,
+  .game-subplate.voice-speaking-glow {
     animation: none;
   }
 }

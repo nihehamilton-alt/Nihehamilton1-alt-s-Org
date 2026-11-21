@@ -47,6 +47,42 @@ interface RoomParticipant {
   selectingProfile?: boolean;
   connected?: boolean;
   betAmount?: number;
+  sessionStatus?: 'normal' | 'investigating';
+}
+
+type TelemetryAnomalyReason = 'impossible-speed' | 'lane-switch-flood' | 'position-teleport';
+type ServerTelemetryRiskLevel = 'normal' | 'monitor' | 'investigating' | 'high-risk';
+
+interface TelemetryAnomalyLogServer {
+  id: string;
+  roomCode: string;
+  raceRound: number;
+  reporterId: string;
+  competitorId: string;
+  competitorName: string;
+  reason: TelemetryAnomalyReason;
+  detectedAt: number;
+  receivedAt: number;
+  progressDistance: number;
+  lane: number;
+  targetLane: number;
+  laneX: number;
+  peakSpeedMps?: number;
+  switchesPerSec?: number;
+}
+
+interface ServerParticipantAnomalySummary {
+  competitorId: string;
+  competitorName: string;
+  roomCode: string;
+  totalAnomalies: number;
+  reasons: Record<TelemetryAnomalyReason, number>;
+  maxSpeedMps: number;
+  maxSwitchesPerSec: number;
+  suspicionScore: number;
+  riskLevel: ServerTelemetryRiskLevel;
+  firstDetectedAt: number;
+  lastDetectedAt: number;
 }
 
 interface RoomStandingEntryServer {
@@ -171,6 +207,137 @@ async function startServer() {
       }>;
     }
   >();
+
+  const MAX_TELEMETRY_LOGS = 2000;
+  const MAX_ANALYSES_COUNT = 500;
+  const telemetryAnomalyLogs: TelemetryAnomalyLogServer[] = [];
+  const seenAnomalyLogIds = new Set<string>();
+  const participantTelemetryAnalyses = new Map<string, ServerParticipantAnomalySummary>();
+
+  const VALID_ANOMALY_REASONS = new Set<TelemetryAnomalyReason>([
+    'impossible-speed',
+    'lane-switch-flood',
+    'position-teleport',
+  ]);
+
+  const computeServerSuspicionScore = (summary: ServerParticipantAnomalySummary): number => {
+    const weightedReasons =
+      summary.reasons['position-teleport'] * 35 +
+      summary.reasons['impossible-speed'] * 25 +
+      summary.reasons['lane-switch-flood'] * 18;
+    const distinctReasonCount = (Object.values(summary.reasons) as number[]).filter((c) => c > 0).length;
+    const repeatBonus = Math.min(45, Math.max(0, summary.totalAnomalies - 1) * 10);
+    const speedBonus = summary.maxSpeedMps > 68 ? 20 : summary.maxSpeedMps > 45 ? 10 : 0;
+    const varietyBonus = distinctReasonCount >= 2 ? 15 : 0;
+    return Math.min(100, Math.max(weightedReasons, 15) + repeatBonus + speedBonus + varietyBonus);
+  };
+
+  const resolveRiskLevel = (
+    suspicionScore: number,
+    totalAnomalies: number
+  ): ServerTelemetryRiskLevel => {
+    if (suspicionScore >= 70 || totalAnomalies >= 4) return 'high-risk';
+    if (suspicionScore >= 25 || totalAnomalies >= 1) return 'investigating';
+    return 'monitor';
+  };
+
+  const sanitizeTelemetryLog = (
+    raw: unknown,
+    fallbackRoomCode: string,
+    fallbackRaceRound: number,
+    fallbackReporterId: string,
+    receivedAt: number
+  ): TelemetryAnomalyLogServer | null => {
+    if (!raw || typeof raw !== 'object') return null;
+    const item = raw as Record<string, unknown>;
+
+    const competitorId =
+      typeof item.competitorId === 'string' ? item.competitorId.trim().slice(0, 64) : '';
+    const reason =
+      typeof item.reason === 'string' && VALID_ANOMALY_REASONS.has(item.reason as TelemetryAnomalyReason)
+        ? (item.reason as TelemetryAnomalyReason)
+        : null;
+    if (!competitorId || !reason) return null;
+
+    const roomCode = (
+      typeof item.roomCode === 'string' && item.roomCode.trim()
+        ? item.roomCode
+        : fallbackRoomCode
+    )
+      .trim()
+      .toUpperCase()
+      .slice(0, 32);
+    const reporterId = (
+      typeof item.reporterId === 'string' && item.reporterId.trim()
+        ? item.reporterId
+        : fallbackReporterId
+    )
+      .trim()
+      .slice(0, 64);
+    const competitorName = (
+      typeof item.competitorName === 'string' && item.competitorName.trim()
+        ? item.competitorName
+        : competitorId
+    )
+      .trim()
+      .slice(0, 40);
+
+    const id =
+      typeof item.id === 'string' && item.id.trim()
+        ? item.id.trim().slice(0, 96)
+        : `anom-${receivedAt}-${competitorId}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const raceRound =
+      typeof item.raceRound === 'number' && Number.isFinite(item.raceRound)
+        ? Math.max(0, Math.round(item.raceRound))
+        : fallbackRaceRound;
+    const detectedAt =
+      typeof item.detectedAt === 'number' && Number.isFinite(item.detectedAt)
+        ? Math.min(receivedAt + 5000, Math.max(0, item.detectedAt))
+        : receivedAt;
+    const progressDistance =
+      typeof item.progressDistance === 'number' && Number.isFinite(item.progressDistance)
+        ? Number(Math.max(-1000, Math.min(100000, item.progressDistance)).toFixed(2))
+        : 0;
+    const lane =
+      typeof item.lane === 'number' && Number.isFinite(item.lane)
+        ? Math.max(0, Math.min(4, Math.round(item.lane)))
+        : 0;
+    const targetLane =
+      typeof item.targetLane === 'number' && Number.isFinite(item.targetLane)
+        ? Math.max(0, Math.min(4, Math.round(item.targetLane)))
+        : lane;
+    const laneX =
+      typeof item.laneX === 'number' && Number.isFinite(item.laneX)
+        ? Number(Math.max(-2000, Math.min(4000, item.laneX)).toFixed(2))
+        : 0;
+    const peakSpeedMps =
+      typeof item.peakSpeedMps === 'number' && Number.isFinite(item.peakSpeedMps)
+        ? Number(Math.max(0, Math.min(5000, item.peakSpeedMps)).toFixed(1))
+        : undefined;
+    const switchesPerSec =
+      typeof item.switchesPerSec === 'number' && Number.isFinite(item.switchesPerSec)
+        ? Math.max(0, Math.min(500, Math.round(item.switchesPerSec)))
+        : undefined;
+
+    return {
+      id,
+      roomCode: roomCode || 'UNKNOWN',
+      raceRound,
+      reporterId: reporterId || 'anonymous',
+      competitorId,
+      competitorName,
+      reason,
+      detectedAt,
+      receivedAt,
+      progressDistance,
+      lane,
+      targetLane,
+      laneX,
+      peakSpeedMps,
+      switchesPerSec,
+    };
+  };
 
   const sendRoomWs = (ws: WebSocket, payload: unknown) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -1151,14 +1318,175 @@ async function startServer() {
       });
     }
 
+    const allAnalyses = Array.from(participantTelemetryAnalyses.values()).sort(
+      (a, b) => b.suspicionScore - a.suspicionScore || b.lastDetectedAt - a.lastDetectedAt
+    );
+
     res.json({
       ok: true,
       serverTime: Date.now(),
       storedMatches: db.matches.length,
       activeRoomsCount: roomsList.length,
       activeVoicePeersCount,
+      recentAnomalyLogsCount: telemetryAnomalyLogs.length,
+      flaggedParticipantsCount: allAnalyses.filter(
+        (entry) => entry.riskLevel === 'investigating' || entry.riskLevel === 'high-risk'
+      ).length,
+      telemetryAnalyses: allAnalyses.slice(0, 20),
       rooms: roomsList.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20),
       voiceChannels,
+    });
+  });
+
+  app.post('/api/telemetry/anomalies/batch', (req: Request, res: Response) => {
+    const body = req.body as {
+      roomCode?: unknown;
+      raceRound?: unknown;
+      reporterId?: unknown;
+      logs?: unknown;
+    };
+
+    if (!body || !Array.isArray(body.logs)) {
+      res.status(400).json({ ok: false, error: 'logs array is required' });
+      return;
+    }
+
+    if (body.logs.length > 100) {
+      res.status(400).json({ ok: false, error: 'Batch exceeds maximum of 100 logs' });
+      return;
+    }
+
+    const receivedAt = Date.now();
+    const fallbackRoomCode =
+      typeof body.roomCode === 'string' && body.roomCode.trim()
+        ? body.roomCode.trim().toUpperCase().slice(0, 32)
+        : 'UNKNOWN';
+    const fallbackRaceRound =
+      typeof body.raceRound === 'number' && Number.isFinite(body.raceRound)
+        ? Math.max(0, Math.round(body.raceRound))
+        : 0;
+    const fallbackReporterId =
+      typeof body.reporterId === 'string' && body.reporterId.trim()
+        ? body.reporterId.trim().slice(0, 64)
+        : 'anonymous';
+
+    let ingested = 0;
+    const touchedKeys = new Set<string>();
+
+    for (const rawEntry of body.logs) {
+      const cleanLog = sanitizeTelemetryLog(
+        rawEntry,
+        fallbackRoomCode,
+        fallbackRaceRound,
+        fallbackReporterId,
+        receivedAt
+      );
+      if (!cleanLog) continue;
+      if (seenAnomalyLogIds.has(cleanLog.id)) continue;
+
+      seenAnomalyLogIds.add(cleanLog.id);
+      telemetryAnomalyLogs.push(cleanLog);
+      while (telemetryAnomalyLogs.length > MAX_TELEMETRY_LOGS) {
+        const evicted = telemetryAnomalyLogs.shift();
+        if (evicted) seenAnomalyLogIds.delete(evicted.id);
+      }
+
+      const key = `${cleanLog.roomCode}::${cleanLog.competitorId}`;
+      let summary = participantTelemetryAnalyses.get(key);
+      if (!summary) {
+        if (participantTelemetryAnalyses.size >= MAX_ANALYSES_COUNT) {
+          const oldestKey = participantTelemetryAnalyses.keys().next().value;
+          if (oldestKey) participantTelemetryAnalyses.delete(oldestKey);
+        }
+        summary = {
+          competitorId: cleanLog.competitorId,
+          competitorName: cleanLog.competitorName,
+          roomCode: cleanLog.roomCode,
+          totalAnomalies: 0,
+          reasons: {
+            'impossible-speed': 0,
+            'lane-switch-flood': 0,
+            'position-teleport': 0,
+          },
+          maxSpeedMps: 0,
+          maxSwitchesPerSec: 0,
+          suspicionScore: 0,
+          riskLevel: 'monitor',
+          firstDetectedAt: cleanLog.detectedAt,
+          lastDetectedAt: cleanLog.detectedAt,
+        };
+      }
+
+      summary.competitorName = cleanLog.competitorName || summary.competitorName;
+      summary.totalAnomalies += 1;
+      summary.reasons[cleanLog.reason] += 1;
+      if (typeof cleanLog.peakSpeedMps === 'number') {
+        summary.maxSpeedMps = Math.max(summary.maxSpeedMps, cleanLog.peakSpeedMps);
+      }
+      if (typeof cleanLog.switchesPerSec === 'number') {
+        summary.maxSwitchesPerSec = Math.max(summary.maxSwitchesPerSec, cleanLog.switchesPerSec);
+      }
+      summary.firstDetectedAt = Math.min(summary.firstDetectedAt, cleanLog.detectedAt);
+      summary.lastDetectedAt = Math.max(summary.lastDetectedAt, cleanLog.detectedAt);
+      summary.suspicionScore = computeServerSuspicionScore(summary);
+      summary.riskLevel = resolveRiskLevel(summary.suspicionScore, summary.totalAnomalies);
+
+      participantTelemetryAnalyses.set(key, summary);
+      touchedKeys.add(key);
+      ingested += 1;
+
+      const room = db.rooms[cleanLog.roomCode];
+      if (room && (summary.riskLevel === 'investigating' || summary.riskLevel === 'high-risk')) {
+        const participant = room.participants.find((p) => p.id === cleanLog.competitorId);
+        if (participant && participant.sessionStatus !== 'investigating') {
+          participant.sessionStatus = 'investigating';
+        }
+      }
+    }
+
+    const updatedAnalyses = Array.from(touchedKeys)
+      .map((key) => participantTelemetryAnalyses.get(key))
+      .filter((entry): entry is ServerParticipantAnomalySummary => Boolean(entry));
+
+    res.json({
+      ok: true,
+      ingested,
+      totalStored: telemetryAnomalyLogs.length,
+      analyses: updatedAnalyses,
+      serverTime: receivedAt,
+    });
+  });
+
+  app.get('/api/telemetry/anomalies', (req: Request, res: Response) => {
+    const roomCodeFilter =
+      typeof req.query.roomCode === 'string' && req.query.roomCode.trim()
+        ? req.query.roomCode.trim().toUpperCase()
+        : null;
+    const competitorIdFilter =
+      typeof req.query.competitorId === 'string' && req.query.competitorId.trim()
+        ? req.query.competitorId.trim()
+        : null;
+
+    const filteredLogs = telemetryAnomalyLogs.filter((entry) => {
+      if (roomCodeFilter && entry.roomCode !== roomCodeFilter) return false;
+      if (competitorIdFilter && entry.competitorId !== competitorIdFilter) return false;
+      return true;
+    });
+
+    const filteredAnalyses = Array.from(participantTelemetryAnalyses.values())
+      .filter((entry) => {
+        if (roomCodeFilter && entry.roomCode !== roomCodeFilter) return false;
+        if (competitorIdFilter && entry.competitorId !== competitorIdFilter) return false;
+        return true;
+      })
+      .sort((a, b) => b.suspicionScore - a.suspicionScore || b.lastDetectedAt - a.lastDetectedAt);
+
+    res.json({
+      ok: true,
+      count: filteredLogs.length,
+      logs: filteredLogs.slice(-100),
+      analyses: filteredAnalyses,
+      serverTime: Date.now(),
     });
   });
 
