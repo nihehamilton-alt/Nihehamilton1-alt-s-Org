@@ -36,14 +36,38 @@ interface RoomParticipant {
   lastSeenAt: number;
   progressDistance: number;
   lane: number;
+  targetLane?: number;
+  laneX?: number;
   action: string;
   jumpY: number;
+  stumbling?: boolean;
+  finished?: boolean;
+  finishTime?: number;
+  profileReady?: boolean;
+  selectingProfile?: boolean;
+  connected?: boolean;
+  betAmount?: number;
+}
+
+interface RoomStandingEntryServer {
+  id: string;
+  name: string;
+  avatar: string;
+  avatarId: string;
+  color: string;
+  isBot: boolean;
+  lane: number;
+  progressDistance: number;
+  rank: number;
+  betAmount: number;
+  payoutKz: number;
 }
 
 interface ServerRoom {
   code: string;
   title: string;
   hostName: string;
+  hostId?: string;
   maxPlayers: number;
   betAmount: number;
   fillWithBots: boolean;
@@ -54,8 +78,16 @@ interface ServerRoom {
   raceStatus: 'idle' | 'starting' | 'running' | 'completed';
   raceRound: number;
   raceStartAt: number | null;
+  raceSeed?: number;
+  pendingStart?: boolean;
   participants: RoomParticipant[];
   kickedIds: string[];
+  lastResults?: {
+    raceRound: number;
+    betAmount: number;
+    finishedAt: number;
+    rankings: RoomStandingEntryServer[];
+  };
 }
 
 interface ServerDatabase {
@@ -101,10 +133,17 @@ function saveDb(db: ServerDatabase): void {
   }
 }
 
-// Limpeza de participantes inativos há mais de 15 minutos
+// Limpeza de participantes inativos (desconectados há > 45s ou ociosos há > 15 min)
 function pruneRoomParticipants(room: ServerRoom): void {
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  room.participants = room.participants.filter((p) => p.isHost || p.lastSeenAt >= cutoff);
+  const now = Date.now();
+  const disconnectedCutoff = now - 45_000;
+  const idleCutoff = now - 15 * 60 * 1000;
+  room.participants = room.participants.filter((p) => {
+    if (p.connected === false) {
+      return p.lastSeenAt >= disconnectedCutoff;
+    }
+    return p.isHost || p.lastSeenAt >= idleCutoff;
+  });
 }
 
 async function startServer() {
@@ -112,6 +151,325 @@ async function startServer() {
   app.use(express.json({ limit: '2mb' }));
 
   const db = ensureDb();
+  const LANE_ORDER = [2, 1, 3, 0, 4];
+
+  const roomSockets = new Map<string, Set<WebSocket>>();
+  const socketToRoomClient = new Map<WebSocket, { roomCode: string; playerId: string }>();
+  const roomFinishControl = new Map<
+    string,
+    {
+      raceRound: number;
+      timer: ReturnType<typeof setTimeout> | null;
+      bots: Array<{
+        id: string;
+        name: string;
+        avatar: string;
+        avatarId: string;
+        color: string;
+        lane: number;
+        progressDistance: number;
+      }>;
+    }
+  >();
+
+  const sendRoomWs = (ws: WebSocket, payload: unknown) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  };
+
+  const broadcastToRoom = (code: string, payload: unknown, excludeWs?: WebSocket) => {
+    const sockets = roomSockets.get(code);
+    if (!sockets) return;
+    for (const clientWs of sockets) {
+      if (excludeWs && clientWs === excludeWs) continue;
+      sendRoomWs(clientWs, payload);
+    }
+  };
+
+  const resolveRoomHostAndLanes = (room: ServerRoom) => {
+    if (room.participants.length === 0) return;
+    const currentHost = room.hostId
+      ? room.participants.find((p) => p.id === room.hostId)
+      : undefined;
+    const hasConnectedOther = room.participants.some((p) => p.connected !== false);
+    if (!currentHost || (currentHost.connected === false && hasConnectedOther)) {
+      const connectedPreferred = room.participants.find((p) => p.connected !== false);
+      const existingFlagHost = room.participants.find((p) => p.isHost);
+      room.hostId = connectedPreferred
+        ? connectedPreferred.id
+        : existingFlagHost
+        ? existingFlagHost.id
+        : room.participants[0].id;
+    }
+    room.participants.forEach((p) => {
+      p.isHost = p.id === room.hostId;
+      if (typeof p.profileReady !== 'boolean') {
+        p.profileReady = true;
+      }
+      if (typeof p.selectingProfile !== 'boolean') {
+        p.selectingProfile = !p.profileReady;
+      }
+      p.betAmount = clampRoomBet(p.betAmount, room.betAmount || 500);
+    });
+    const hostParticipant = room.participants.find((p) => p.isHost);
+    if (hostParticipant) {
+      room.hostName = hostParticipant.name || room.hostName;
+    }
+    // Host gets lane 2 (center), guests get [1, 3, 0, 4]
+    const ordered = [
+      ...room.participants.filter((p) => p.isHost),
+      ...room.participants.filter((p) => !p.isHost),
+    ];
+    ordered.forEach((p, idx) => {
+      if (room.raceStatus === 'idle' || typeof p.lane !== 'number') {
+        p.lane = LANE_ORDER[idx % LANE_ORDER.length];
+      }
+    });
+  };
+
+  const findOrCreatePublicRoom = (
+    isDemoMode: boolean,
+    playerId: string,
+    preferredBet: number,
+    hostDisplayName: string
+  ): ServerRoom => {
+    const modeTag = isDemoMode ? 'DEMO' : 'REAL';
+    const candidates = Object.values(db.rooms)
+      .filter((r) => {
+        pruneRoomParticipants(r);
+        if ((r.accessMode || 'invite-only') !== 'random') return false;
+        if (Boolean(r.isDemo) !== Boolean(isDemoMode)) return false;
+        if (r.raceStatus !== 'idle') return false;
+        if (Array.isArray(r.kickedIds) && r.kickedIds.includes(playerId)) return false;
+        const alreadyIn = r.participants.some((p) => p.id === playerId);
+        return alreadyIn || r.participants.length < (r.maxPlayers || 5);
+      })
+      .sort((a, b) => {
+        const aIn = a.participants.some((p) => p.id === playerId) ? 1 : 0;
+        const bIn = b.participants.some((p) => p.id === playerId) ? 1 : 0;
+        if (aIn !== bIn) return bIn - aIn;
+        const aConnected = a.participants.filter((p) => p.connected !== false).length;
+        const bConnected = b.participants.filter((p) => p.connected !== false).length;
+        if (aConnected !== bConnected) return bConnected - aConnected;
+        return b.updatedAt - a.updatedAt;
+      });
+
+    if (candidates.length > 0) {
+      return candidates[0];
+    }
+
+    let slot = 1;
+    let chosenCode = `ARENA-AO-VIVO-${modeTag}-${slot}`;
+    while (db.rooms[chosenCode]) {
+      const existing = db.rooms[chosenCode];
+      pruneRoomParticipants(existing);
+      if (
+        existing.raceStatus === 'idle' &&
+        existing.accessMode === 'random' &&
+        existing.participants.length < (existing.maxPlayers || 5)
+      ) {
+        return existing;
+      }
+      slot++;
+      chosenCode = `ARENA-AO-VIVO-${modeTag}-${slot}`;
+    }
+
+    const now = Date.now();
+    const freshRoom: ServerRoom = {
+      code: chosenCode,
+      title: isDemoMode ? 'Arena Pública ao Vivo (Demo)' : 'Arena Pública ao Vivo (Real)',
+      hostName: hostDisplayName || 'Anfitrião',
+      hostId: playerId,
+      maxPlayers: 5,
+      betAmount: clampRoomBet(preferredBet, 500),
+      fillWithBots: true,
+      isDemo: isDemoMode,
+      accessMode: 'random',
+      createdAt: now,
+      updatedAt: now,
+      raceStatus: 'idle',
+      raceRound: 1,
+      raceStartAt: null,
+      participants: [],
+      kickedIds: [],
+    };
+    db.rooms[chosenCode] = freshRoom;
+    return freshRoom;
+  };
+
+  const getUnreadyParticipants = (room: ServerRoom): RoomParticipant[] => {
+    return room.participants.filter(
+      (p) => p.connected !== false && p.profileReady === false
+    );
+  };
+
+  const calculateThreeTorneirasServer = (betKz: number, playerCount: number) => {
+    const safeBet = Math.max(50, Math.min(100_000, Math.floor(betKz || 500)));
+    const clampedPlayers = Math.max(2, Math.min(5, Math.round(playerCount || 5)));
+    const totalPotKz = safeBet * clampedPlayers;
+    const winnersPotKz = Math.floor(totalPotKz * 0.7);
+    const houseFeeKz = Math.floor(totalPotKz * 0.2);
+    const creatorRoyaltyKz = Math.max(0, totalPotKz - winnersPotKz - houseFeeKz);
+    const firstPrizeKz = Math.floor(totalPotKz * 0.45);
+    const secondPrizeKz = Math.max(0, winnersPotKz - firstPrizeKz);
+    return {
+      totalPotKz,
+      winnersPotKz,
+      houseFeeKz,
+      creatorRoyaltyKz,
+      firstPrizeKz,
+      secondPrizeKz,
+      thirdPrizeKz: 0,
+    };
+  };
+
+  const finalizeRoomRace = (room: ServerRoom) => {
+    const ctrl = roomFinishControl.get(room.code);
+    if (ctrl?.timer) {
+      clearTimeout(ctrl.timer);
+      ctrl.timer = null;
+    }
+    const bots = ctrl && ctrl.raceRound === room.raceRound ? ctrl.bots : [];
+    roomFinishControl.delete(room.code);
+
+    const activeHumanEntries: RoomStandingEntryServer[] = room.participants.map((p) => ({
+      id: p.id,
+      name: p.name,
+      avatar: p.avatar,
+      avatarId: p.avatarId,
+      color: p.color,
+      isBot: false,
+      lane: typeof p.lane === 'number' ? p.lane : 2,
+      progressDistance: Number(p.progressDistance) || 0,
+      rank: 1,
+      betAmount: room.betAmount,
+      payoutKz: 0,
+    }));
+
+    const botEntries: RoomStandingEntryServer[] = bots
+      .filter((b) => !activeHumanEntries.some((h) => h.id === b.id))
+      .slice(0, Math.max(0, (room.maxPlayers || 5) - activeHumanEntries.length))
+      .map((b) => ({
+        id: b.id,
+        name: b.name,
+        avatar: b.avatar,
+        avatarId: b.avatarId,
+        color: b.color,
+        isBot: true,
+        lane: typeof b.lane === 'number' ? b.lane : 0,
+        progressDistance: Number(b.progressDistance) || 0,
+        rank: 1,
+        betAmount: room.betAmount,
+        payoutKz: 0,
+      }));
+
+    const combined = [...activeHumanEntries, ...botEntries].sort((a, b) => {
+      const diff = b.progressDistance - a.progressDistance;
+      if (Math.abs(diff) > 0.0001) return diff;
+      if (!a.isBot && b.isBot) return -1;
+      if (a.isBot && !b.isBot) return 1;
+      return a.lane - b.lane;
+    });
+
+    const threeTorneiras = calculateThreeTorneirasServer(room.betAmount, combined.length);
+    const rankings = combined.map((entry, idx) => {
+      const rank = idx + 1;
+      const payoutKz =
+        rank === 1 ? threeTorneiras.firstPrizeKz : rank === 2 ? threeTorneiras.secondPrizeKz : 0;
+      return {
+        ...entry,
+        rank,
+        betAmount: room.betAmount,
+        payoutKz,
+      };
+    });
+
+    room.raceStatus = 'completed';
+    room.pendingStart = false;
+    room.updatedAt = Date.now();
+    room.lastResults = {
+      raceRound: room.raceRound,
+      betAmount: room.betAmount,
+      finishedAt: room.updatedAt,
+      rankings,
+    };
+    saveDb(db);
+
+    broadcastToRoom(room.code, {
+      type: 'room:race-finished',
+      roomCode: room.code,
+      raceRound: room.raceRound,
+      betAmount: room.betAmount,
+      rankings,
+      threeTorneiras,
+      room,
+      serverTime: Date.now(),
+    });
+  };
+
+  const triggerSynchronizedRaceStart = (room: ServerRoom): { started: boolean; waitingParticipants: RoomParticipant[] } => {
+    resolveRoomHostAndLanes(room);
+    const unready = getUnreadyParticipants(room);
+    if (unready.length > 0) {
+      room.pendingStart = true;
+      room.updatedAt = Date.now();
+      saveDb(db);
+      broadcastToRoom(room.code, {
+        type: 'room:waiting-opponent',
+        room,
+        waitingNames: unready.map((u) => u.name),
+        serverTime: Date.now(),
+      });
+      broadcastToRoom(room.code, {
+        type: 'room:state',
+        room,
+        serverTime: Date.now(),
+      });
+      return { started: false, waitingParticipants: unready };
+    }
+
+    const prevCtrl = roomFinishControl.get(room.code);
+    if (prevCtrl?.timer) clearTimeout(prevCtrl.timer);
+    roomFinishControl.delete(room.code);
+
+    const now = Date.now();
+    room.pendingStart = false;
+    room.raceStatus = 'starting';
+    room.raceRound = (room.raceRound || 1) + 1;
+    room.raceSeed = Math.floor(1 + Math.random() * 2_000_000_000);
+    room.raceStartAt = now + 2600;
+    room.updatedAt = now;
+
+    const ordered = [
+      ...room.participants.filter((p) => p.isHost),
+      ...room.participants.filter((p) => !p.isHost),
+    ];
+    ordered.forEach((p, idx) => {
+      p.progressDistance = 0;
+      p.lane = LANE_ORDER[idx % LANE_ORDER.length];
+      p.targetLane = p.lane;
+      p.laneX = undefined;
+      p.action = 'running';
+      p.jumpY = 0;
+      p.stumbling = false;
+      p.finished = false;
+      p.finishTime = undefined;
+      p.lastSeenAt = now;
+    });
+
+    saveDb(db);
+    broadcastToRoom(room.code, {
+      type: 'room:race-start',
+      room,
+      raceRound: room.raceRound,
+      raceSeed: room.raceSeed,
+      raceStartAt: room.raceStartAt,
+      betAmount: room.betAmount,
+      serverTime: now,
+    });
+    return { started: true, waitingParticipants: [] };
+  };
 
   // Healthcheck do servidor
   app.get('/api/health', (_req: Request, res: Response) => {
@@ -367,31 +725,38 @@ async function startServer() {
 
     if (body.player && body.player.id) {
       const idx = room.participants.findIndex((p) => p.id === body.player!.id);
+      if (!room.hostId) {
+        room.hostId = body.player.id;
+      }
       const participant: RoomParticipant = {
         id: body.player.id,
         name: body.player.name || room.hostName,
         avatar: body.player.avatar || '👑',
         avatarId: body.player.avatarId || 'rei-zero',
         color: body.player.color || '#f59e0b',
-        isHost: true,
+        isHost: room.hostId === body.player.id,
         joinedAt: idx >= 0 ? room.participants[idx].joinedAt : now,
         lastSeenAt: now,
         progressDistance: idx >= 0 ? room.participants[idx].progressDistance : 0,
         lane: idx >= 0 ? room.participants[idx].lane : 2,
         action: 'running',
         jumpY: 0,
+        profileReady: true,
+        selectingProfile: false,
       };
-      if (idx >= 0) room.participants[idx] = participant;
+      if (idx >= 0) room.participants[idx] = { ...room.participants[idx], ...participant };
       else if (room.participants.length < room.maxPlayers) room.participants.push(participant);
     }
 
     pruneRoomParticipants(room);
+    resolveRoomHostAndLanes(room);
     if (room.participants.length > room.maxPlayers) {
       const hosts = room.participants.filter((p) => p.isHost);
       const guests = room.participants.filter((p) => !p.isHost);
       room.participants = [...hosts, ...guests].slice(0, room.maxPlayers);
     }
     saveDb(db);
+    broadcastToRoom(code, { type: 'room:state', room, serverTime: Date.now() });
     res.json({ ok: true, room });
   });
 
@@ -436,6 +801,12 @@ async function startServer() {
       delete db.rooms[code];
       saveDb(db);
     }
+
+    broadcastToRoom(code, {
+      type: 'room:deleted',
+      roomCode: code,
+      serverTime: Date.now(),
+    });
 
     const privateVoiceKey = `PRIVATE:${code}`;
     const roomVoicePeers = voiceRooms.get(privateVoiceKey);
@@ -555,7 +926,9 @@ async function startServer() {
     }
 
     room.updatedAt = now;
+    resolveRoomHostAndLanes(room);
     saveDb(db);
+    broadcastToRoom(code, { type: 'room:state', room, serverTime: now });
     res.json({ ok: true, room, serverTime: now });
   });
 
@@ -582,8 +955,10 @@ async function startServer() {
     }
 
     room.participants = room.participants.filter((p) => p.id !== targetId);
+    resolveRoomHostAndLanes(room);
     room.updatedAt = Date.now();
     saveDb(db);
+    broadcastToRoom(code, { type: 'room:kicked', roomCode: code, targetId, room, serverTime: room.updatedAt });
 
     // Desconecta o jogador removido do canal de voz da sala, se estiver conectado
     const privateVoiceKey = `PRIVATE:${code}`;
@@ -611,22 +986,14 @@ async function startServer() {
       return;
     }
 
-    const now = Date.now();
-    room.raceStatus = 'starting';
-    room.raceRound = (room.raceRound || 1) + 1;
-    room.raceStartAt = now + 2450; // Sincroniza contagem regressiva de ~2.45s
-    room.updatedAt = now;
-    room.participants = room.participants.map((p, idx) => ({
-      ...p,
-      progressDistance: 0,
-      lane: idx % 5,
-      action: 'running',
-      jumpY: 0,
-      lastSeenAt: now,
-    }));
-
-    saveDb(db);
-    res.json({ ok: true, room, serverTime: now });
+    const result = triggerSynchronizedRaceStart(room);
+    res.json({
+      ok: true,
+      started: result.started,
+      waitingNames: result.waitingParticipants.map((p) => p.name),
+      room,
+      serverTime: Date.now(),
+    });
   });
 
   app.post('/api/rooms/:code/progress', (req: Request, res: Response) => {
@@ -833,6 +1200,7 @@ async function startServer() {
   }
 
   const wss = new WebSocketServer({ noServer: true });
+  const roomWss = new WebSocketServer({ noServer: true });
   httpServer.on('upgrade', (req, socket, head) => {
     try {
       const pathname = new URL(req.url || '/', 'http://localhost').pathname;
@@ -840,10 +1208,424 @@ async function startServer() {
         wss.handleUpgrade(req, socket, head, (ws) => {
           wss.emit('connection', ws, req);
         });
+      } else if (pathname === '/ws/room') {
+        roomWss.handleUpgrade(req, socket, head, (ws) => {
+          roomWss.emit('connection', ws, req);
+        });
       }
     } catch {
       socket.destroy();
     }
+  });
+
+  const detachRoomSocket = (ws: WebSocket) => {
+    const ref = socketToRoomClient.get(ws);
+    if (!ref) return;
+    socketToRoomClient.delete(ws);
+
+    const sockets = roomSockets.get(ref.roomCode);
+    if (sockets) {
+      sockets.delete(ws);
+      if (sockets.size === 0) roomSockets.delete(ref.roomCode);
+    }
+
+    const room = db.rooms[ref.roomCode];
+    if (room) {
+      const participant = room.participants.find((p) => p.id === ref.playerId);
+      if (participant) {
+        participant.connected = false;
+        participant.lastSeenAt = Date.now();
+      }
+      const anyConnected = room.participants.some((p) => p.connected !== false);
+      if (!anyConnected) {
+        room.raceStatus = 'idle';
+        room.pendingStart = false;
+        room.raceStartAt = null;
+      }
+      resolveRoomHostAndLanes(room);
+      if (room.pendingStart && getUnreadyParticipants(room).length === 0 && anyConnected) {
+        triggerSynchronizedRaceStart(room);
+      } else {
+        broadcastToRoom(ref.roomCode, { type: 'room:state', room, serverTime: Date.now() });
+      }
+    }
+  };
+
+  roomWss.on('connection', (ws: WebSocket) => {
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(String(raw)) as {
+          type?: string;
+          roomCode?: string;
+          title?: string;
+          hostName?: string;
+          maxPlayers?: number;
+          betAmount?: number;
+          fillWithBots?: boolean;
+          isDemo?: boolean;
+          accessMode?: 'random' | 'invite-only';
+          viaInvite?: boolean;
+          autoMatch?: boolean;
+          raceRound?: number;
+          playerId?: string;
+          progressDistance?: number;
+          lane?: number;
+          targetLane?: number;
+          laneX?: number;
+          action?: string;
+          jumpY?: number;
+          stumbling?: boolean;
+          finished?: boolean;
+          bots?: Array<{
+            id: string;
+            name: string;
+            avatar: string;
+            avatarId: string;
+            color: string;
+            lane: number;
+            progressDistance: number;
+          }>;
+          player?: {
+            id?: string;
+            name?: string;
+            avatar?: string;
+            avatarId?: string;
+            color?: string;
+            profileReady?: boolean;
+            selectingProfile?: boolean;
+          };
+        };
+
+        if (!msg || !msg.type) return;
+
+        if (msg.type === 'room:join' && msg.roomCode && msg.player?.id) {
+          const playerId = msg.player.id.trim();
+          const now = Date.now();
+
+          let room: ServerRoom;
+          let code: string;
+          if (msg.autoMatch) {
+            room = findOrCreatePublicRoom(
+              Boolean(msg.isDemo ?? true),
+              playerId,
+              clampRoomBet(msg.betAmount, 500),
+              (msg.player.name || msg.hostName || 'Corredor').trim()
+            );
+            code = room.code;
+          } else {
+            code = msg.roomCode.trim().toUpperCase();
+            room = db.rooms[code];
+            if (!room) {
+              room = {
+                code,
+                title: (msg.title || `Arena ${code}`).trim(),
+                hostName: (msg.hostName || msg.player.name || 'Anfitrião').trim(),
+                hostId: playerId,
+                maxPlayers: clampMaxPlayers(msg.maxPlayers, 5),
+                betAmount: clampRoomBet(msg.betAmount, 500),
+                fillWithBots: msg.fillWithBots ?? true,
+                isDemo: msg.isDemo ?? true,
+                accessMode: normalizeAccessMode(msg.accessMode),
+                createdAt: now,
+                updatedAt: now,
+                raceStatus: 'idle',
+                raceRound: 1,
+                raceStartAt: null,
+                participants: [],
+                kickedIds: [],
+              };
+              db.rooms[code] = room;
+            }
+          }
+
+          // Remove from previous room if switching
+          const prevRef = socketToRoomClient.get(ws);
+          if (prevRef && (prevRef.roomCode !== code || prevRef.playerId !== playerId)) {
+            detachRoomSocket(ws);
+          }
+
+          let sockets = roomSockets.get(code);
+          if (!sockets) {
+            sockets = new Set<WebSocket>();
+            roomSockets.set(code, sockets);
+          }
+          sockets.add(ws);
+          socketToRoomClient.set(ws, { roomCode: code, playerId });
+
+          pruneRoomParticipants(room);
+
+          if (Array.isArray(room.kickedIds) && room.kickedIds.includes(playerId)) {
+            sendRoomWs(ws, { type: 'room:kicked', roomCode: code, targetId: playerId });
+            return;
+          }
+
+          const existingIdx = room.participants.findIndex((p) => p.id === playerId);
+          if (existingIdx < 0) {
+            if (room.accessMode === 'invite-only' && msg.viaInvite === false && !msg.autoMatch) {
+              sendRoomWs(ws, { type: 'room:error', code: 'INVITE_ONLY', roomCode: code });
+              return;
+            }
+            if (room.participants.length >= (room.maxPlayers || 5)) {
+              sendRoomWs(ws, { type: 'room:error', code: 'ROOM_FULL', roomCode: code });
+              return;
+            }
+            const isCreator = !room.hostId || room.participants.length === 0;
+            if (isCreator) room.hostId = playerId;
+            room.participants.push({
+              id: playerId,
+              name: (msg.player.name || `Corredor ${room.participants.length + 1}`).trim(),
+              avatar: msg.player.avatar || '⚡',
+              avatarId: msg.player.avatarId || 'rei-zero',
+              color: msg.player.color || '#38bdf8',
+              isHost: room.hostId === playerId,
+              joinedAt: now,
+              lastSeenAt: now,
+              progressDistance: 0,
+              lane: LANE_ORDER[room.participants.length % LANE_ORDER.length],
+              action: 'running',
+              jumpY: 0,
+              profileReady: msg.player.profileReady !== false,
+              selectingProfile: Boolean(msg.player.selectingProfile),
+              connected: true,
+              betAmount: room.betAmount,
+            });
+          } else {
+            const p = room.participants[existingIdx];
+            p.name = (msg.player.name || p.name).trim();
+            p.avatar = msg.player.avatar || p.avatar;
+            p.avatarId = msg.player.avatarId || p.avatarId;
+            p.color = msg.player.color || p.color;
+            p.lastSeenAt = now;
+            p.connected = true;
+            p.betAmount = room.betAmount;
+            if (typeof msg.player.profileReady === 'boolean') {
+              p.profileReady = msg.player.profileReady;
+            }
+            if (typeof msg.player.selectingProfile === 'boolean') {
+              p.selectingProfile = msg.player.selectingProfile;
+            }
+          }
+
+          resolveRoomHostAndLanes(room);
+          room.updatedAt = now;
+          saveDb(db);
+
+          sendRoomWs(ws, { type: 'room:joined', room, serverTime: now });
+          if (room.pendingStart && getUnreadyParticipants(room).length === 0) {
+            triggerSynchronizedRaceStart(room);
+          } else {
+            broadcastToRoom(code, { type: 'room:state', room, serverTime: now });
+          }
+          return;
+        }
+
+        const clientRef = socketToRoomClient.get(ws);
+        if (!clientRef) return;
+        const room = db.rooms[clientRef.roomCode];
+        if (!room) return;
+        const participant = room.participants.find((p) => p.id === clientRef.playerId);
+
+        if (msg.type === 'room:profile-ready' && participant && msg.player) {
+          participant.name = (msg.player.name || participant.name).trim();
+          participant.avatar = msg.player.avatar || participant.avatar;
+          participant.avatarId = msg.player.avatarId || participant.avatarId;
+          participant.color = msg.player.color || participant.color;
+          participant.profileReady = true;
+          participant.selectingProfile = false;
+          participant.connected = true;
+          participant.lastSeenAt = Date.now();
+          resolveRoomHostAndLanes(room);
+          room.updatedAt = Date.now();
+          saveDb(db);
+
+          if (room.pendingStart && getUnreadyParticipants(room).length === 0) {
+            triggerSynchronizedRaceStart(room);
+          } else {
+            broadcastToRoom(room.code, { type: 'room:state', room, serverTime: Date.now() });
+          }
+          return;
+        }
+
+        if (msg.type === 'room:update-bet' && typeof msg.betAmount === 'number') {
+          resolveRoomHostAndLanes(room);
+          const isAllowed = !room.hostId || room.hostId === clientRef.playerId || room.participants.length <= 1;
+          if (!isAllowed) return;
+          room.betAmount = clampRoomBet(msg.betAmount, room.betAmount || 500);
+          room.participants.forEach((p) => {
+            p.betAmount = room.betAmount;
+          });
+          room.updatedAt = Date.now();
+          saveDb(db);
+          broadcastToRoom(room.code, { type: 'room:state', room, serverTime: room.updatedAt });
+          return;
+        }
+
+        if (msg.type === 'room:update-config') {
+          resolveRoomHostAndLanes(room);
+          const isAllowed = !room.hostId || room.hostId === clientRef.playerId || room.participants.length <= 1;
+          if (!isAllowed) return;
+          if (typeof msg.maxPlayers === 'number') {
+            room.maxPlayers = clampMaxPlayers(msg.maxPlayers, room.maxPlayers || 5);
+          }
+          if (msg.accessMode === 'random' || msg.accessMode === 'invite-only') {
+            room.accessMode = msg.accessMode;
+          }
+          if (typeof msg.fillWithBots === 'boolean') {
+            room.fillWithBots = msg.fillWithBots;
+          }
+          if (typeof msg.title === 'string' && msg.title.trim()) {
+            room.title = msg.title.trim();
+          }
+          if (typeof msg.betAmount === 'number') {
+            room.betAmount = clampRoomBet(msg.betAmount, room.betAmount || 500);
+            room.participants.forEach((p) => {
+              p.betAmount = room.betAmount;
+            });
+          }
+          room.updatedAt = Date.now();
+          saveDb(db);
+          broadcastToRoom(room.code, { type: 'room:state', room, serverTime: room.updatedAt });
+          return;
+        }
+
+        if (msg.type === 'room:start-request') {
+          resolveRoomHostAndLanes(room);
+          const isAllowed = !room.hostId || room.hostId === clientRef.playerId || room.participants.length <= 1;
+          if (!isAllowed) {
+            sendRoomWs(ws, { type: 'room:not-host', roomCode: room.code, serverTime: Date.now() });
+            return;
+          }
+          triggerSynchronizedRaceStart(room);
+          return;
+        }
+
+        if (msg.type === 'room:race-telemetry' && participant) {
+          if (room.raceStatus === 'starting') {
+            room.raceStatus = 'running';
+          }
+          if (typeof msg.progressDistance === 'number') {
+            participant.progressDistance = Math.max(0, msg.progressDistance);
+          }
+          if (typeof msg.lane === 'number') participant.lane = Math.max(0, Math.min(4, Math.round(msg.lane)));
+          if (typeof msg.targetLane === 'number') {
+            participant.targetLane = Math.max(0, Math.min(4, Math.round(msg.targetLane)));
+          }
+          if (typeof msg.laneX === 'number') participant.laneX = msg.laneX;
+          if (typeof msg.action === 'string') participant.action = msg.action;
+          if (typeof msg.jumpY === 'number') participant.jumpY = Math.max(0, msg.jumpY);
+          if (typeof msg.stumbling === 'boolean') participant.stumbling = msg.stumbling;
+          if (typeof msg.finished === 'boolean') participant.finished = msg.finished;
+          participant.lastSeenAt = Date.now();
+
+          broadcastToRoom(
+            room.code,
+            {
+              type: 'room:race-sync',
+              roomCode: room.code,
+              raceRound: room.raceRound,
+              playerId: participant.id,
+              progressDistance: participant.progressDistance,
+              lane: participant.lane,
+              targetLane: participant.targetLane ?? participant.lane,
+              laneX: participant.laneX,
+              action: participant.action,
+              jumpY: participant.jumpY,
+              stumbling: Boolean(participant.stumbling),
+              finished: Boolean(participant.finished),
+              serverTime: participant.lastSeenAt,
+            },
+            ws
+          );
+          return;
+        }
+
+        if (msg.type === 'room:race-finish' && participant) {
+          if (room.raceStatus === 'completed') {
+            if (room.lastResults) {
+              sendRoomWs(ws, {
+                type: 'room:race-finished',
+                roomCode: room.code,
+                raceRound: room.lastResults.raceRound,
+                betAmount: room.lastResults.betAmount,
+                rankings: room.lastResults.rankings,
+                threeTorneiras: calculateThreeTorneirasServer(
+                  room.lastResults.betAmount,
+                  room.lastResults.rankings.length
+                ),
+                room,
+                serverTime: Date.now(),
+              });
+            }
+            return;
+          }
+
+          if (typeof msg.progressDistance === 'number') {
+            participant.progressDistance = Math.max(0, msg.progressDistance);
+          }
+          participant.finished = true;
+          participant.finishTime = Date.now();
+          participant.lastSeenAt = participant.finishTime;
+
+          let ctrl = roomFinishControl.get(room.code);
+          if (!ctrl || ctrl.raceRound !== room.raceRound) {
+            ctrl = {
+              raceRound: room.raceRound,
+              timer: null,
+              bots: Array.isArray(msg.bots) ? msg.bots : [],
+            };
+            roomFinishControl.set(room.code, ctrl);
+          } else if (Array.isArray(msg.bots) && msg.bots.length > 0 && (participant.isHost || ctrl.bots.length === 0)) {
+            ctrl.bots = msg.bots;
+          }
+
+          const connectedHumans = room.participants.filter((p) => p.connected !== false);
+          const allHumansFinished =
+            connectedHumans.length <= 1 || connectedHumans.every((p) => p.finished === true);
+
+          if (allHumansFinished) {
+            finalizeRoomRace(room);
+          } else if (!ctrl.timer) {
+            ctrl.timer = setTimeout(() => {
+              const latestRoom = db.rooms[room.code];
+              if (latestRoom && latestRoom.raceStatus !== 'completed') {
+                finalizeRoomRace(latestRoom);
+              }
+            }, 650);
+          }
+          return;
+        }
+
+        if (msg.type === 'room:return-lobby') {
+          resolveRoomHostAndLanes(room);
+          if (room.hostId === clientRef.playerId || room.raceStatus === 'completed') {
+            room.raceStatus = 'idle';
+            room.pendingStart = false;
+            room.raceStartAt = null;
+            room.participants.forEach((p) => {
+              p.progressDistance = 0;
+              p.finished = false;
+              p.stumbling = false;
+              p.jumpY = 0;
+              p.action = 'running';
+            });
+            resolveRoomHostAndLanes(room);
+            room.updatedAt = Date.now();
+            saveDb(db);
+            broadcastToRoom(room.code, { type: 'room:state', room, serverTime: room.updatedAt });
+          }
+        }
+      } catch {
+        // Ignore malformed messages
+      }
+    });
+
+    ws.on('close', () => {
+      detachRoomSocket(ws);
+    });
+
+    ws.on('error', () => {
+      detachRoomSocket(ws);
+    });
   });
 
   wss.on('connection', (ws: WebSocket) => {

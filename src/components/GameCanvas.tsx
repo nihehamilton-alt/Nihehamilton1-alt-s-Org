@@ -11,6 +11,8 @@ import {
   ViewMode,
   TimeMode,
   RacePerformanceMetrics,
+  RemoteRunnerSnapshot,
+  LocalRunnerTelemetry,
 } from '../types/game';
 import {
   CANV_WIDTH,
@@ -41,12 +43,14 @@ import {
   checkPowerUpPickup,
   checkCoinPickup,
   spawnCuratedLuandaWave,
+  createSeededRng,
 } from '../game/engine';
 import { ThreeCanvas, ThreeLiveState } from './ThreeCanvas';
 import { useI18n } from '../contexts/I18nContext';
 import { getLocalizedPowerUp } from '../data/translations';
 import { drawVolumetricObstacle25D } from './canvasObstacles25D';
 import { drawCanvasRunnerAvatar } from './canvasRunnerAvatar';
+import { getMultiplayerStrings } from '../utils/multiplayerStrings';
 
 interface GameCanvasProps {
   status: GameStatus;
@@ -61,9 +65,14 @@ interface GameCanvasProps {
   onCompetitorsProgress?: (updated: Competitor[]) => void;
   onRankUpdate?: (rank: number) => void;
   isDemo: boolean;
+  betAmountKz?: number;
   onRestart?: () => void;
   roundNonce?: number;
   pause3d?: boolean;
+  raceSeed?: number | null;
+  syncedRaceStartAt?: number | null;
+  remotePlayersRef?: React.RefObject<Map<string, RemoteRunnerSnapshot>>;
+  onLocalRaceTelemetry?: (telemetry: LocalRunnerTelemetry) => void;
 }
 
 interface Particle {
@@ -107,12 +116,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onTimeUpdate,
   onCompetitorsProgress,
   onRankUpdate,
+  betAmountKz = 500,
   onRestart,
   roundNonce = 0,
   pause3d = false,
+  raceSeed = null,
+  syncedRaceStartAt = null,
+  remotePlayersRef,
+  onLocalRaceTelemetry,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const { t, lang } = useI18n();
+  const { t, lang, formatMoney } = useI18n();
+  const mpStrings = React.useMemo(() => getMultiplayerStrings(lang), [lang]);
   const tRef = useRef(t);
   const langRef = useRef(lang);
   tRef.current = t;
@@ -124,14 +139,49 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onCompetitorsProgressRef = useRef(onCompetitorsProgress);
   const onRankUpdateRef = useRef(onRankUpdate);
+  const onLocalRaceTelemetryRef = useRef(onLocalRaceTelemetry);
+  const remotePlayersRefStable = useRef(remotePlayersRef);
+  const syncedRaceStartAtRef = useRef<number | null>(syncedRaceStartAt);
+  const raceSeedRef = useRef<number | null>(raceSeed);
+  const waveRngRef = useRef<() => number>(Math.random);
+  const telemetryEmitRef = useRef({
+    lastAt: 0,
+    lastLane: -1,
+    lastTargetLane: -1,
+    lastAction: '',
+    lastStumbling: false,
+    lastFinished: false,
+    lastJumpActive: false,
+  });
+
   onFinishRef.current = onFinish;
   onCoinCollectedRef.current = onCoinCollected;
   onTimeUpdateRef.current = onTimeUpdate;
   onCompetitorsProgressRef.current = onCompetitorsProgress;
   onRankUpdateRef.current = onRankUpdate;
+  onLocalRaceTelemetryRef.current = onLocalRaceTelemetry;
+  remotePlayersRefStable.current = remotePlayersRef;
+  syncedRaceStartAtRef.current = syncedRaceStartAt;
+  raceSeedRef.current = raceSeed;
+
+  useEffect(() => {
+    if (status === 'starting' || status === 'idle') {
+      waveRngRef.current = raceSeed ? createSeededRng(raceSeed) : Math.random;
+    }
+  }, [raceSeed, roundNonce, status]);
 
   // Power-Ups Status
   const [activePowerUpNotice, setActivePowerUpNotice] = useState<string | null>(null);
+
+  // Snapshot leve (~8Hz durante corrida) dos 5 corredores: movimentos e apostas em tempo real
+  const [liveHudRunners, setLiveHudRunners] = useState<Competitor[]>(competitors);
+  const lastHudRunnersEmitRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (status !== 'running') {
+      setLiveHudRunners(competitors);
+    }
+  }, [competitors, status]);
 
   // Refs diretas para indicador de Dash (zero re-renders React durante os 4s de recarga)
   const dashPillRef = useRef<HTMLDivElement | null>(null);
@@ -411,10 +461,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         }
       });
 
+      const playerComp = competitors.find((c) => c.isPlayer);
+      const startLane = clampLaneIndex(playerComp?.lane ?? 2);
+
+      waveRngRef.current = raceSeedRef.current ? createSeededRng(raceSeedRef.current) : Math.random;
+      telemetryEmitRef.current = {
+        lastAt: 0,
+        lastLane: -1,
+        lastTargetLane: -1,
+        lastAction: '',
+        lastStumbling: false,
+        lastFinished: false,
+        lastJumpActive: false,
+      };
+
       stateRef.current.player = {
-        lane: 2,
-        targetLane: 2,
-        laneX: LANE_CENTERS[2],
+        lane: startLane,
+        targetLane: startLane,
+        laneX: LANE_CENTERS[startLane],
         action: 'running',
         jumpY: 0,
         jumpVelocity: 0,
@@ -429,8 +493,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         // Pista limpa nos primeiros segundos: apenas moedas douradas de guia, sem nenhum obstáculo!
         stateRef.current.obstacles = [];
         stateRef.current.coins = [
-          { id: ++stateRef.current.coinIdCounter, lane: 2, y: -100, value: 50, collected: false },
-          { id: ++stateRef.current.coinIdCounter, lane: 2, y: -180, value: 50, collected: false },
+          { id: ++stateRef.current.coinIdCounter, lane: startLane, y: -100, value: 50, collected: false },
+          { id: ++stateRef.current.coinIdCounter, lane: startLane, y: -180, value: 50, collected: false },
           { id: ++stateRef.current.coinIdCounter, lane: 1, y: -260, value: 50, collected: false },
           { id: ++stateRef.current.coinIdCounter, lane: 3, y: -340, value: 50, collected: false },
         ];
@@ -818,10 +882,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const canvas = canvasRef.current;
 
       if (s.status === 'running') {
-        // Cronômetro oficial exato de 40.0 segundos via performance.now()
+        // Cronômetro oficial exato de 40.0 segundos via performance.now() sincronizado ao raceStartAt
         const nowPerf = performance.now();
         if (!s.raceStartTime) {
-          s.raceStartTime = nowPerf;
+          if (syncedRaceStartAtRef.current) {
+            const elapsedSinceStart = Math.max(
+              0,
+              Math.min(2000, Date.now() - syncedRaceStartAtRef.current)
+            );
+            s.raceStartTime = nowPerf - elapsedSinceStart;
+          } else {
+            s.raceStartTime = nowPerf;
+          }
         }
         const exactElapsed = (nowPerf - s.raceStartTime) / 1000;
         s.elapsedSeconds = Math.min(TOTAL_GAME_TIME_SECONDS, exactElapsed);
@@ -917,6 +989,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           s.player.laneX = targetPlayerX;
         } else {
           s.player.laneX = prevPlayerLaneX + (targetPlayerX - prevPlayerLaneX) * playerLaneLerp;
+          if (Math.abs(targetPlayerX - s.player.laneX) < 0.85) {
+            s.player.laneX = targetPlayerX;
+            s.player.lane = clampedTargetLane;
+          }
         }
         enforcePlayerLaneBoundary(s.player);
 
@@ -997,7 +1073,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           s.sprintAudioAcc = 0;
         }
 
-        // Atualiza os 5 corredores nas 5 faixas (velocidade independente para ultrapassagens reais + colisões com obstáculos)
+        // Atualiza os 5 corredores nas 5 faixas (jogadores humanos reais via WebSocket + bots locais)
+        const remoteMap = remotePlayersRefStable.current?.current;
         for (const comp of s.competitorsList) {
           if (comp.isPlayer) {
             comp.progressDistance = s.playerDistance;
@@ -1007,6 +1084,74 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             comp.jumpY = s.player.jumpY;
             comp.action = s.player.action;
             comp.stumbling = s.player.stumbleTimer > 0;
+
+            if (onLocalRaceTelemetryRef.current) {
+              const tel = telemetryEmitRef.current;
+              const jumpActive = (comp.jumpY || 0) > 2;
+              const discreteChanged =
+                tel.lastLane !== comp.lane ||
+                tel.lastTargetLane !== comp.targetLane ||
+                tel.lastAction !== comp.action ||
+                tel.lastStumbling !== Boolean(comp.stumbling) ||
+                tel.lastJumpActive !== jumpActive;
+              if (discreteChanged || nowPerf - tel.lastAt >= 32) {
+                tel.lastAt = nowPerf;
+                tel.lastLane = comp.lane;
+                tel.lastTargetLane = comp.targetLane;
+                tel.lastAction = comp.action;
+                tel.lastStumbling = Boolean(comp.stumbling);
+                tel.lastJumpActive = jumpActive;
+                onLocalRaceTelemetryRef.current({
+                  progressDistance: comp.progressDistance,
+                  lane: comp.lane,
+                  targetLane: comp.targetLane,
+                  laneX: comp.laneX,
+                  action: comp.action,
+                  jumpY: comp.jumpY,
+                  stumbling: Boolean(comp.stumbling),
+                  finished: Boolean(comp.finished),
+                });
+              }
+            }
+          } else if (!comp.isBot && !comp.id.startsWith('friend-') && remoteMap) {
+            // Jogador humano real controlado remotamente em tempo real com dead-reckoning fluido 60 FPS
+            const snap = remoteMap.get(comp.id);
+            if (snap) {
+              const ageSec = Math.min(0.14, Math.max(0, (Date.now() - (snap.updatedAt || Date.now())) / 1000));
+              const expectedPace = snap.stumbling
+                ? s.speed * 0.68
+                : snap.action === 'dashing'
+                ? s.speed * 1.72
+                : s.speed * 1.48;
+              const projectedDist = snap.finished
+                ? snap.progressDistance
+                : snap.progressDistance + ageSec * expectedPace;
+              const distGap = projectedDist - comp.progressDistance;
+              if (Math.abs(distGap) > 35) {
+                comp.progressDistance = projectedDist;
+              } else {
+                const distLerp = 1 - Math.exp(-20 * dt);
+                comp.progressDistance = Math.max(
+                  0,
+                  comp.progressDistance + distGap * distLerp
+                );
+              }
+              comp.lane = clampLaneIndex(snap.lane);
+              comp.targetLane = clampLaneIndex(snap.targetLane ?? snap.lane);
+              const snapTargetX =
+                typeof snap.laneX === 'number' && Number.isFinite(snap.laneX)
+                  ? snap.laneX
+                  : LANE_CENTERS[comp.targetLane];
+              const currX = Number.isFinite(comp.laneX) ? comp.laneX : snapTargetX;
+              const xLerp = 1 - Math.exp(-28 * dt);
+              comp.laneX = currX + (snapTargetX - currX) * xLerp;
+              const jumpLerp = 1 - Math.exp(-24 * dt);
+              comp.jumpY = Math.max(0, (comp.jumpY || 0) + (snap.jumpY - (comp.jumpY || 0)) * jumpLerp);
+              comp.action = snap.action;
+              comp.stumbling = Boolean(snap.stumbling);
+              comp.finished = Boolean(snap.finished);
+              enforceCompetitorLaneBoundary(comp);
+            }
           } else {
             let bot = botRuntimeRef.current.get(comp.id);
             if (!bot) {
@@ -1234,6 +1379,23 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           enforcePlayerLaneBoundary(s.player);
           if (!raceFinishedRef.current) {
             raceFinishedRef.current = true;
+            for (const comp of s.competitorsList) {
+              if (comp.isPlayer) {
+                comp.finished = true;
+                if (onLocalRaceTelemetryRef.current) {
+                  onLocalRaceTelemetryRef.current({
+                    progressDistance: comp.progressDistance,
+                    lane: comp.lane,
+                    targetLane: comp.targetLane,
+                    laneX: comp.laneX,
+                    action: comp.action,
+                    jumpY: comp.jumpY,
+                    stumbling: Boolean(comp.stumbling),
+                    finished: true,
+                  });
+                }
+              }
+            }
             sounds.playCoronationFanfare();
             onFinishRef.current(s.competitorsList, buildPerformanceSnapshot());
           }
@@ -1283,16 +1445,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           s.distanceSinceLastSpawn >= s.nextSpawnDistance &&
           hasAdequateSafetyHeadroom
         ) {
+          const rng = waveRngRef.current;
           s.distanceSinceLastSpawn = 0;
           s.nextSpawnDistance =
             currentWave.minWaveSpacing +
-            Math.random() * (currentWave.maxWaveSpacing - currentWave.minWaveSpacing);
+            rng() * (currentWave.maxWaveSpacing - currentWave.minWaveSpacing);
 
           const newWave = spawnCuratedLuandaWave(
             s.obstacleIdCounter,
             s.coinIdCounter,
             -240,
-            isHard
+            isHard,
+            rng
           );
           s.obstacleIdCounter += newWave.obstacles.length;
           s.coinIdCounter += newWave.coins.length;
@@ -1300,8 +1464,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           s.coins.push(...newWave.coins);
         } else if (s.elapsedSeconds < INITIAL_SAFETY_RUNWAY_SECONDS && s.distanceSinceLastSpawn >= 140) {
           // Arranque rápido com moedas guia iniciais
+          const rng = waveRngRef.current;
           s.distanceSinceLastSpawn = 0;
-          const openLane = (Math.floor(Math.random() * 3) + 1) as Lane;
+          const openLane = (Math.floor(rng() * 3) + 1) as Lane;
           s.coins.push({
             id: ++s.coinIdCounter,
             lane: openLane,
@@ -1989,6 +2154,36 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               ctx.rotate(Math.sin(performance.now() * 0.03) * 0.16);
             }
 
+            const actionGlyph = comp.stumbling
+              ? '⚠️'
+              : comp.action === 'dashing'
+              ? '⚡'
+              : comp.action === 'jumping' || compJump > 8
+              ? '🦘'
+              : isCompSliding
+              ? '⬇️'
+              : '';
+
+            if (comp.action === 'dashing') {
+              ctx.save();
+              ctx.strokeStyle = 'rgba(250, 204, 21, 0.72)';
+              ctx.lineWidth = 3;
+              ctx.lineCap = 'round';
+              ctx.beginPath();
+              ctx.moveTo(-7, 10);
+              ctx.lineTo(-7, 28);
+              ctx.moveTo(7, 10);
+              ctx.lineTo(7, 28);
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            const baseCompLabel = comp.stumbling
+              ? tRef.current.canvas.botSlowLabel
+              : `${!comp.isBot ? '🟢 ' : ''}${comp.name.slice(0, 11)}${
+                  actionGlyph ? ` ${actionGlyph}` : ''
+                }`;
+
             drawCanvasRunnerAvatar({
               ctx,
               avatarId: comp.avatarId,
@@ -2000,11 +2195,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               isAirborne: compJump > 8,
               strideCycle: comp.progressDistance * 0.45,
               stumbling: Boolean(comp.stumbling),
-              labelText: comp.stumbling ? tRef.current.canvas.botSlowLabel : comp.name.slice(0, 12),
+              labelText: baseCompLabel,
               scale: 0.9,
             });
 
             ctx.restore();
+          }
+
+          // Atualiza barra compacta de corredores & apostas ao vivo (~8Hz durante a corrida)
+          if (currentTime - lastHudRunnersEmitRef.current >= 120) {
+            lastHudRunnersEmitRef.current = currentTime;
+            setLiveHudRunners(s.competitorsList.map((c) => ({ ...c })));
           }
 
           // 5. Renderiza o Jogador com o Avatar/Roupa selecionada
@@ -2261,6 +2462,85 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               {t.canvas.laneLabel} {stateRef.current.player.targetLane + 1}/5
             </span>
           </div>
+        </div>
+      </div>
+
+      {/* Tira ao Vivo dos 5 Corredores: Movimentos em Tempo Real e Apostas */}
+      <div className="w-full px-2.5 py-2 game-panel border-x border-b border-amber-500/25 flex flex-col gap-1.5">
+        <div className="flex items-center justify-between text-[9px] font-mono text-zinc-400">
+          <span className="font-black uppercase tracking-wider text-emerald-300 flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span>{mpStrings.liveRunnersBarTitle}</span>
+          </span>
+          <span className="text-amber-300 font-bold">
+            {mpStrings.roomBetInlineLabel}: {formatMoney(betAmountKz)}
+          </span>
+        </div>
+        <div className="grid grid-cols-5 gap-1">
+          {[...liveHudRunners]
+            .sort((a, b) => (a.targetLane ?? a.lane) - (b.targetLane ?? b.lane))
+            .slice(0, 5)
+            .map((runner) => {
+              const displayLane = Math.max(0, Math.min(4, runner.targetLane ?? runner.lane)) + 1;
+              const moveGlyph = runner.profileReady === false
+                ? '⏳'
+                : runner.stumbling
+                ? '⚠️'
+                : runner.action === 'dashing'
+                ? '⚡'
+                : runner.action === 'jumping' || (runner.jumpY || 0) > 8
+                ? '🦘'
+                : runner.action === 'sliding'
+                ? '⬇️'
+                : '🏃';
+              const moveLabel = runner.stumbling
+                ? mpStrings.actionStumbling
+                : runner.action === 'dashing'
+                ? mpStrings.actionDashing
+                : runner.action === 'jumping' || (runner.jumpY || 0) > 8
+                ? mpStrings.actionJumping
+                : runner.action === 'sliding'
+                ? mpStrings.actionSliding
+                : mpStrings.actionRunning;
+              const isRemoteLive = !runner.isBot && !runner.isPlayer && !runner.id.startsWith('friend-');
+              const runnerBet = runner.betAmount ?? betAmountKz;
+              return (
+                <div
+                  key={runner.id}
+                  className={`px-1.5 py-1 rounded-lg border text-[9px] font-mono flex flex-col gap-0.5 min-w-0 ${
+                    runner.isPlayer
+                      ? 'bg-amber-500/15 border-amber-400/70 text-amber-100'
+                      : isRemoteLive
+                      ? 'bg-emerald-950/45 border-emerald-500/50 text-emerald-100'
+                      : 'bg-zinc-900/80 border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-0.5">
+                    <span className="flex items-center gap-1 min-w-0">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: runner.color || '#f59e0b' }}
+                      />
+                      <span className="font-black text-[9px] truncate">F{displayLane}</span>
+                    </span>
+                    <span title={moveLabel}>{moveGlyph}</span>
+                  </div>
+                  <span className="truncate font-bold text-[9px] leading-tight">
+                    {runner.name.replace(/\s*\(.*?\)\s*$/, '')}
+                  </span>
+                  <div className="flex items-center justify-between gap-0.5 text-[8px] opacity-90 tabular-nums">
+                    <span className="text-amber-300 font-bold truncate">
+                      {formatMoney(runnerBet)}
+                    </span>
+                    {status === 'running' && (
+                      <span className="text-zinc-300 shrink-0">
+                        {Math.round(runner.progressDistance || 0)}m
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
         </div>
       </div>
 

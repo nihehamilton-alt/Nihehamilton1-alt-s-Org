@@ -309,10 +309,20 @@ export interface WaveGenerationResult {
   coins: Coin[];
 }
 
-function shuffleLanesUniform(lanes: Lane[]): Lane[] {
+export function createSeededRng(seed: number): () => number {
+  let state = (Math.floor(seed) >>> 0) || 1;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleLanesUniform(lanes: Lane[], rng: () => number = Math.random): Lane[] {
   const arr = [...lanes];
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     const tmp = arr[i];
     arr[i] = arr[j];
     arr[j] = tmp;
@@ -333,18 +343,21 @@ export function spawnCuratedLuandaWave(
   startObstacleId: number,
   startCoinId: number,
   y: number = -240,
-  isHardMode: boolean = false
+  isHardMode: boolean = false,
+  rng: () => number = Math.random
 ): WaveGenerationResult {
   const obstacles: Obstacle[] = [];
   const coins: Coin[] = [];
   const allLanes: Lane[] = [0, 1, 2, 3, 4];
   let curObsId = startObstacleId;
   let curCoinId = startCoinId;
+  const isSeeded = rng !== Math.random;
 
   const pickRandomKey = (pool: LuandaObstacleId[]) => {
-    const filtered = pool.length > 1 ? pool.filter((k) => k !== lastObstaclePicked) : pool;
-    const chosen = filtered[Math.floor(Math.random() * filtered.length)];
-    lastObstaclePicked = chosen;
+    const filtered =
+      !isSeeded && pool.length > 1 ? pool.filter((k) => k !== lastObstaclePicked) : pool;
+    const chosen = filtered[Math.floor(rng() * filtered.length)];
+    if (!isSeeded) lastObstaclePicked = chosen;
     return chosen;
   };
 
@@ -364,17 +377,19 @@ export function spawnCuratedLuandaWave(
   };
 
   // Embaralhamento uniforme real (Fisher-Yates) evitando repetir exatamente as mesmas faixas seguidas
-  let shuffledLanes = shuffleLanesUniform(allLanes);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const sigPreview = `${shuffledLanes[0]}-${shuffledLanes[1]}`;
-    if (sigPreview !== lastWaveSignature) break;
-    shuffledLanes = shuffleLanesUniform(allLanes);
+  let shuffledLanes = shuffleLanesUniform(allLanes, rng);
+  if (!isSeeded) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const sigPreview = `${shuffledLanes[0]}-${shuffledLanes[1]}`;
+      if (sigPreview !== lastWaveSignature) break;
+      shuffledLanes = shuffleLanesUniform(allLanes, rng);
+    }
   }
 
   const patterns = isHardMode
     ? ['duo', 'trio', 'staggered_duo', 'jump_duo', 'dodge_plus_jump', 'solo']
     : ['solo', 'duo', 'jump_duo', 'slide_duo', 'staggered_duo', 'dodge_plus_jump'];
-  const pattern = patterns[Math.floor(Math.random() * patterns.length)];
+  const pattern = patterns[Math.floor(rng() * patterns.length)];
 
   let blockedLanes: Lane[] = [];
 
@@ -383,7 +398,7 @@ export function spawnCuratedLuandaWave(
       const l1 = shuffledLanes[0];
       blockedLanes = [l1];
       const key =
-        Math.random() < 0.7
+        rng() < 0.7
           ? pickRandomKey(JUMPABLE_OBSTACLE_KEYS)
           : pickRandomKey(DODGE_ONLY_OBSTACLE_KEYS);
       pushObstacle(l1, y, key);
@@ -397,8 +412,8 @@ export function spawnCuratedLuandaWave(
       pushObstacle(l1, y, pickRandomKey(JUMPABLE_OBSTACLE_KEYS));
       pushObstacle(
         l2,
-        y - (Math.random() < 0.5 ? 0 : 45),
-        Math.random() < 0.72
+        y - (rng() < 0.5 ? 0 : 45),
+        rng() < 0.72
           ? pickRandomKey(JUMPABLE_OBSTACLE_KEYS)
           : pickRandomKey(DODGE_ONLY_OBSTACLE_KEYS)
       );
@@ -445,7 +460,7 @@ export function spawnCuratedLuandaWave(
       pushObstacle(
         slideLane,
         y,
-        Math.random() < 0.6 ? 'fios-caidos' : pickRandomKey(LOW_OBSTACLE_KEYS)
+        rng() < 0.6 ? 'fios-caidos' : pickRandomKey(LOW_OBSTACLE_KEYS)
       );
       pushObstacle(secondLane, y, pickRandomKey(JUMPABLE_OBSTACLE_KEYS));
 
@@ -467,7 +482,7 @@ export function spawnCuratedLuandaWave(
       pushObstacle(
         l3,
         y - 80,
-        Math.random() < 0.55
+        rng() < 0.55
           ? pickRandomKey(DODGE_ONLY_OBSTACLE_KEYS)
           : pickRandomKey(JUMPABLE_OBSTACLE_KEYS)
       );
@@ -475,14 +490,16 @@ export function spawnCuratedLuandaWave(
     }
   }
 
-  lastWaveSignature = `${shuffledLanes[0]}-${shuffledLanes[1]}`;
+  if (!isSeeded) {
+    lastWaveSignature = `${shuffledLanes[0]}-${shuffledLanes[1]}`;
+  }
 
   // Faixas comprovadamente livres para navegação segura (sempre pelo menos 2 a 4 faixas livres!)
   const openLanes = allLanes.filter((l) => !blockedLanes.includes(l));
 
   // Moedas interativas guiando por uma faixa segura aleatória
-  if (openLanes.length > 0 && Math.random() < 0.7) {
-    const safeLane = openLanes[Math.floor(Math.random() * openLanes.length)];
+  if (openLanes.length > 0 && rng() < 0.7) {
+    const safeLane = openLanes[Math.floor(rng() * openLanes.length)];
     for (let c = 0; c < 3; c++) {
       coins.push({
         id: ++curCoinId,
@@ -501,17 +518,22 @@ export function spawnCuratedLuandaWave(
 export function spawnLuandaObstacleWave(
   startId: number,
   y: number = -100,
-  isHardMode: boolean = false
+  isHardMode: boolean = false,
+  rng: () => number = Math.random
 ): Obstacle[] {
-  const result = spawnCuratedLuandaWave(startId, 0, y, isHardMode);
+  const result = spawnCuratedLuandaWave(startId, 0, y, isHardMode, rng);
   return result.obstacles;
 }
 
-export function spawnRandomPowerUp(id: number, forbiddenLanes: Lane[] = []): PowerUpItem {
+export function spawnRandomPowerUp(
+  id: number,
+  forbiddenLanes: Lane[] = [],
+  rng: () => number = Math.random
+): PowerUpItem {
   const openLanes = ([0, 1, 2, 3, 4] as Lane[]).filter((l) => !forbiddenLanes.includes(l));
-  const lane = openLanes.length > 0 ? openLanes[Math.floor(Math.random() * openLanes.length)] : 2;
+  const lane = openLanes.length > 0 ? openLanes[Math.floor(rng() * openLanes.length)] : 2;
   const types: PowerUpType[] = ['kikuuba-nitro', 'chapeu-kudurista', 'gasosa'];
-  const type = types[Math.floor(Math.random() * types.length)];
+  const type = types[Math.floor(rng() * types.length)];
   const def = POWER_UPS[type];
 
   return {

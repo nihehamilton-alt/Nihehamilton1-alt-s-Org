@@ -32,6 +32,22 @@ export function getDeviceId(): string {
   return id;
 }
 
+const SESSION_PLAYER_ID_KEY = 'rei_run_session_player_id';
+
+export function getSessionPlayerId(): string {
+  if (typeof window === 'undefined') return 'server';
+  try {
+    let id = sessionStorage.getItem(SESSION_PLAYER_ID_KEY);
+    if (!id) {
+      id = `PLY-${Math.random().toString(36).slice(2, 8).toUpperCase()}-${Date.now().toString(36).slice(-4).toUpperCase()}`;
+      sessionStorage.setItem(SESSION_PLAYER_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return getDeviceId();
+  }
+}
+
 export function getDeviceLabel(): string {
   if (typeof navigator === 'undefined') return 'Desconhecido';
   const ua = navigator.userAgent;

@@ -39,6 +39,7 @@ import { useI18n } from '../contexts/I18nContext';
 import { useVoiceChat } from '../contexts/VoiceChatContext';
 import { VoiceChatPanel } from './VoiceChatPanel';
 import { AvatarDoll } from './AvatarDoll';
+import { getMultiplayerStrings } from '../utils/multiplayerStrings';
 
 interface JoinRoomPayload {
   code: string;
@@ -63,6 +64,7 @@ interface LobbyRoomProps {
   onJoinRoom?: (payload: JoinRoomPayload) => void;
   onUpdateMaxPlayers?: (maxPlayers: 2 | 3 | 4 | 5) => void;
   onToggleAccessMode?: (mode?: RoomAccessMode) => void;
+  onUpdateBet?: (amount: number) => void;
   onDeleteRoom?: () => void;
   onFindRandomRoom?: () => Promise<void> | void;
   roomNotice?: string | null;
@@ -72,6 +74,10 @@ interface LobbyRoomProps {
   isDemo: boolean;
   onCloseLobby: () => void;
   streak?: number;
+  isRoomHost?: boolean;
+  waitingForOpponent?: boolean;
+  waitingOpponentNames?: string[];
+  connectedHumansCount?: number;
 }
 
 function formatEditableRoomBet(kz: number, decimals: number, rate: number): string {
@@ -94,6 +100,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   onJoinRoom,
   onUpdateMaxPlayers,
   onToggleAccessMode,
+  onUpdateBet,
   onDeleteRoom,
   onFindRandomRoom,
   roomNotice = null,
@@ -103,8 +110,13 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   isDemo,
   onCloseLobby,
   streak = 0,
+  isRoomHost = true,
+  waitingForOpponent = false,
+  waitingOpponentNames = [],
+  connectedHumansCount = 1,
 }) => {
-  const { currency, currencyMeta, t, rates, formatMoney } = useI18n();
+  const { lang, currency, currencyMeta, t, rates, formatMoney } = useI18n();
+  const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
   const {
     isJoined: isVoiceActive,
     peers: voicePeers,
@@ -1050,23 +1062,37 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                         <span className="text-[11px] font-bold text-zinc-200 truncate w-full">
                           {comp.name}
                         </span>
-                        <span
-                          className={`text-[9px] font-mono px-1.5 py-0.5 rounded mt-0.5 ${
-                            isTalkingNow
-                              ? 'bg-emerald-500 text-zinc-950 font-black'
-                              : comp.isPlayer
-                              ? 'bg-amber-500 text-zinc-950 font-black'
-                              : comp.isBot
-                              ? 'bg-sky-950 text-sky-400 border border-sky-800/60'
-                              : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                          }`}
-                        >
-                          {comp.isPlayer
-                            ? t.lobby.youBadge
-                            : comp.isBot
-                            ? t.lobby.botBadge
-                            : t.lobby.friendBadge}
+                        <span className="text-[10px] font-mono font-black text-emerald-300 tabular-nums mt-0.5">
+                          {formatMoney(comp.betAmount ?? roomConfig.betAmount)}
                         </span>
+                        <div className="flex flex-wrap items-center justify-center gap-1 mt-0.5">
+                          <span
+                            className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                              isTalkingNow
+                                ? 'bg-emerald-500 text-zinc-950 font-black'
+                                : comp.isPlayer
+                                ? 'bg-amber-500 text-zinc-950 font-black'
+                                : comp.isBot
+                                ? 'bg-sky-950 text-sky-400 border border-sky-800/60'
+                                : comp.profileReady === false
+                                ? 'bg-amber-950/90 text-amber-300 border border-amber-500/60 animate-pulse'
+                                : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            }`}
+                          >
+                            {comp.profileReady === false
+                              ? mpStrings.selectingProfileBadge
+                              : comp.isPlayer
+                              ? t.lobby.youBadge
+                              : comp.isBot
+                              ? t.lobby.botBadge
+                              : `🟢 ${t.lobby.friendBadge}`}
+                          </span>
+                          {comp.isHost && !comp.isBot && (
+                            <span className="text-[8px] font-mono font-black px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-400/50">
+                              {mpStrings.hostBadge}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
                       {!comp.isPlayer && (
@@ -1109,6 +1135,44 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             )}
           </div>
 
+          {onUpdateBet && (
+            <div className="p-3 game-subplate rounded-2xl border border-amber-500/30 flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                <span className="font-bold text-amber-300 uppercase tracking-wider">
+                  💰 {mpStrings.roomBetInlineLabel}
+                </span>
+                <span className="font-black text-emerald-300 text-sm tabular-nums">
+                  {formatMoney(roomConfig.betAmount)}
+                </span>
+              </div>
+              {isRoomHost || connectedHumansCount <= 1 ? (
+                <div className="grid grid-cols-5 gap-1">
+                  {[50, 250, 500, 1000, 5000].map((amt) => {
+                    const active = Math.round(roomConfig.betAmount) === amt;
+                    return (
+                      <button
+                        key={amt}
+                        type="button"
+                        onClick={() => onUpdateBet(amt)}
+                        className={`py-1.5 rounded-lg text-[10px] font-mono font-bold border cursor-pointer transition-colors ${
+                          active
+                            ? 'bg-amber-500 text-zinc-950 border-amber-300 font-black'
+                            : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:bg-zinc-800'
+                        }`}
+                      >
+                        {formatMoney(amt)}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <span className="text-[10px] font-mono text-amber-300/90">
+                  👑 {mpStrings.hostControlsBetNote} ({roomConfig.hostName})
+                </span>
+              )}
+            </div>
+          )}
+
           <div className="p-3 game-subplate rounded-2xl border border-amber-500/35 flex items-center justify-between text-xs font-mono">
             <div>
               <span className="text-zinc-500 block text-[10px]">{t.lobby.arenaPot}</span>
@@ -1124,13 +1188,29 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             </div>
           </div>
 
+          {waitingForOpponent && (
+            <div className="p-3 rounded-2xl bg-amber-500/15 border-2 border-amber-400 text-amber-200 text-xs font-mono font-bold flex flex-col gap-1 animate-pulse shadow-[0_0_24px_rgba(245,158,11,0.3)]">
+              <div className="flex items-center gap-2">
+                <span className="text-base shrink-0">⏳</span>
+                <span>{mpStrings.waitingOpponentSelecting}</span>
+              </div>
+              {waitingOpponentNames.length > 0 && (
+                <span className="text-[11px] text-amber-300 pl-6">
+                  {mpStrings.waitingOpponentNamesPrefix} {waitingOpponentNames.join(', ')}
+                </span>
+              )}
+            </div>
+          )}
+
           <button
             type="button"
-            disabled={competitors.length < 2}
+            disabled={competitors.length < 2 || (!isRoomHost && connectedHumansCount > 1)}
             onClick={onStartRace}
-            className="w-full py-4 rounded-2xl game-btn-gold text-zinc-950 font-black text-base uppercase tracking-wider cursor-pointer disabled:opacity-40 active:scale-[0.99]"
+            className="w-full py-4 rounded-2xl game-btn-gold text-zinc-950 font-black text-base uppercase tracking-wider cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed active:scale-[0.99]"
           >
-            {t.lobby.startArenaBtn} ({competitors.length}/{maxPlayers})
+            {!isRoomHost && connectedHumansCount > 1
+              ? mpStrings.waitingHostToStartBtn
+              : `${t.lobby.startArenaBtn} (${competitors.length}/${maxPlayers})`}
           </button>
         </div>
       )}

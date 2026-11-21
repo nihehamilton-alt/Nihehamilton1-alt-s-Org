@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Mic,
   MicOff,
@@ -11,6 +11,8 @@ import {
   Globe,
   ChevronDown,
   ChevronUp,
+  Headphones,
+  ShieldCheck,
 } from 'lucide-react';
 import { useVoiceChat } from '../contexts/VoiceChatContext';
 import { useI18n } from '../contexts/I18nContext';
@@ -22,7 +24,7 @@ interface VoiceChatPanelProps {
 }
 
 export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCode }) => {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const {
     isSupported,
     isOnline,
@@ -38,6 +40,9 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
     localMicLevel,
     mutedPeerIds,
     errorMsg,
+    noiseGateMode,
+    hasHeadset,
+    setNoiseGateMode,
     joinVoice,
     leaveVoice,
     toggleMic,
@@ -47,6 +52,40 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
   } = useVoiceChat();
 
   const [expandedPeers, setExpandedPeers] = useState(false);
+
+  const audioUiLabels = useMemo(() => {
+    const code = (lang || 'pt').slice(0, 2);
+    if (code === 'en') {
+      return {
+        headsetDetected: 'Headset connected · Near-field voice only',
+        headsetAdvice: 'Use earphones for 0 echo · Ambient noise filter active',
+        strictModeBtn: 'Near Voice Only',
+        balancedModeBtn: 'Balanced',
+      };
+    }
+    if (code === 'es') {
+      return {
+        headsetDetected: 'Auriculares detectados · Solo voz de cerca',
+        headsetAdvice: 'Usa auriculares para 0 eco · Filtro ambiental activo',
+        strictModeBtn: 'Solo Voz Cerca',
+        balancedModeBtn: 'Normal',
+      };
+    }
+    if (code === 'fr') {
+      return {
+        headsetDetected: 'Écouteurs détectés · Voix proche uniquement',
+        headsetAdvice: 'Utilisez des écouteurs (0 écho) · Filtre bruit actif',
+        strictModeBtn: 'Voix Proche',
+        balancedModeBtn: 'Normal',
+      };
+    }
+    return {
+      headsetDetected: 'Auriculares ligados · Só voz de perto (0 eco)',
+      headsetAdvice: 'Use auriculares para captar só voz de perto e evitar eco',
+      strictModeBtn: 'Só Voz de Perto',
+      balancedModeBtn: 'Normal',
+    };
+  }, [lang]);
 
   if (!isSupported) return null;
 
@@ -170,10 +209,10 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
           </div>
         </div>
 
-        {/* Barra expandida discreta durante/antes da partida (troca sala/aleatório e mutar jogador específico) */}
+        {/* Barra expandida discreta (canal privado/público, filtro só voz de perto, auriculares e peers) */}
         {isJoined && expandedPeers && (
           <div className="pt-1.5 border-t border-zinc-800/80 flex flex-col gap-1.5 text-[11px] font-mono">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1">
                 <button
                   type="button"
@@ -198,7 +237,38 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
                   🌐 {t.voice.publicTab}
                 </button>
               </div>
-              <span className="text-[10px] text-zinc-500 truncate">{activeRoomKey}</span>
+              <button
+                type="button"
+                onClick={() => setNoiseGateMode(noiseGateMode === 'strict' ? 'balanced' : 'strict')}
+                className={`px-2 py-0.5 rounded-lg border text-[10px] font-bold flex items-center gap-1 cursor-pointer ${
+                  noiseGateMode === 'strict'
+                    ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300'
+                    : 'bg-zinc-900 border-zinc-700 text-zinc-300'
+                }`}
+              >
+                <ShieldCheck size={11} />
+                <span>
+                  {noiseGateMode === 'strict'
+                    ? audioUiLabels.strictModeBtn
+                    : audioUiLabels.balancedModeBtn}
+                </span>
+              </button>
+            </div>
+
+            <div
+              className={`px-2 py-1 rounded-lg border text-[10px] flex items-center justify-between gap-1.5 ${
+                hasHeadset
+                  ? 'bg-emerald-950/45 border-emerald-500/40 text-emerald-300'
+                  : 'bg-amber-950/40 border-amber-500/35 text-amber-200'
+              }`}
+            >
+              <span className="flex items-center gap-1.5 truncate">
+                <Headphones size={12} className="shrink-0" />
+                <span className="truncate">
+                  {hasHeadset ? audioUiLabels.headsetDetected : audioUiLabels.headsetAdvice}
+                </span>
+              </span>
+              <span className="text-[9px] text-zinc-500 shrink-0">{activeRoomKey}</span>
             </div>
 
             {peers.length === 0 ? (
@@ -286,6 +356,38 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
             <span>{t.voice.publicTab}</span>
           </button>
         </div>
+      </div>
+
+      {/* Aviso de Auriculares + Filtro Anti-Ruído / Anti-Eco */}
+      <div
+        className={`px-2.5 py-2 rounded-xl border text-[10px] font-mono flex flex-wrap items-center justify-between gap-2 ${
+          hasHeadset
+            ? 'bg-emerald-950/45 border-emerald-500/45 text-emerald-200'
+            : 'bg-amber-950/35 border-amber-500/35 text-amber-200'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Headphones size={14} className="shrink-0" />
+          <span className="truncate font-bold">
+            {hasHeadset ? audioUiLabels.headsetDetected : audioUiLabels.headsetAdvice}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setNoiseGateMode(noiseGateMode === 'strict' ? 'balanced' : 'strict')}
+          className={`px-2 py-1 rounded-lg border text-[10px] font-black flex items-center gap-1 cursor-pointer shrink-0 transition-colors ${
+            noiseGateMode === 'strict'
+              ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+              : 'bg-zinc-900 border-zinc-700 text-zinc-300'
+          }`}
+        >
+          <ShieldCheck size={11} />
+          <span>
+            {noiseGateMode === 'strict'
+              ? audioUiLabels.strictModeBtn
+              : audioUiLabels.balancedModeBtn}
+          </span>
+        </button>
       </div>
 
       {/* Controlos Principais de Voz (Falar, Desligar Mic para só ouvir, Sair) */}

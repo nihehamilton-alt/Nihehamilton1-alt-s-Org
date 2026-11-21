@@ -1711,12 +1711,15 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         const safeCompLane = Math.max(0, Math.min(4, Math.round(comp.lane))) as Lane;
         const safeCompTargetLane = Math.max(0, Math.min(4, Math.round(comp.targetLane ?? comp.lane))) as Lane;
 
-        // Camada de verificação de limites X (3D): força X para o centro exato da faixa designada quando alinhado
+        // Camada de verificação de limites X (3D): acompanha comp.laneX contínuo para humanos remotos e trava no centro ao alinhar
+        const compLaneAligned =
+          safeCompLane === safeCompTargetLane &&
+          (!Number.isFinite(comp.laneX) || Math.abs(toWorldX(comp.laneX, safeCompTargetLane) - lanePositionsX[safeCompTargetLane]) < 0.05);
         const targetWorldX = isUser
           ? playerLane === playerTargetLane
             ? lanePositionsX[playerTargetLane]
             : toWorldX(playerLaneX, playerTargetLane)
-          : safeCompLane === safeCompTargetLane
+          : compLaneAligned
           ? lanePositionsX[safeCompTargetLane]
           : toWorldX(comp.laneX, safeCompTargetLane);
 
@@ -1741,7 +1744,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         } else {
           const isLaneAligned = isUser
             ? playerLane === playerTargetLane
-            : safeCompLane === safeCompTargetLane;
+            : compLaneAligned;
           if (isLaneAligned) {
             rig.smoothX = destWorldX;
           } else if (live) {

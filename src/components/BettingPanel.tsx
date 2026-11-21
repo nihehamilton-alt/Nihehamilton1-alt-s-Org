@@ -16,6 +16,7 @@ import { useI18n } from '../contexts/I18nContext';
 import { sounds } from '../audio/soundEffects';
 import { TOTAL_GAME_TIME_SECONDS } from '../game/constants';
 import { AvatarDoll } from './AvatarDoll';
+import { getMultiplayerStrings } from '../utils/multiplayerStrings';
 
 interface BettingPanelProps {
   status: GameStatus;
@@ -31,6 +32,11 @@ interface BettingPanelProps {
   playerAvatar?: { id?: string; avatar: string; name: string; color?: string };
   competitors?: Competitor[];
   maxPlayers?: number;
+  isMultiplayerGuest?: boolean;
+  hostName?: string;
+  waitingForOpponent?: boolean;
+  waitingOpponentNames?: string[];
+  connectedHumansCount?: number;
 }
 
 function formatEditableLocalAmount(kz: number, decimals: number, rate: number): string {
@@ -55,8 +61,14 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
   playerAvatar,
   competitors,
   maxPlayers,
+  isMultiplayerGuest = false,
+  hostName,
+  waitingForOpponent = false,
+  waitingOpponentNames = [],
+  connectedHumansCount = 1,
 }) => {
   const { lang, currency, currencyMeta, t, rates, fxState, formatMoney, openModal } = useI18n();
+  const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
 
   const isRunning = status === 'running';
   const isStarting = status === 'starting';
@@ -188,8 +200,15 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                 <span className="text-amber-400 font-bold flex items-center gap-1 truncate">
                   <span>🏁</span> {t.betting.startGridTitle}
                 </span>
-                <span className="text-zinc-400 shrink-0 font-bold">
-                  {activePlayerCount}/5 · {t.betting.lanesRunnersSub}
+                <span className="text-zinc-400 shrink-0 font-bold flex items-center gap-1.5">
+                  {connectedHumansCount > 1 && (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-[9px]">
+                      🟢 {connectedHumansCount}
+                    </span>
+                  )}
+                  <span>
+                    {activePlayerCount}/5 · {t.betting.lanesRunnersSub}
+                  </span>
                 </span>
               </div>
 
@@ -207,6 +226,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                         color: playerAvatar?.color || '#f59e0b',
                         isPlayer: true,
                         isBot: false,
+                        betAmount: betAmountKz,
                       }
                     : fallbackBots[laneIdx]
                     ? {
@@ -217,6 +237,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                         color: fallbackBots[laneIdx]!.color,
                         isPlayer: false,
                         isBot: true,
+                        betAmount: betAmountKz,
                       }
                     : undefined;
 
@@ -233,6 +254,12 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                     );
                   }
 
+                  const occupantBet =
+                    'betAmount' in occupant && typeof occupant.betAmount === 'number'
+                      ? occupant.betAmount
+                      : betAmountKz;
+                  const occupantIsHost = 'isHost' in occupant && Boolean(occupant.isHost);
+
                   if (occupant.isPlayer) {
                     return (
                       <div
@@ -240,7 +267,8 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                         className="bg-gradient-to-b from-amber-500/25 to-amber-500/10 border-2 border-amber-400 rounded-xl p-1.5 text-center flex flex-col items-center shadow-[0_0_16px_rgba(245,158,11,0.3)]"
                       >
                         <span className="text-[9px] font-black text-amber-200 truncate w-full">
-                          {t.betting.centerLaneLabel}
+                          {occupantIsHost ? '👑 ' : ''}
+                          {laneIdx === 2 ? t.betting.centerLaneLabel : `F${laneIdx + 1} · ${t.lobby.youBadge}`}
                         </span>
                         <div
                           className="my-0.5 flex items-center justify-center"
@@ -250,39 +278,63 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                             avatarId={playerAvatar?.id || occupant.avatarId || 'rei-zero'}
                             name={playerAvatar?.name || occupant.name}
                             color={playerAvatar?.color || occupant.color}
-                            size={34}
+                            size={32}
                             variant="full"
                           />
                         </div>
                         <span className="text-[8px] font-black text-amber-300 truncate w-full">
                           {playerAvatar?.name || occupant.name}
                         </span>
+                        <span className="text-[8px] font-mono font-black text-emerald-300 truncate w-full tabular-nums">
+                          {formatMoney(occupantBet)}
+                        </span>
                       </div>
                     );
                   }
 
+                  const isSelectingProfile = 'profileReady' in occupant && occupant.profileReady === false;
+                  const isLiveHuman = !occupant.isBot && !occupant.id.startsWith('friend-');
+
                   return (
                     <div
                       key={laneIdx}
-                      className="game-panel rounded-xl p-1.5 text-center flex flex-col items-center"
+                      className={`game-panel rounded-xl p-1.5 text-center flex flex-col items-center ${
+                        isSelectingProfile
+                          ? 'border border-amber-500/50'
+                          : isLiveHuman
+                          ? 'border border-emerald-500/55 bg-emerald-950/20'
+                          : ''
+                      }`}
                     >
                       <span className="text-[9px] font-bold text-zinc-400">
-                        F{laneIdx + 1} {!occupant.isBot ? '🤝' : ''}
+                        F{laneIdx + 1}{' '}
+                        {isSelectingProfile
+                          ? '⏳'
+                          : occupantIsHost
+                          ? '👑'
+                          : isLiveHuman
+                          ? '🟢'
+                          : !occupant.isBot
+                          ? '🤝'
+                          : ''}
                       </span>
                       <div
                         className="my-0.5 flex items-center justify-center"
-                        title={`${occupant.name} [${occupant.isBot ? t.lobby.botBadge : 'Amigo'}]`}
+                        title={`${occupant.name} [${occupant.isBot ? t.lobby.botBadge : 'Online'}]`}
                       >
                         <AvatarDoll
                           avatarId={occupant.avatarId}
                           name={occupant.name}
                           color={occupant.color}
-                          size={30}
+                          size={28}
                           variant="full"
                         />
                       </div>
                       <span className="text-[8px] text-zinc-300 truncate w-full font-medium">
                         {occupant.name}
+                      </span>
+                      <span className="text-[8px] font-mono font-bold text-amber-300 truncate w-full tabular-nums">
+                        {formatMoney(occupantBet)}
                       </span>
                     </div>
                   );
@@ -316,43 +368,53 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                     max={Number(maxLocal.toFixed(currencyMeta.decimals))}
                     step={stepAmount}
                     value={localInput}
+                    disabled={isMultiplayerGuest}
                     onFocus={() => setIsEditingInput(true)}
                     onChange={(e) => handleLocalInputChange(e.target.value)}
                     onBlur={handleLocalInputBlur}
-                    className="w-full game-subplate rounded-xl pl-12 pr-3 py-2.5 text-zinc-100 font-mono font-black text-base focus:outline-none focus:border-amber-400"
+                    className="w-full game-subplate rounded-xl pl-12 pr-3 py-2.5 text-zinc-100 font-mono font-black text-base focus:outline-none focus:border-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
                   />
                 </div>
                 <button
                   type="button"
+                  disabled={isMultiplayerGuest}
                   onClick={() => {
                     setIsEditingInput(false);
                     onBetChange(Math.max(MIN_BET_KZ, Math.floor(betAmountKz / 2)));
                   }}
-                  className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer"
+                  className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   ½
                 </button>
                 <button
                   type="button"
+                  disabled={isMultiplayerGuest}
                   onClick={() => {
                     setIsEditingInput(false);
                     onBetChange(Math.min(MAX_BET_KZ, betAmountKz * 2));
                   }}
-                  className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer"
+                  className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   2X
                 </button>
                 <button
                   type="button"
+                  disabled={isMultiplayerGuest}
                   onClick={() => {
                     setIsEditingInput(false);
                     onBetChange(Math.max(MIN_BET_KZ, Math.min(MAX_BET_KZ, Math.floor(balanceKz))));
                   }}
-                  className="px-2.5 py-2.5 game-btn-secondary text-amber-400 font-bold text-xs rounded-xl cursor-pointer"
+                  className="px-2.5 py-2.5 game-btn-secondary text-amber-400 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {t.betting.maxBtn}
                 </button>
               </div>
+              {isMultiplayerGuest && (
+                <div className="px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/35 text-[10px] font-mono text-amber-300 flex items-center justify-between gap-2">
+                  <span>👑 {mpStrings.hostControlsBetNote}</span>
+                  {hostName && <strong className="text-amber-200 shrink-0">{hostName}</strong>}
+                </div>
+              )}
 
               {/* Conversão Global Automática em Tempo Real (Equivalência Mundial da Partida) */}
               <div className="game-subplate rounded-xl p-2.5 flex flex-col gap-1.5">
@@ -396,8 +458,9 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                     <button
                       key={`${currency}-${idx}`}
                       type="button"
+                      disabled={isMultiplayerGuest}
                       onClick={() => handleChipClick(chip.kz)}
-                      className={`py-1.5 rounded-lg text-[10px] font-mono font-bold transition-all border cursor-pointer truncate px-0.5 ${
+                      className={`py-1.5 rounded-lg text-[10px] font-mono font-bold transition-all border cursor-pointer truncate px-0.5 disabled:opacity-45 disabled:cursor-not-allowed ${
                         isActive
                           ? 'bg-gradient-to-b from-amber-300 to-amber-500 text-zinc-950 border-amber-300 font-black shadow-sm'
                           : 'bg-zinc-950/90 text-zinc-400 border-zinc-800 hover:bg-zinc-800 hover:text-zinc-200'
@@ -493,17 +556,34 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
               </div>
             )}
 
+            {waitingForOpponent && (
+              <div className="p-3 rounded-xl bg-amber-500/15 border-2 border-amber-400 text-amber-200 text-xs font-mono font-bold flex flex-col gap-1 animate-pulse shadow-[0_0_20px_rgba(245,158,11,0.25)]">
+                <div className="flex items-center gap-2">
+                  <span className="text-base shrink-0">⏳</span>
+                  <span>{mpStrings.waitingOpponentSelecting}</span>
+                </div>
+                {waitingOpponentNames.length > 0 && (
+                  <span className="text-[11px] text-amber-300 pl-6">
+                    {mpStrings.waitingOpponentNamesPrefix} {waitingOpponentNames.join(', ')}
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* Botão de Disputa */}
             <motion.button
-              whileHover={{ scale: 1.015 }}
-              whileTap={{ scale: 0.985 }}
+              whileHover={{ scale: isMultiplayerGuest ? 1 : 1.015 }}
+              whileTap={{ scale: isMultiplayerGuest ? 1 : 0.985 }}
               type="button"
               onClick={onStartRound}
-              disabled={balanceKz < betAmountKz}
-              className="w-full py-4 rounded-xl font-black text-base game-btn-gold flex flex-col items-center justify-center cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed px-2 text-center"
+              disabled={balanceKz < betAmountKz || (isMultiplayerGuest && connectedHumansCount > 1)}
+              className="w-full py-4 rounded-xl font-black text-base game-btn-gold flex flex-col items-center justify-center cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed px-2 text-center"
             >
               <span className="text-[11px] uppercase tracking-wider font-extrabold text-amber-950 flex items-center gap-1.5">
-                <span>👑</span> {t.betting.ctaTop}
+                <span>👑</span>{' '}
+                {isMultiplayerGuest && connectedHumansCount > 1
+                  ? mpStrings.waitingHostToStartBtn
+                  : t.betting.ctaTop}
               </span>
               <span className="text-lg font-mono font-black">
                 {t.betting.ctaBottom} {formatMoney(betAmountKz)}

@@ -7,11 +7,13 @@ import { useI18n } from '../contexts/I18nContext';
 import { RoomConfig } from '../types/game';
 import { sounds } from '../audio/soundEffects';
 import { AvatarDoll } from './AvatarDoll';
+import { getMultiplayerStrings } from '../utils/multiplayerStrings';
 
 interface InviteOnboardingModalProps {
   roomConfig: RoomConfig;
   isDemo: boolean;
   initialAvatarId: string;
+  hostWaitingForStart?: boolean;
   onComplete: (result: { name: string; avatarId: string }) => void;
 }
 
@@ -19,9 +21,11 @@ export const InviteOnboardingModal: React.FC<InviteOnboardingModalProps> = ({
   roomConfig,
   isDemo,
   initialAvatarId,
+  hostWaitingForStart = false,
   onComplete,
 }) => {
   const { lang, t, formatMoney } = useI18n();
+  const mpStrings = getMultiplayerStrings(lang);
   const [step, setStep] = useState<'customize' | 'entering'>('customize');
   const [chosenName, setChosenName] = useState<string>('');
   const [chosenAvatarId, setChosenAvatarId] = useState<string>(initialAvatarId || 'rei-zero');
@@ -32,11 +36,25 @@ export const InviteOnboardingModal: React.FC<InviteOnboardingModalProps> = ({
 
   useEffect(() => {
     if (step !== 'entering') return;
-    setCountdown(3);
+    if (hostWaitingForStart) {
+      setCountdown(1);
+      const fastTimer = setTimeout(() => {
+        try {
+          sounds.playCoin();
+        } catch {
+          // noop
+        }
+        onComplete({
+          name: chosenName.trim() || chosenAvatar.name,
+          avatarId: chosenAvatarId,
+        });
+      }, 350);
+      return () => clearTimeout(fastTimer);
+    }
 
-    const t1 = setTimeout(() => setCountdown(2), 1000);
-    const t2 = setTimeout(() => setCountdown(1), 2000);
-    const t3 = setTimeout(() => {
+    setCountdown(2);
+    const t1 = setTimeout(() => setCountdown(1), 450);
+    const t2 = setTimeout(() => {
       try {
         sounds.playCoin();
       } catch {
@@ -46,14 +64,13 @@ export const InviteOnboardingModal: React.FC<InviteOnboardingModalProps> = ({
         name: chosenName.trim() || chosenAvatar.name,
         avatarId: chosenAvatarId,
       });
-    }, 3000);
+    }, 950);
 
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
-      clearTimeout(t3);
     };
-  }, [step, chosenName, chosenAvatarId, chosenAvatar.name, onComplete]);
+  }, [step, hostWaitingForStart, chosenName, chosenAvatarId, chosenAvatar.name, onComplete]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -107,6 +124,13 @@ export const InviteOnboardingModal: React.FC<InviteOnboardingModalProps> = ({
             </span>
           </div>
         </div>
+
+        {hostWaitingForStart && (
+          <div className="relative z-10 p-3 rounded-2xl border-2 border-amber-400 bg-amber-500/20 text-amber-200 text-xs font-mono font-bold flex items-center gap-2.5 animate-pulse shadow-[0_0_24px_rgba(245,158,11,0.35)]">
+            <span className="text-lg shrink-0">⏳</span>
+            <span className="leading-snug">{mpStrings.hostWaitingOnYouBanner}</span>
+          </div>
+        )}
 
         {/* Account Balance Mode Banner (Test Phase Funded vs Real Phase 0 KZ) */}
         <div

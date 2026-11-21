@@ -81,6 +81,48 @@ export interface Competitor {
   finished: boolean;
   finishTime?: number;
   rank?: number;
+  profileReady?: boolean;
+  isHost?: boolean;
+  isRemoteHuman?: boolean;
+  betAmount?: number;
+}
+
+export interface RemoteRunnerSnapshot {
+  playerId: string;
+  progressDistance: number;
+  lane: Lane;
+  targetLane: Lane;
+  laneX: number;
+  action: PlayerAction;
+  jumpY: number;
+  stumbling: boolean;
+  finished: boolean;
+  updatedAt: number;
+}
+
+export interface LocalRunnerTelemetry {
+  progressDistance: number;
+  lane: Lane;
+  targetLane: Lane;
+  laneX: number;
+  action: PlayerAction;
+  jumpY: number;
+  stumbling: boolean;
+  finished: boolean;
+}
+
+export interface RoomStandingEntry {
+  id: string;
+  name: string;
+  avatar: string;
+  avatarId: string;
+  color: string;
+  isBot: boolean;
+  lane: Lane;
+  progressDistance: number;
+  rank: number;
+  betAmount: number;
+  payoutKz: number;
 }
 
 export type GameStatus = 'idle' | 'lobby' | 'starting' | 'running' | 'completed';

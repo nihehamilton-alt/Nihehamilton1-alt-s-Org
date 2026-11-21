@@ -2,7 +2,12 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { motion, useReducedMotion, Variants } from 'framer-motion';
 import confetti from 'canvas-confetti';
 import { Share2, Check } from 'lucide-react';
-import { Competitor, ThreeTorneirasSplit, RacePerformanceMetrics } from '../types/game';
+import {
+  Competitor,
+  ThreeTorneirasSplit,
+  RacePerformanceMetrics,
+  RoomStandingEntry,
+} from '../types/game';
 import { CoronationCeremony } from './CoronationCeremony';
 import { CelebrationExplosion } from './CelebrationExplosion';
 import { Top1GoldenBurst } from './Top1GoldenBurst';
@@ -14,12 +19,15 @@ import { AiCoachPanel } from './AiCoachPanel';
 import { useI18n } from '../contexts/I18nContext';
 import { sounds } from '../audio/soundEffects';
 import { AvatarDoll } from './AvatarDoll';
+import { getMultiplayerStrings } from '../utils/multiplayerStrings';
 
 interface ResultsPodiumProps {
   competitors: Competitor[];
   userWonPayout: number;
   userRank: number;
+  betAmountKz: number;
   threeTorneiras: ThreeTorneirasSplit;
+  authoritativeRankings?: RoomStandingEntry[] | null;
   streak?: number;
   performance?: RacePerformanceMetrics | null;
   onPlayAgain: () => void;
@@ -136,7 +144,9 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
   competitors,
   userWonPayout,
   userRank,
+  betAmountKz,
   threeTorneiras,
+  authoritativeRankings = null,
   streak = 0,
   performance = null,
   onPlayAgain,
@@ -146,7 +156,8 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
   canPlayAgain = true,
   returnTarget = 'lobby',
 }) => {
-  const { t, formatMoney } = useI18n();
+  const { lang, t, formatMoney } = useI18n();
+  const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
   const shouldReduceMotion = useReducedMotion();
   const [activeTab, setActiveTab] = useState<'ceremony' | 'podium' | 'both'>('ceremony');
   const [shareState, setShareState] = useState<'idle' | 'shared' | 'copied'>('idle');
@@ -297,7 +308,67 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
     };
   }, [showPodium, ceremonyFinished]);
 
-  const sorted = [...competitors].sort((a, b) => b.progressDistance - a.progressDistance);
+  const sorted = useMemo(() => {
+    if (authoritativeRankings && authoritativeRankings.length > 0) {
+      const compMap = new Map(competitors.map((c) => [c.id, c]));
+      return [...authoritativeRankings]
+        .sort((a, b) => a.rank - b.rank)
+        .map((r) => {
+          const existing = compMap.get(r.id);
+          return (
+            existing
+              ? {
+                  ...existing,
+                  progressDistance: r.progressDistance,
+                  rank: r.rank,
+                }
+              : {
+                  id: r.id,
+                  name: r.name,
+                  avatar: r.avatar,
+                  avatarId: r.avatarId,
+                  color: r.color,
+                  lane: r.lane,
+                  targetLane: r.lane,
+                  laneX: 0,
+                  yOffset: 0,
+                  progressDistance: r.progressDistance,
+                  action: 'running' as const,
+                  jumpY: 0,
+                  isBot: r.isBot,
+                  isPlayer: false,
+                  stumbling: false,
+                  finished: true,
+                  rank: r.rank,
+                }
+          );
+        });
+    }
+    return [...competitors].sort((a, b) => b.progressDistance - a.progressDistance);
+  }, [authoritativeRankings, competitors]);
+
+  const breakdownRows = useMemo(() => {
+    return sorted.map((runner, idx) => {
+      const rank = idx + 1;
+      const auth = authoritativeRankings?.find((a) => a.id === runner.id);
+      const runnerBet = auth?.betAmount ?? betAmountKz;
+      const runnerPayout =
+        auth?.payoutKz ??
+        (rank === 1
+          ? threeTorneiras.firstPrizeKz
+          : rank === 2
+          ? threeTorneiras.secondPrizeKz
+          : 0);
+      return {
+        runner,
+        rank,
+        betAmount: runnerBet,
+        payoutKz: runnerPayout,
+      };
+    });
+  }, [sorted, authoritativeRankings, betAmountKz, threeTorneiras.firstPrizeKz, threeTorneiras.secondPrizeKz]);
+
+  const netResultKz = userWonPayout - betAmountKz;
 
   const renderRunnerName = (comp: Competitor) => {
     if (!comp.isPlayer || comp.name.includes(t.youTag)) return comp.name;
@@ -372,8 +443,6 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
   const first = sorted[0];
   const second = sorted[1];
   const third = sorted[2];
-  const fourth = sorted[3];
-  const fifth = sorted[4];
 
   const rankBackdropClass =
     userRank === 1
@@ -569,6 +638,61 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
             </div>
           )}
 
+          {/* Resumo Financeiro da Tua Partida: Apostaste · Ganhaste · Saldo Líquido */}
+          <div className="w-full grid grid-cols-3 gap-2 my-1 font-mono">
+            <div className="p-2 rounded-xl game-subplate border border-zinc-700/70 flex flex-col items-center">
+              <span className="text-[9px] uppercase text-zinc-400 font-bold">
+                {mpStrings.youBetLabel}
+              </span>
+              <span className="text-xs sm:text-sm font-black text-zinc-100 tabular-nums">
+                {formatMoney(betAmountKz)}
+              </span>
+            </div>
+            <div
+              className={`p-2 rounded-xl border flex flex-col items-center ${
+                userWonPayout > 0
+                  ? 'bg-emerald-950/75 border-emerald-500/50'
+                  : 'game-subplate border-zinc-700/70'
+              }`}
+            >
+              <span className="text-[9px] uppercase text-zinc-400 font-bold">
+                {mpStrings.youWonLabel}
+              </span>
+              <span
+                className={`text-xs sm:text-sm font-black tabular-nums ${
+                  userWonPayout > 0 ? 'text-emerald-400' : 'text-zinc-400'
+                }`}
+              >
+                {userWonPayout > 0 ? `+${formatMoney(userWonPayout)}` : formatMoney(0)}
+              </span>
+            </div>
+            <div
+              className={`p-2 rounded-xl border flex flex-col items-center ${
+                netResultKz > 0
+                  ? 'bg-amber-500/15 border-amber-400/60'
+                  : netResultKz === 0
+                  ? 'game-subplate border-zinc-700/70'
+                  : 'bg-rose-950/50 border-rose-500/40'
+              }`}
+            >
+              <span className="text-[9px] uppercase text-zinc-400 font-bold">
+                {mpStrings.netResultLabel}
+              </span>
+              <span
+                className={`text-xs sm:text-sm font-black tabular-nums ${
+                  netResultKz > 0
+                    ? 'text-amber-300'
+                    : netResultKz === 0
+                    ? 'text-zinc-200'
+                    : 'text-rose-400'
+                }`}
+              >
+                {netResultKz > 0 ? '+' : ''}
+                {formatMoney(netResultKz)}
+              </span>
+            </div>
+          </div>
+
           {/* Seletor de visualização */}
           <div className="flex flex-wrap items-center justify-center gap-1.5 game-subplate p-1 rounded-xl border border-amber-500/35 text-xs font-mono mt-1">
             <button
@@ -665,10 +789,10 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       {renderRunnerName(second)}
                     </span>
                     <span className="text-[9px] font-mono text-zinc-400">
-                      {Math.floor(second.progressDistance)}m
+                      {Math.floor(second.progressDistance)}m · {mpStrings.stakePerRunnerShort}: {formatMoney(breakdownRows[1]?.betAmount ?? betAmountKz)}
                     </span>
                     <span className="text-[11px] font-mono font-black text-emerald-400 bg-emerald-950/90 px-2 py-0.5 rounded-md border border-emerald-800 mt-0.5">
-                      +{formatMoney(threeTorneiras.secondPrizeKz)}
+                      +{formatMoney(breakdownRows[1]?.payoutKz ?? threeTorneiras.secondPrizeKz)}
                     </span>
                   </motion.div>
 
@@ -735,10 +859,10 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       {renderRunnerName(first)}
                     </span>
                     <span className="text-[10px] font-mono text-zinc-400">
-                      {Math.floor(first.progressDistance)}m
+                      {Math.floor(first.progressDistance)}m · {mpStrings.stakePerRunnerShort}: {formatMoney(breakdownRows[0]?.betAmount ?? betAmountKz)}
                     </span>
                     <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-950 px-2.5 py-0.5 rounded-md border border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)] mt-0.5">
-                      +{formatMoney(threeTorneiras.firstPrizeKz)}
+                      +{formatMoney(breakdownRows[0]?.payoutKz ?? threeTorneiras.firstPrizeKz)}
                     </span>
                   </motion.div>
 
@@ -788,7 +912,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       {renderRunnerName(third)}
                     </span>
                     <span className="text-[9px] font-mono text-zinc-400">
-                      {Math.floor(third.progressDistance)}m
+                      {Math.floor(third.progressDistance)}m · {mpStrings.stakePerRunnerShort}: {formatMoney(breakdownRows[2]?.betAmount ?? betAmountKz)}
                     </span>
                     <span className="text-[10px] font-mono text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded-md border border-amber-800/80 mt-0.5">
                       {t.podium.honorBadge}
@@ -818,59 +942,79 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           </motion.div>
         )}
 
-        {(fourth || fifth) && (
-          <motion.div
-            variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
-            className="game-subplate rounded-2xl p-2.5 flex flex-col gap-1.5 font-mono text-xs"
-          >
-            <div className="flex items-center justify-between text-[10px] text-zinc-400 uppercase tracking-wider font-bold px-1">
-              <span>{t.podium.eliminatedTitle}</span>
-              <span>{formatMoney(0)}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {fourth && (
-                <div className="p-2 game-panel rounded-xl flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-zinc-500 font-bold text-xs">4</span>
-                    <AvatarDoll
-                      avatarId={fourth.avatarId}
-                      name={fourth.name}
-                      color={fourth.color}
-                      size={22}
-                      variant="bust"
-                    />
-                    <span className="truncate max-w-[90px] text-zinc-300 text-[11px] font-sans">
-                      {renderRunnerName(fourth)}
-                    </span>
-                  </div>
-                  <span className="text-zinc-500 text-[10px]">
-                    {Math.floor(fourth.progressDistance)}m
+        {/* Tabela Completa: Quanto Cada Corredor Apostou e Ganhou */}
+        <motion.div
+          variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
+          className="game-subplate rounded-2xl p-3 flex flex-col gap-2 font-mono text-xs border border-amber-500/25"
+        >
+          <div className="flex items-center justify-between text-[10px] text-amber-400 uppercase tracking-wider font-black px-1">
+            <span>💰 {mpStrings.breakdownTitle}</span>
+            <span className="text-zinc-400">
+              {breakdownRows.length} {t.lobby.playersSuffix}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-12 gap-1 px-2 py-1 text-[9px] uppercase text-zinc-500 font-bold border-b border-white/10">
+            <span className="col-span-5">{mpStrings.colRunner}</span>
+            <span className="col-span-2 text-right">{mpStrings.colDistance}</span>
+            <span className="col-span-2 text-right">{mpStrings.colBet}</span>
+            <span className="col-span-3 text-right">{mpStrings.colWon}</span>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            {breakdownRows.map(({ runner, rank, betAmount: rBet, payoutKz }) => (
+              <div
+                key={runner.id}
+                className={`grid grid-cols-12 gap-1 items-center px-2 py-1.5 rounded-xl border ${
+                  runner.isPlayer
+                    ? 'bg-amber-500/15 border-amber-400/60 text-amber-100'
+                    : rank <= 2
+                    ? 'bg-emerald-950/35 border-emerald-500/30 text-zinc-200'
+                    : 'game-panel border-zinc-800/80 text-zinc-300'
+                }`}
+              >
+                <div className="col-span-5 flex items-center gap-1.5 min-w-0">
+                  <span
+                    className={`text-[10px] font-black w-4 shrink-0 ${
+                      rank === 1
+                        ? 'text-amber-400'
+                        : rank === 2
+                        ? 'text-sky-400'
+                        : rank === 3
+                        ? 'text-orange-400'
+                        : 'text-zinc-500'
+                    }`}
+                  >
+                    {rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `${rank}º`}
+                  </span>
+                  <AvatarDoll
+                    avatarId={runner.avatarId}
+                    name={runner.name}
+                    color={runner.color}
+                    size={20}
+                    variant="bust"
+                  />
+                  <span className="truncate font-sans font-bold text-[11px]">
+                    {renderRunnerName(runner)}
                   </span>
                 </div>
-              )}
-              {fifth && (
-                <div className="p-2 game-panel rounded-xl flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-zinc-500 font-bold text-xs">5</span>
-                    <AvatarDoll
-                      avatarId={fifth.avatarId}
-                      name={fifth.name}
-                      color={fifth.color}
-                      size={22}
-                      variant="bust"
-                    />
-                    <span className="truncate max-w-[90px] text-zinc-300 text-[11px] font-sans">
-                      {renderRunnerName(fifth)}
-                    </span>
-                  </div>
-                  <span className="text-zinc-500 text-[10px]">
-                    {Math.floor(fifth.progressDistance)}m
-                  </span>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
+                <span className="col-span-2 text-right text-[10px] text-zinc-400 tabular-nums">
+                  {Math.floor(runner.progressDistance)}m
+                </span>
+                <span className="col-span-2 text-right text-[10px] text-zinc-300 tabular-nums">
+                  {formatMoney(rBet)}
+                </span>
+                <span
+                  className={`col-span-3 text-right text-[11px] font-black tabular-nums ${
+                    payoutKz > 0 ? 'text-emerald-400' : 'text-zinc-500'
+                  }`}
+                >
+                  {payoutKz > 0 ? `+${formatMoney(payoutKz)}` : formatMoney(0)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </motion.div>
 
         {/* Widget Análise de Desempenho com Framer Motion */}
         {performance && (
