@@ -105,8 +105,16 @@ const HEADSET_KEYWORDS = [
   'handsfree',
   'auricular',
   'fone',
+  'fones',
   'wired mic',
   'usb audio',
+  'type-c',
+  'usb-c',
+  'wireless',
+  'jbl',
+  'sony wh',
+  'sony wf',
+  'bose',
 ];
 
 function isHeadsetDeviceLabel(label: string): boolean {
@@ -232,6 +240,8 @@ export const VoiceChatProvider: React.FC<{
   const joinedRef = useRef(isJoined);
   const noiseGateModeRef = useRef<VoiceNoiseGateMode>(noiseGateMode);
   const hasHeadsetRef = useRef<boolean>(hasHeadset);
+  const preferredInputIdRef = useRef<string | undefined>(undefined);
+  const preferredOutputIdRef = useRef<string | undefined>(undefined);
   const anyRemoteSpeakingRef = useRef<boolean>(false);
   const mutedPeersSetRef = useRef<Set<string>>(new Set());
 
@@ -512,8 +522,21 @@ export const VoiceChatProvider: React.FC<{
     syncProcessorParams();
   }, [peers, mutedPeerIds, syncProcessorParams]);
 
+  const applyPreferredOutputSink = useCallback((audioEl: HTMLAudioElement, sinkId?: string) => {
+    const targetSink = sinkId ?? preferredOutputIdRef.current;
+    if (!targetSink) return;
+    const sinkable = audioEl as HTMLAudioElement & {
+      sinkId?: string;
+      setSinkId?: (id: string) => Promise<void>;
+    };
+    if (typeof sinkable.setSinkId === 'function' && sinkable.sinkId !== targetSink) {
+      sinkable.setSinkId(targetSink).catch(() => {});
+    }
+  }, []);
+
   const refreshAudioDevices = useCallback(async (): Promise<{
     preferredInputId?: string;
+    preferredOutputId?: string;
     detectedHeadset: boolean;
   }> => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
@@ -523,29 +546,81 @@ export const VoiceChatProvider: React.FC<{
       const devices = await navigator.mediaDevices.enumerateDevices();
       const audioInputs = devices.filter((d) => d.kind === 'audioinput');
       const audioOutputs = devices.filter((d) => d.kind === 'audiooutput');
-      const headsetInput = audioInputs.find((d) => d.label && isHeadsetDeviceLabel(d.label));
-      const headsetOutput = audioOutputs.find((d) => d.label && isHeadsetDeviceLabel(d.label));
+      const headsetInput = audioInputs.find(
+        (d) => d.label && isHeadsetDeviceLabel(d.label) && d.deviceId !== 'communications'
+      ) || audioInputs.find((d) => d.label && isHeadsetDeviceLabel(d.label));
+      const headsetOutput = audioOutputs.find(
+        (d) => d.label && isHeadsetDeviceLabel(d.label) && d.deviceId !== 'communications'
+      ) || audioOutputs.find((d) => d.label && isHeadsetDeviceLabel(d.label));
       const detected = Boolean(headsetInput || headsetOutput);
       hasHeadsetRef.current = detected;
+      preferredInputIdRef.current = headsetInput?.deviceId || undefined;
+      preferredOutputIdRef.current = headsetOutput?.deviceId || undefined;
       setHasHeadset(detected);
       syncProcessorParams();
       if (headsetInput?.label) {
         setSelectedMicLabel(headsetInput.label);
       }
+      if (headsetOutput?.deviceId) {
+        for (const audioEl of remoteAudiosRef.current.values()) {
+          applyPreferredOutputSink(audioEl, headsetOutput.deviceId);
+        }
+      }
       return {
         preferredInputId: headsetInput?.deviceId || undefined,
+        preferredOutputId: headsetOutput?.deviceId || undefined,
         detectedHeadset: detected,
       };
     } catch {
       return { detectedHeadset: false };
     }
-  }, [syncProcessorParams]);
+  }, [applyPreferredOutputSink, syncProcessorParams]);
 
   useEffect(() => {
     refreshAudioDevices().catch(() => {});
     if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
       const onDeviceChange = () => {
-        refreshAudioDevices().catch(() => {});
+        void (async () => {
+          const { preferredInputId } = await refreshAudioDevices();
+          if (
+            preferredInputId &&
+            joinedRef.current &&
+            !micMutedRef.current &&
+            rawMicStreamRef.current &&
+            navigator.mediaDevices?.getUserMedia
+          ) {
+            const currentTrack = rawMicStreamRef.current.getAudioTracks()[0];
+            const currentDeviceId = currentTrack?.getSettings?.().deviceId;
+            if (currentDeviceId && currentDeviceId !== preferredInputId) {
+              try {
+                const nextRaw = await navigator.mediaDevices.getUserMedia({
+                  audio: {
+                    deviceId: { exact: preferredInputId },
+                    echoCancellation: { ideal: true },
+                    noiseSuppression: { ideal: true },
+                    autoGainControl: false,
+                    channelCount: 1,
+                    sampleRate: 48000,
+                  },
+                  video: false,
+                });
+                const nextProcessed = await buildProcessedVocalPipelineRef.current?.(nextRaw);
+                const nextTrack = nextProcessed?.getAudioTracks()[0];
+                if (nextTrack) {
+                  for (const pc of pcsRef.current.values()) {
+                    for (const sender of pc.getSenders()) {
+                      if (sender.track?.kind === 'audio') {
+                        await sender.replaceTrack(nextTrack).catch(() => {});
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // Keep existing mic stream if headset device switch fails
+              }
+            }
+          }
+        })();
       };
       navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
       return () => {
@@ -662,20 +737,24 @@ export const VoiceChatProvider: React.FC<{
     [ensurePlaybackCtxRunning]
   );
 
+  const detachFallbackWebAudioPlayback = useCallback((remotePeerId: string) => {
+    const existing = remoteFallbackAudioRef.current.get(remotePeerId);
+    if (existing) {
+      try {
+        existing.source.disconnect();
+        existing.gain.disconnect();
+      } catch {
+        // noop
+      }
+      remoteFallbackAudioRef.current.delete(remotePeerId);
+    }
+  }, []);
+
   const attachFallbackWebAudioPlayback = useCallback(
     async (remotePeerId: string, remoteStream: MediaStream) => {
       const ctx = await ensurePlaybackCtxRunning();
       if (!ctx) return;
-      const existing = remoteFallbackAudioRef.current.get(remotePeerId);
-      if (existing) {
-        try {
-          existing.source.disconnect();
-          existing.gain.disconnect();
-        } catch {
-          // noop
-        }
-        remoteFallbackAudioRef.current.delete(remotePeerId);
-      }
+      detachFallbackWebAudioPlayback(remotePeerId);
       try {
         const source = ctx.createMediaStreamSource(remoteStream);
         const gain = ctx.createGain();
@@ -688,7 +767,7 @@ export const VoiceChatProvider: React.FC<{
         // noop
       }
     },
-    [ensurePlaybackCtxRunning]
+    [detachFallbackWebAudioPlayback, ensurePlaybackCtxRunning]
   );
 
   const unlockRemoteAudioElements = useCallback(() => {
@@ -697,19 +776,31 @@ export const VoiceChatProvider: React.FC<{
       void attachRemoteAnalyser(remotePeerId, stream);
     }
     for (const [remotePeerId, audioEl] of remoteAudiosRef.current.entries()) {
+      applyPreferredOutputSink(audioEl);
       const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
       audioEl.muted = shouldMute;
       audioEl.volume = shouldMute ? 0 : 1.0;
       if (audioEl.paused && audioEl.srcObject) {
-        audioEl.play().catch(() => {
-          const stream = remoteStreamsRef.current.get(remotePeerId);
-          if (stream) {
-            void attachFallbackWebAudioPlayback(remotePeerId, stream);
-          }
-        });
+        audioEl
+          .play()
+          .then(() => {
+            detachFallbackWebAudioPlayback(remotePeerId);
+          })
+          .catch(() => {
+            const stream = remoteStreamsRef.current.get(remotePeerId);
+            if (stream) {
+              void attachFallbackWebAudioPlayback(remotePeerId, stream);
+            }
+          });
       }
     }
-  }, [attachFallbackWebAudioPlayback, attachRemoteAnalyser, ensurePlaybackCtxRunning]);
+  }, [
+    applyPreferredOutputSink,
+    attachFallbackWebAudioPlayback,
+    attachRemoteAnalyser,
+    detachFallbackWebAudioPlayback,
+    ensurePlaybackCtxRunning,
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -847,6 +938,11 @@ export const VoiceChatProvider: React.FC<{
     },
     [buildActivitySnapshot, sendSignal, settleTrackerClocks, stopAudioPipeline]
   );
+
+  const buildProcessedVocalPipelineRef = useRef<
+    ((rawStream: MediaStream) => Promise<MediaStream>) | null
+  >(null);
+  buildProcessedVocalPipelineRef.current = buildProcessedVocalPipeline;
 
   const closePeerConnection = useCallback((remotePeerId: string) => {
     makingOfferRef.current.delete(remotePeerId);
@@ -988,22 +1084,45 @@ export const VoiceChatProvider: React.FC<{
     }
     try {
       const { preferredInputId } = await refreshAudioDevices();
-      const audioConstraints: MediaTrackConstraints & { voiceIsolation?: boolean } = {
+      const buildConstraints = (deviceId?: string): MediaTrackConstraints & { voiceIsolation?: boolean } => ({
         echoCancellation: { ideal: true },
         noiseSuppression: { ideal: true },
         autoGainControl: false,
         channelCount: 1,
         sampleRate: 48000,
         voiceIsolation: true,
-      };
-      if (preferredInputId) {
-        audioConstraints.deviceId = { ideal: preferredInputId };
-      }
+        ...(deviceId ? { deviceId: { ideal: deviceId } } : {}),
+      });
 
-      const rawStream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
+      let rawStream = await navigator.mediaDevices.getUserMedia({
+        audio: buildConstraints(preferredInputId),
         video: false,
       });
+
+      const { preferredInputId: discoveredHeadsetId } = await refreshAudioDevices();
+      const initialTrack = rawStream.getAudioTracks()[0];
+      const initialDeviceId = initialTrack?.getSettings?.().deviceId;
+      if (
+        discoveredHeadsetId &&
+        initialDeviceId !== discoveredHeadsetId &&
+        !(initialTrack?.label && isHeadsetDeviceLabel(initialTrack.label))
+      ) {
+        try {
+          const headsetStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              ...buildConstraints(),
+              deviceId: { exact: discoveredHeadsetId },
+            },
+            video: false,
+          });
+          rawStream.getTracks().forEach((t) => t.stop());
+          rawStream = headsetStream;
+          await refreshAudioDevices();
+        } catch {
+          // Mantém o microfone atual caso o dispositivo auricular recuse seleção direta
+        }
+      }
+
       const micTrack = rawStream.getAudioTracks()[0];
       if (micTrack?.applyConstraints) {
         micTrack
@@ -1014,7 +1133,6 @@ export const VoiceChatProvider: React.FC<{
           })
           .catch(() => {});
       }
-      await refreshAudioDevices();
       const processed = await buildProcessedVocalPipeline(rawStream);
       return processed;
     } catch {
@@ -1120,6 +1238,14 @@ export const VoiceChatProvider: React.FC<{
       pc.ontrack = (event) => {
         if (pcsRef.current.get(remotePeerId) !== pc) return;
         const incomingTrack = event.track;
+        try {
+          const receiver = event.receiver as RTCRtpReceiver & { jitterBufferTarget?: number };
+          if (receiver && typeof receiver.jitterBufferTarget !== 'undefined') {
+            receiver.jitterBufferTarget = 60;
+          }
+        } catch {
+          // Optional WebRTC jitter buffer smoothing
+        }
         const shouldMuteTrack = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
         incomingTrack.enabled = !shouldMuteTrack;
         const remoteStream = event.streams[0] || new MediaStream([incomingTrack]);
@@ -1150,6 +1276,8 @@ export const VoiceChatProvider: React.FC<{
           remoteAudiosRef.current.set(remotePeerId, audioEl);
         }
 
+        applyPreferredOutputSink(audioEl);
+
         if (audioEl.srcObject !== remoteStream) {
           audioEl.srcObject = remoteStream;
         }
@@ -1157,10 +1285,15 @@ export const VoiceChatProvider: React.FC<{
         audioEl.muted = shouldMute;
         audioEl.volume = shouldMute ? 0 : 1.0;
 
-        audioEl.play().catch(() => {
-          // Fallback automático por Web Audio API caso o browser/WebView bloqueie autoplay de <audio>
-          void attachFallbackWebAudioPlayback(remotePeerId, remoteStream);
-        });
+        audioEl
+          .play()
+          .then(() => {
+            detachFallbackWebAudioPlayback(remotePeerId);
+          })
+          .catch(() => {
+            // Fallback automático por Web Audio API caso o browser/WebView bloqueie autoplay de <audio>
+            void attachFallbackWebAudioPlayback(remotePeerId, remoteStream);
+          });
       };
 
       pc.oniceconnectionstatechange = () => {
@@ -1187,10 +1320,12 @@ export const VoiceChatProvider: React.FC<{
       return pc;
     },
     [
+      applyPreferredOutputSink,
       attachFallbackWebAudioPlayback,
       attachLocalTrackToPeer,
       attachRemoteAnalyser,
       closePeerConnection,
+      detachFallbackWebAudioPlayback,
       sendRenegotiationOffer,
       sendSignal,
     ]

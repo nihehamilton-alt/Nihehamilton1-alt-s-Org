@@ -402,6 +402,9 @@ export default function App() {
   >({});
   const roomWsRef = useRef<WebSocket | null>(null);
   const serverClockOffsetRef = useRef<number>(0);
+  const bestRttRef = useRef<number>(Number.POSITIVE_INFINITY);
+  const hasCalibratedClockRef = useRef<boolean>(false);
+  const forceSynchronizedRunRef = useRef<(() => void) | null>(null);
   const activeRaceRoundRef = useRef<number>(0);
   const [activeRaceRound, setActiveRaceRound] = useState<number>(0);
   const startedRoundSetRef = useRef<Set<number>>(new Set());
@@ -544,9 +547,27 @@ export default function App() {
     };
   }, []);
 
+  const [showTrackQr, setShowTrackQr] = useState<boolean>(false);
+  const [trackQrDataUrl, setTrackQrDataUrl] = useState<string>('');
+  const [qrInviteCopied, setQrInviteCopied] = useState<boolean>(false);
+  const qrCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const roomInviteUrl = useMemo(() => {
+    const access = roomConfig.accessMode || 'invite-only';
+    const maxPlayers = Math.max(2, Math.min(5, roomConfig.maxPlayers || 5));
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
+        roomConfig.code
+      )}&host=${encodeURIComponent(roomConfig.hostName)}&title=${encodeURIComponent(
+        roomConfig.title
+      )}&bet=${roomConfig.betAmount}&max=${maxPlayers}&mode=${isDemo ? 'demo' : 'real'}&access=${access}`;
+    }
+    return `https://rei-run.app/?room=${encodeURIComponent(roomConfig.code)}&max=${maxPlayers}&access=${access}`;
+  }, [roomConfig.code, roomConfig.hostName, roomConfig.title, roomConfig.betAmount, roomConfig.maxPlayers, roomConfig.accessMode, isDemo]);
+
   const handleShareRoomUrl = useCallback(async () => {
     if (typeof window === 'undefined') return;
-    const urlToCopy = window.location.href;
+    const urlToCopy = roomInviteUrl;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(urlToCopy);
@@ -580,25 +601,7 @@ export default function App() {
     shareCopyTimerRef.current = setTimeout(() => {
       setRoomUrlCopied(false);
     }, 2500);
-  }, []);
-
-  const [showTrackQr, setShowTrackQr] = useState<boolean>(false);
-  const [trackQrDataUrl, setTrackQrDataUrl] = useState<string>('');
-  const [qrInviteCopied, setQrInviteCopied] = useState<boolean>(false);
-  const qrCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const roomInviteUrl = useMemo(() => {
-    const access = roomConfig.accessMode || 'invite-only';
-    const maxPlayers = Math.max(2, Math.min(5, roomConfig.maxPlayers || 5));
-    if (typeof window !== 'undefined') {
-      return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
-        roomConfig.code
-      )}&host=${encodeURIComponent(roomConfig.hostName)}&title=${encodeURIComponent(
-        roomConfig.title
-      )}&bet=${roomConfig.betAmount}&max=${maxPlayers}&mode=${isDemo ? 'demo' : 'real'}&access=${access}`;
-    }
-    return `https://rei-run.app/?room=${encodeURIComponent(roomConfig.code)}&max=${maxPlayers}&access=${access}`;
-  }, [roomConfig.code, roomConfig.hostName, roomConfig.title, roomConfig.betAmount, roomConfig.maxPlayers, roomConfig.accessMode, isDemo]);
+  }, [roomInviteUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -742,6 +745,7 @@ export default function App() {
           new URLSearchParams(window.location.search).get('sala')
       )
   );
+  const hasAutoOpenedInviteLobbyRef = useRef<boolean>(false);
 
   const isLocalActivityBusy =
     needsInviteOnboarding || shopOpen || rulesOpen || isEditingRoomOrProfile || showTrackQr;
@@ -787,13 +791,16 @@ export default function App() {
     }
   };
 
-  // Auto-abrir Lobby da Arena apenas quando o jogador convidado já escolheu seu avatar e nome
+  // Auto-abrir Lobby da Arena apenas uma vez quando o jogador convidado já escolheu seu avatar e nome
   useEffect(() => {
-    if (typeof window !== 'undefined' && !needsInviteOnboarding) {
+    if (typeof window !== 'undefined' && !needsInviteOnboarding && !hasAutoOpenedInviteLobbyRef.current) {
       const params = new URLSearchParams(window.location.search);
       if (params.get('room') || params.get('sala')) {
+        hasAutoOpenedInviteLobbyRef.current = true;
         const timer = setTimeout(() => {
-          setLobbyOpen(true);
+          if (statusRef.current === 'idle' && !isSpectatingRef.current) {
+            setLobbyOpen(true);
+          }
         }, 1400);
         return () => clearTimeout(timer);
       }
@@ -2248,6 +2255,7 @@ export default function App() {
     }
     const current: RoomAccessMode = roomConfig.accessMode || 'invite-only';
     const nextMode: RoomAccessMode = explicitMode ?? (current === 'random' ? 'invite-only' : 'random');
+    isAutoMatchRef.current = nextMode === 'random';
     setRoomConfig((prev) => ({
       ...prev,
       accessMode: nextMode,
@@ -2255,6 +2263,9 @@ export default function App() {
     }));
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
+      if (!url.searchParams.has('room') && !url.searchParams.has('sala')) {
+        url.searchParams.set('room', roomConfig.code);
+      }
       url.searchParams.set('access', nextMode);
       window.history.replaceState({}, '', url.toString());
     }
@@ -2719,6 +2730,10 @@ export default function App() {
     const myId = getSessionPlayerId();
     let closedByCleanup = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
+    const burstTimers: Array<ReturnType<typeof setTimeout>> = [];
+    bestRttRef.current = Number.POSITIVE_INFINITY;
+    hasCalibratedClockRef.current = false;
 
     type ServerRoomParticipantPayload = {
       id: string;
@@ -3019,7 +3034,7 @@ export default function App() {
       if (startedRoundSetRef.current.has(payload.raceRound)) return;
       startedRoundSetRef.current.add(payload.raceRound);
 
-      if (typeof payload.serverTime === 'number') {
+      if (typeof payload.serverTime === 'number' && !hasCalibratedClockRef.current) {
         serverClockOffsetRef.current = payload.serverTime - Date.now();
       }
       const localRaceStartAt = payload.raceStartAt - serverClockOffsetRef.current;
@@ -3090,11 +3105,10 @@ export default function App() {
         countdownTimersRef.current.push(setTimeout(() => alignTrackToTop('auto'), 420));
       }
 
-      const remainingMs = Math.max(400, localRaceStartAt - Date.now());
-      const t2 = Math.round(remainingMs * 0.25);
-      const t1 = Math.round(remainingMs * 0.5);
-      const t0 = Math.round(remainingMs * 0.75);
-      const startPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const runAt = localRaceStartAt;
+      const s2At = runAt - 2350;
+      const s1At = runAt - 1400;
+      const s0At = runAt - 450;
       const firedSync = { s3: false, s2: false, s1: false, s0: false, run: false };
 
       const triggerSyncStep = (step: 's3' | 's2' | 's1' | 's0' | 'run') => {
@@ -3113,6 +3127,7 @@ export default function App() {
           setCountdownValue(0);
           sounds.playCountdownGo();
         } else {
+          forceSynchronizedRunRef.current = null;
           if (countdownRafRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
             cancelAnimationFrame(countdownRafRef.current);
             countdownRafRef.current = null;
@@ -3124,16 +3139,43 @@ export default function App() {
         }
       };
 
-      triggerSyncStep('s3');
+      forceSynchronizedRunRef.current = () => {
+        if (!firedSync.s0) triggerSyncStep('s0');
+        triggerSyncStep('run');
+      };
+
+      const nowWall = Date.now();
+      if (nowWall >= runAt) {
+        firedSync.s3 = true;
+        firedSync.s2 = true;
+        firedSync.s1 = true;
+        triggerSyncStep('s0');
+        triggerSyncStep('run');
+        return;
+      }
+      if (nowWall >= s0At) {
+        firedSync.s3 = true;
+        firedSync.s2 = true;
+        firedSync.s1 = true;
+        triggerSyncStep('s0');
+      } else if (nowWall >= s1At) {
+        firedSync.s3 = true;
+        firedSync.s2 = true;
+        triggerSyncStep('s1');
+      } else if (nowWall >= s2At) {
+        firedSync.s3 = true;
+        triggerSyncStep('s2');
+      } else {
+        triggerSyncStep('s3');
+      }
 
       if (typeof requestAnimationFrame !== 'undefined') {
         const monitorSyncCountdown = () => {
-          const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
-          const elapsed = nowPerf - startPerfMs;
-          if (elapsed >= t2 && !firedSync.s2) triggerSyncStep('s2');
-          if (elapsed >= t1 && !firedSync.s1) triggerSyncStep('s1');
-          if (elapsed >= t0 && !firedSync.s0) triggerSyncStep('s0');
-          if (elapsed >= remainingMs && !firedSync.run) {
+          const tNow = Date.now();
+          if (tNow >= s2At && !firedSync.s2) triggerSyncStep('s2');
+          if (tNow >= s1At && !firedSync.s1) triggerSyncStep('s1');
+          if (tNow >= s0At && !firedSync.s0) triggerSyncStep('s0');
+          if (tNow >= runAt && !firedSync.run) {
             triggerSyncStep('run');
             return;
           }
@@ -3144,15 +3186,33 @@ export default function App() {
         countdownRafRef.current = requestAnimationFrame(monitorSyncCountdown);
       }
 
+      if (!firedSync.s2) {
+        countdownTimersRef.current.push(
+          setTimeout(() => triggerSyncStep('s2'), Math.max(0, s2At - nowWall))
+        );
+      }
+      if (!firedSync.s1) {
+        countdownTimersRef.current.push(
+          setTimeout(() => triggerSyncStep('s1'), Math.max(0, s1At - nowWall))
+        );
+      }
+      if (!firedSync.s0) {
+        countdownTimersRef.current.push(
+          setTimeout(() => triggerSyncStep('s0'), Math.max(0, s0At - nowWall))
+        );
+      }
       countdownTimersRef.current.push(
-        setTimeout(() => triggerSyncStep('s2'), t2),
-        setTimeout(() => triggerSyncStep('s1'), t1),
-        setTimeout(() => triggerSyncStep('s0'), t0),
-        setTimeout(() => triggerSyncStep('run'), remainingMs)
+        setTimeout(() => triggerSyncStep('run'), Math.max(0, runAt - nowWall))
       );
     };
 
     beginSynchronizedCountdownRef.current = beginSynchronizedCountdown;
+
+    const sendClockPing = () => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'room:ping', clientTime: Date.now() }));
+      }
+    };
 
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProto}//${window.location.host}/ws/room`;
@@ -3165,6 +3225,10 @@ export default function App() {
         return;
       }
       setServerRoomConnected(true);
+      sendClockPing();
+      burstTimers.push(setTimeout(sendClockPing, 150), setTimeout(sendClockPing, 350));
+      pingTimer = setInterval(sendClockPing, 15_000);
+
       const cfg = roomConfigRef.current;
       const myAvatar = AVATARS.find((a) => a.id === selectedAvatarIdRef.current) || AVATARS[0];
       const selectingProfile = needsInviteOnboardingRef.current;
@@ -3201,6 +3265,7 @@ export default function App() {
       try {
         const msg = JSON.parse(String(event.data)) as {
           type?: string;
+          clientTime?: number;
           serverTime?: number;
           room?: ServerRoomPayload;
           rotatedPublicMatch?: boolean;
@@ -3225,7 +3290,19 @@ export default function App() {
           targetId?: string;
         };
 
-        if (typeof msg.serverTime === 'number') {
+        if (msg.type === 'room:pong' && typeof msg.serverTime === 'number') {
+          const nowMs = Date.now();
+          const sentAt = typeof msg.clientTime === 'number' ? msg.clientTime : nowMs;
+          const rtt = Math.max(0, nowMs - sentAt);
+          if (rtt <= bestRttRef.current + 12 || !hasCalibratedClockRef.current) {
+            bestRttRef.current = Math.min(bestRttRef.current, rtt);
+            serverClockOffsetRef.current = msg.serverTime - (sentAt + rtt * 0.5);
+            hasCalibratedClockRef.current = true;
+          }
+          return;
+        }
+
+        if (typeof msg.serverTime === 'number' && !hasCalibratedClockRef.current) {
           serverClockOffsetRef.current = msg.serverTime - Date.now();
         }
 
@@ -3252,13 +3329,18 @@ export default function App() {
             return;
           }
           applyRoomStateFromServer(msg.room, false);
+          const meInState = msg.room.participants.find((p) => p.id === myId);
           const catchUpStartAt = msg.room.syncedRaceStartAt ?? msg.room.raceStartAt;
           if (
-            msg.room.raceStatus === 'starting' &&
+            (msg.room.raceStatus === 'starting' ||
+              (msg.room.raceStatus === 'running' &&
+                meInState &&
+                meInState.isSpectating !== true)) &&
             typeof catchUpStartAt === 'number' &&
             typeof msg.room.raceRound === 'number' &&
             typeof msg.room.raceSeed === 'number' &&
             statusRef.current === 'idle' &&
+            !isSpectatingRef.current &&
             !startedRoundSetRef.current.has(msg.room.raceRound)
           ) {
             beginSynchronizedCountdown({
@@ -3296,6 +3378,31 @@ export default function App() {
             betAmount: msg.betAmount ?? msg.room.betAmount,
             serverTime: msg.serverTime,
           });
+          return;
+        }
+
+        if (msg.type === 'room:race-go' && typeof msg.raceRound === 'number') {
+          if (statusRef.current === 'starting' && activeRaceRoundRef.current === msg.raceRound) {
+            forceSynchronizedRunRef.current?.();
+          } else if (
+            statusRef.current === 'idle' &&
+            !isSpectatingRef.current &&
+            msg.room &&
+            !startedRoundSetRef.current.has(msg.raceRound) &&
+            typeof msg.room.raceSeed === 'number'
+          ) {
+            const meInRoom = msg.room.participants.find((p) => p.id === myId);
+            if (!meInRoom || meInRoom.isSpectating !== true) {
+              beginSynchronizedCountdown({
+                room: msg.room,
+                raceRound: msg.raceRound,
+                raceSeed: msg.room.raceSeed,
+                raceStartAt: msg.syncedRaceStartAt ?? Date.now(),
+                betAmount: msg.room.betAmount,
+                serverTime: msg.serverTime,
+              });
+            }
+          }
           return;
         }
 
@@ -3436,6 +3543,12 @@ export default function App() {
     };
 
     ws.onclose = () => {
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      burstTimers.forEach((tId) => clearTimeout(tId));
+      burstTimers.length = 0;
       if (roomWsRef.current === ws) {
         roomWsRef.current = null;
       }
@@ -3455,6 +3568,13 @@ export default function App() {
       closedByCleanup = true;
       beginSynchronizedCountdownRef.current = null;
       applyServerRoomStateRef.current = null;
+      forceSynchronizedRunRef.current = null;
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
+      burstTimers.forEach((tId) => clearTimeout(tId));
+      burstTimers.length = 0;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (roomWsRef.current === ws) {
         roomWsRef.current = null;

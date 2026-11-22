@@ -259,6 +259,11 @@ async function startServer() {
       }>;
     }
   >();
+  const roomStartControl = new Map<
+    string,
+    { raceRound: number; timer: ReturnType<typeof setTimeout> | null }
+  >();
+  const SYNC_COUNTDOWN_LEAD_MS = 3400;
 
   const MAX_TELEMETRY_LOGS = 2000;
   const MAX_ANALYSES_COUNT = 500;
@@ -717,8 +722,12 @@ async function startServer() {
     if (prevCtrl?.timer) clearTimeout(prevCtrl.timer);
     roomFinishControl.delete(room.code);
 
+    const prevStartCtrl = roomStartControl.get(room.code);
+    if (prevStartCtrl?.timer) clearTimeout(prevStartCtrl.timer);
+    roomStartControl.delete(room.code);
+
     const now = Date.now();
-    const syncedStartAt = now + 3000;
+    const syncedStartAt = now + SYNC_COUNTDOWN_LEAD_MS;
     room.pendingStart = false;
     room.raceStatus = 'starting';
     room.raceRound = (room.raceRound || 1) + 1;
@@ -744,6 +753,28 @@ async function startServer() {
       p.isSpectating = false;
       p.lastSeenAt = now;
     });
+
+    const scheduledRound = room.raceRound;
+    const goTimer = setTimeout(() => {
+      roomStartControl.delete(room.code);
+      const latestRoom = db.rooms[room.code];
+      if (!latestRoom || latestRoom.raceRound !== scheduledRound || latestRoom.raceStatus !== 'starting') {
+        return;
+      }
+      const goNow = Date.now();
+      latestRoom.raceStatus = 'running';
+      latestRoom.updatedAt = goNow;
+      saveDb(db);
+      broadcastToRoom(latestRoom.code, {
+        type: 'room:race-go',
+        roomCode: latestRoom.code,
+        raceRound: latestRoom.raceRound,
+        syncedRaceStartAt: latestRoom.syncedRaceStartAt,
+        room: latestRoom,
+        serverTime: goNow,
+      });
+    }, SYNC_COUNTDOWN_LEAD_MS);
+    roomStartControl.set(room.code, { raceRound: scheduledRound, timer: goTimer });
 
     saveDb(db);
     broadcastToRoom(room.code, {
@@ -1875,6 +1906,7 @@ async function startServer() {
           selectingProfile?: boolean;
           isSpectating?: boolean;
           raceRound?: number;
+          clientTime?: number;
           playerId?: string;
           progressDistance?: number;
           lane?: number;
@@ -1905,6 +1937,15 @@ async function startServer() {
         };
 
         if (!msg || !msg.type) return;
+
+        if (msg.type === 'room:ping') {
+          sendRoomWs(ws, {
+            type: 'room:pong',
+            clientTime: typeof msg.clientTime === 'number' ? msg.clientTime : Date.now(),
+            serverTime: Date.now(),
+          });
+          return;
+        }
 
         if (msg.type === 'room:find-next-public') {
           const prevRef = socketToRoomClient.get(ws);
@@ -2076,7 +2117,11 @@ async function startServer() {
 
           const existingIdx = room.participants.findIndex((p) => p.id === playerId);
           if (existingIdx < 0) {
-            if (room.accessMode === 'invite-only' && msg.viaInvite === false && !msg.autoMatch) {
+            const isCreator =
+              Boolean(room.creatorId && room.creatorId === playerId) ||
+              Boolean(room.hostId && room.hostId === playerId) ||
+              (!room.creatorId && !room.hostId && room.participants.length === 0 && !msg.viaInvite);
+            if (room.accessMode === 'invite-only' && msg.viaInvite === false && !msg.autoMatch && !isCreator) {
               sendRoomWs(ws, { type: 'room:error', code: 'INVITE_ONLY', roomCode: code });
               return;
             }
@@ -2084,9 +2129,6 @@ async function startServer() {
               sendRoomWs(ws, { type: 'room:error', code: 'ROOM_FULL', roomCode: code });
               return;
             }
-            const isCreator =
-              Boolean(room.creatorId && room.creatorId === playerId) ||
-              (!room.creatorId && !room.hostId && room.participants.length === 0 && !msg.viaInvite);
             if (isCreator) {
               room.hostId = playerId;
               if (!room.creatorId && !msg.autoMatch) room.creatorId = playerId;
@@ -2281,7 +2323,11 @@ async function startServer() {
           if (participant.isSpectating) {
             return;
           }
-          if (room.raceStatus === 'starting') {
+          if (typeof msg.raceRound === 'number' && room.raceRound && msg.raceRound !== room.raceRound) {
+            return;
+          }
+          const nowMs = Date.now();
+          if (room.raceStatus === 'starting' && nowMs >= (room.syncedRaceStartAt || 0)) {
             room.raceStatus = 'running';
           }
           if (typeof msg.progressDistance === 'number' && Number.isFinite(msg.progressDistance)) {
@@ -2304,7 +2350,7 @@ async function startServer() {
           }
           if (typeof msg.stumbling === 'boolean') participant.stumbling = msg.stumbling;
           if (typeof msg.finished === 'boolean') participant.finished = msg.finished;
-          participant.lastSeenAt = Date.now();
+          participant.lastSeenAt = nowMs;
 
           broadcastToRoom(
             room.code,
@@ -2392,6 +2438,9 @@ async function startServer() {
         if (msg.type === 'room:return-lobby') {
           resolveRoomHostAndLanes(room);
           if (room.hostId === clientRef.playerId || room.raceStatus === 'completed') {
+            const prevStartCtrl = roomStartControl.get(room.code);
+            if (prevStartCtrl?.timer) clearTimeout(prevStartCtrl.timer);
+            roomStartControl.delete(room.code);
             room.raceStatus = 'idle';
             room.pendingStart = false;
             room.raceStartAt = null;

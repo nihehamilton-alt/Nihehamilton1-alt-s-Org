@@ -591,16 +591,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     comp.laneX = Math.max(TRACK_MIN_CENTER_X, Math.min(TRACK_MAX_CENTER_X, comp.laneX));
 
-    if (safeLane === safeTargetLane || Math.abs(comp.laneX - targetCenter) < 0.75) {
+    if (Math.abs(comp.laneX - targetCenter) < 0.75) {
       comp.laneX = targetCenter;
       comp.lane = safeTargetLane;
       return;
     }
 
-    const originCenter = LANE_CENTERS[safeLane];
-    const corridorMin = Math.max(TRACK_MIN_CENTER_X, Math.min(originCenter, targetCenter));
-    const corridorMax = Math.min(TRACK_MAX_CENTER_X, Math.max(originCenter, targetCenter));
-    comp.laneX = Math.max(corridorMin, Math.min(corridorMax, comp.laneX));
+    if (safeLane !== safeTargetLane) {
+      const originCenter = LANE_CENTERS[safeLane];
+      const corridorMin = Math.max(TRACK_MIN_CENTER_X, Math.min(originCenter, targetCenter));
+      const corridorMax = Math.min(TRACK_MAX_CENTER_X, Math.max(originCenter, targetCenter));
+      comp.laneX = Math.max(corridorMin, Math.min(corridorMax, comp.laneX));
+    }
 
     if (!Number.isFinite(comp.progressDistance) || comp.progressDistance < 0) {
       comp.progressDistance = Math.max(0, Number.isFinite(comp.progressDistance) ? comp.progressDistance : 0);
@@ -1127,12 +1129,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               const tel = telemetryEmitRef.current;
               const jumpActive = (comp.jumpY || 0) > 2;
               const discreteChanged =
+                tel.lastAt === 0 ||
                 tel.lastLane !== comp.lane ||
                 tel.lastTargetLane !== comp.targetLane ||
                 tel.lastAction !== comp.action ||
                 tel.lastStumbling !== Boolean(comp.stumbling) ||
                 tel.lastJumpActive !== jumpActive;
-              if (discreteChanged || nowPerf - tel.lastAt >= 32) {
+              if (discreteChanged || nowPerf - tel.lastAt >= 30) {
                 tel.lastAt = nowPerf;
                 tel.lastLane = comp.lane;
                 tel.lastTargetLane = comp.targetLane;
@@ -1155,12 +1158,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             // Jogador humano real controlado remotamente em tempo real com dead-reckoning fluido 60 FPS
             const snap = remoteMap.get(comp.id);
             if (snap) {
-              const ageSec = Math.min(0.14, Math.max(0, (Date.now() - (snap.updatedAt || Date.now())) / 1000));
+              const ageSec = Math.min(0.12, Math.max(0, (Date.now() - (snap.updatedAt || Date.now())) / 1000));
               const expectedPace = snap.stumbling
-                ? s.speed * 0.68
+                ? baseWaveSpeed * 0.65 * 1.5
                 : snap.action === 'dashing'
-                ? s.speed * 1.72
-                : s.speed * 1.48;
+                ? baseWaveSpeed * 1.55 * 1.5
+                : baseWaveSpeed * 1.5;
               const projectedDist = snap.finished
                 ? snap.progressDistance
                 : snap.progressDistance + ageSec * expectedPace;
@@ -1168,7 +1171,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               if (Math.abs(distGap) > 35) {
                 comp.progressDistance = projectedDist;
               } else {
-                const distLerp = 1 - Math.exp(-20 * dt);
+                const distLerp = 1 - Math.exp(-22 * dt);
                 comp.progressDistance = Math.max(
                   0,
                   comp.progressDistance + distGap * distLerp
@@ -1183,7 +1186,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               const currX = Number.isFinite(comp.laneX) ? comp.laneX : snapTargetX;
               const xLerp = 1 - Math.exp(-28 * dt);
               comp.laneX = currX + (snapTargetX - currX) * xLerp;
-              const jumpLerp = 1 - Math.exp(-24 * dt);
+              const jumpLerp = 1 - Math.exp(-26 * dt);
               comp.jumpY = Math.max(0, (comp.jumpY || 0) + (snap.jumpY - (comp.jumpY || 0)) * jumpLerp);
               comp.action = snap.action;
               comp.stumbling = Boolean(snap.stumbling);

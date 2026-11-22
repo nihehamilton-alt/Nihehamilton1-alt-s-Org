@@ -1719,16 +1719,22 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         const safeCompLane = Math.max(0, Math.min(4, Math.round(comp.lane))) as Lane;
         const safeCompTargetLane = Math.max(0, Math.min(4, Math.round(comp.targetLane ?? comp.lane))) as Lane;
 
-        // Camada de verificação de limites X (3D): acompanha comp.laneX contínuo para humanos remotos e trava no centro ao alinhar
+        const originWorldX = lanePositionsX[isUser ? playerLane : safeCompLane] ?? 0;
+        const destWorldX = lanePositionsX[isUser ? playerTargetLane : safeCompTargetLane] ?? 0;
+        const corridorMinX = Math.max(-4.0, Math.min(originWorldX, destWorldX));
+        const corridorMaxX = Math.min(4.0, Math.max(originWorldX, destWorldX));
+
+        // Camada de verificação de limites X (3D): acompanha comp.laneX contínuo para humanos remotos e trava no centro só quando rig.smoothX também alinhar
         const compLaneAligned =
-          safeCompLane === safeCompTargetLane &&
-          (!Number.isFinite(comp.laneX) || Math.abs(toWorldX(comp.laneX, safeCompTargetLane) - lanePositionsX[safeCompTargetLane]) < 0.05);
+          !Number.isFinite(comp.laneX) ||
+          (Math.abs(toWorldX(comp.laneX, safeCompTargetLane) - destWorldX) < 0.04 &&
+            Math.abs(rig.smoothX - destWorldX) < 0.03);
         const targetWorldX = isUser
           ? playerLane === playerTargetLane
             ? lanePositionsX[playerTargetLane]
             : toWorldX(playerLaneX, playerTargetLane)
           : compLaneAligned
-          ? lanePositionsX[safeCompTargetLane]
+          ? destWorldX
           : toWorldX(comp.laneX, safeCompTargetLane);
 
         const jumpOffset = isUser ? (playerJumpY / 89) * 2.15 : ((comp.jumpY || 0) / 89) * 2.15;
@@ -1737,11 +1743,6 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
 
         const distDelta = comp.progressDistance - playerDistance;
         const targetZPos = isUser ? 0 : toWorldZ(computeCompetitorScreenY(distDelta));
-
-        const originWorldX = lanePositionsX[isUser ? playerLane : safeCompLane] ?? 0;
-        const destWorldX = lanePositionsX[isUser ? playerTargetLane : safeCompTargetLane] ?? 0;
-        const corridorMinX = Math.max(-4.0, Math.min(originWorldX, destWorldX));
-        const corridorMaxX = Math.min(4.0, Math.max(originWorldX, destWorldX));
 
         if (!rig.initialized || currentStatus === 'idle' || currentStatus === 'starting') {
           rig.smoothX = THREE.MathUtils.clamp(destWorldX, -4.0, 4.0);
@@ -1753,19 +1754,25 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
           const isLaneAligned = isUser
             ? playerLane === playerTargetLane
             : compLaneAligned;
+          const useCorridorClamp = isUser || safeCompLane !== safeCompTargetLane;
+          const boundedTargetX = useCorridorClamp
+            ? THREE.MathUtils.clamp(targetWorldX, corridorMinX, corridorMaxX)
+            : THREE.MathUtils.clamp(targetWorldX, -4.0, 4.0);
           if (isLaneAligned) {
             rig.smoothX = destWorldX;
           } else if (live) {
             // Acompanhamento direto 1:1 com a física 60 FPS sem duplo atraso de amortecimento
-            rig.smoothX = THREE.MathUtils.clamp(targetWorldX, corridorMinX, corridorMaxX);
+            rig.smoothX = boundedTargetX;
           } else {
             const dampedX = THREE.MathUtils.damp(
               rig.smoothX,
-              THREE.MathUtils.clamp(targetWorldX, corridorMinX, corridorMaxX),
+              boundedTargetX,
               isUser ? 40 : 28,
               dt
             );
-            rig.smoothX = THREE.MathUtils.clamp(dampedX, corridorMinX, corridorMaxX);
+            rig.smoothX = useCorridorClamp
+              ? THREE.MathUtils.clamp(dampedX, corridorMinX, corridorMaxX)
+              : THREE.MathUtils.clamp(dampedX, -4.0, 4.0);
           }
           rig.smoothZ = isUser ? 0 : THREE.MathUtils.damp(rig.smoothZ, targetZPos, 18, dt);
         }
@@ -1867,8 +1874,9 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
           rig.cape.visible = Boolean(look.capeOrScarf);
         }
 
+        const compDashing = isUser ? isNitro || isDashing : comp.action === 'dashing';
         rig.playerRing.visible = isUser || isFollowedTarget;
-        rig.nitroAura.visible = isUser && (isNitro || isDashing);
+        rig.nitroAura.visible = compDashing && !isStumbling;
         if (rig.nitroAura.visible) {
           const pulse = 1 + Math.sin(now * 0.018) * 0.08;
           rig.nitroAura.scale.setScalar(pulse);
@@ -1885,7 +1893,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         rig.rightForearm.material = activeTorsoMat;
 
         const runnerPhase = phase + (isUser ? 0 : comp.lane * 1.15);
-        const speedDrive = !isStumbling && isUser && (isNitro || isDashing) ? 1.15 : 1.0;
+        const speedDrive = !isStumbling && compDashing ? 1.15 : 1.0;
 
         // Cinemática articulada de corrida, salto, queda, slide e tropeço (frente = -Z)
         let targetHipsY = 0.76 + jumpOffset;

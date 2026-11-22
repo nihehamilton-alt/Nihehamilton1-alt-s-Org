@@ -40,7 +40,8 @@ class ReiVoiceGateProcessor extends AudioWorkletProcessor {
     this.gateEnvelope = 0;
     this.gateOpen = false;
     this.holdSamplesRemaining = 0;
-    this.noiseFloor = 0.004;
+    this.noiseFloor = 0.0045;
+    this.rmsSmoothed = 0;
     this.dcPrevIn = 0;
     this.dcPrevOut = 0;
     this.samplesSinceTelemetry = 0;
@@ -73,6 +74,7 @@ class ReiVoiceGateProcessor extends AudioWorkletProcessor {
     if (this.micMuted) {
       this.gateOpen = false;
       this.holdSamplesRemaining = 0;
+      this.rmsSmoothed = 0;
       this.gateEnvelope *= 0.65;
       if (this.gateEnvelope < 0.0001) this.gateEnvelope = 0;
       for (let i = 0; i < len; i++) {
@@ -91,33 +93,38 @@ class ReiVoiceGateProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // 1. Bloqueio DC + medição RMS na faixa já filtrada pelo High-Pass/Low-Pass
+    // 1. Bloqueio DC + medição RMS suavizada (evita disparos por estalos/clicks e elimina trepidações)
     let sumSq = 0;
     for (let i = 0; i < len; i++) {
       const x = inCh[i];
-      const hp = x - this.dcPrevIn + 0.992 * this.dcPrevOut;
+      const hp = x - this.dcPrevIn + 0.994 * this.dcPrevOut;
       this.dcPrevIn = x;
       this.dcPrevOut = hp;
       sumSq += hp * hp;
     }
-    const rms = Math.sqrt(sumSq / len);
+    const blockRms = Math.sqrt(sumSq / len);
+    const rmsCoeff = blockRms > this.rmsSmoothed ? 0.42 : 0.14;
+    this.rmsSmoothed = this.rmsSmoothed + (blockRms - this.rmsSmoothed) * rmsCoeff;
+    const rms = this.rmsSmoothed;
 
-    // 2. Limiar adaptativo + proteção anti-eco suave para voz humana clara (sem cortar falas normais)
-    const baseThreshold = this.strictMode ? 0.011 : 0.0055;
-    const floorMult = this.strictMode ? 2.4 : 1.9;
+    // 2. Limiar adaptativo com foco estrito na voz próxima (auriculares prioridade máxima + anti-eco sem cortes)
+    const baseThreshold = this.hasHeadset
+      ? (this.strictMode ? 0.0095 : 0.0052)
+      : (this.strictMode ? 0.0135 : 0.0075);
+    const floorMult = this.strictMode ? 2.5 : 2.0;
     const echoGuardActive = !this.hasHeadset && this.remoteSpeaking && !this.deafened;
-    const echoGuardBoost = echoGuardActive ? 0.008 : 0;
+    const echoGuardBoost = echoGuardActive ? (this.strictMode ? 0.010 : 0.007) : 0;
 
     const openThreshold = Math.max(baseThreshold, this.noiseFloor * floorMult) + echoGuardBoost;
-    const closeThreshold = openThreshold * 0.58;
-    const holdSamples = Math.round(sampleRate * (this.strictMode ? 0.24 : 0.32));
+    const closeThreshold = openThreshold * 0.48;
+    const holdSamples = Math.round(sampleRate * (this.strictMode ? 0.36 : 0.44));
 
     // Atualiza piso de ruído ambiente somente quando o gate está fechado e sem falar
-    if (!this.gateOpen && rms < openThreshold * 0.9) {
-      const adaptRate = rms < this.noiseFloor ? 0.08 : 0.015;
-      this.noiseFloor = this.noiseFloor * (1 - adaptRate) + rms * adaptRate;
+    if (!this.gateOpen && blockRms < openThreshold * 0.85) {
+      const adaptRate = blockRms < this.noiseFloor ? 0.06 : 0.012;
+      this.noiseFloor = this.noiseFloor * (1 - adaptRate) + blockRms * adaptRate;
       if (this.noiseFloor < 0.0008) this.noiseFloor = 0.0008;
-      if (this.noiseFloor > 0.012) this.noiseFloor = 0.012;
+      if (this.noiseFloor > 0.014) this.noiseFloor = 0.014;
     }
 
     if (rms >= openThreshold) {
@@ -125,7 +132,7 @@ class ReiVoiceGateProcessor extends AudioWorkletProcessor {
       this.holdSamplesRemaining = holdSamples;
     } else if (this.gateOpen) {
       if (rms >= closeThreshold) {
-        this.holdSamplesRemaining = Math.max(this.holdSamplesRemaining, Math.round(holdSamples * 0.5));
+        this.holdSamplesRemaining = Math.max(this.holdSamplesRemaining, Math.round(holdSamples * 0.65));
       } else if (this.holdSamplesRemaining > 0) {
         this.holdSamplesRemaining -= len;
       } else {
@@ -133,24 +140,22 @@ class ReiVoiceGateProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Quando fechado (incluindo proteção anti-eco), silencia totalmente o envio
-    const targetGain = this.gateOpen ? 1.0 : 0.0;
-    const attackStep = 1 - Math.exp(-1 / (sampleRate * 0.004));
-    const releaseStep = 1 - Math.exp(-1 / (sampleRate * 0.042));
+    // Envelope suave de ataque (8ms) e decaimento contínuo (115ms) para voz natural sem cortes bruscos
+    const targetGain = this.gateOpen ? (echoGuardActive ? 0.72 : 1.0) : 0.0;
+    const attackStep = 1 - Math.exp(-1 / (sampleRate * 0.008));
+    const releaseStep = 1 - Math.exp(-1 / (sampleRate * 0.115));
 
     let postSumSq = 0;
     for (let i = 0; i < len; i++) {
       const coeff = targetGain > this.gateEnvelope ? attackStep : releaseStep;
       this.gateEnvelope += (targetGain - this.gateEnvelope) * coeff;
       const sample = inCh[i] * this.gateEnvelope;
-      // Limiter suave contra saturação
-      const limited = sample > 0.96 ? 0.96 : sample < -0.96 ? -0.96 : sample;
+      const limited = sample > 0.94 ? 0.94 : sample < -0.94 ? -0.94 : sample;
       outCh[i] = limited;
       postSumSq += limited * limited;
     }
     const postGateRms = Math.sqrt(postSumSq / len);
 
-    // Copia para canais extras se houver
     for (let ch = 1; ch < output.length; ch++) {
       output[ch].set(outCh);
     }
@@ -215,60 +220,67 @@ export async function createVoiceAudioProcessor(
   const source = ctx.createMediaStreamSource(rawStream);
 
   // ============================================================================
-  // ESTÁGIO 1: FILTRAGEM DE FREQUÊNCIAS VOCAIS HUMANAS (165 Hz – 3400 Hz)
-  // High-Pass 4ª ordem (-24 dB/oct): remove vento, ventoinha, trânsito e grave das colunas
+  // ESTÁGIO 1: FILTRAGEM DE FREQUÊNCIAS VOCAIS HUMANAS (185 Hz – 3250 Hz)
+  // High-Pass 4ª ordem (-24 dB/oct): corta vento, ruído de sala, trânsito e graves das colunas
   // ============================================================================
   const highpassStage1 = ctx.createBiquadFilter();
   highpassStage1.type = 'highpass';
-  highpassStage1.frequency.value = 165;
+  highpassStage1.frequency.value = 185;
   highpassStage1.Q.value = 0.707;
 
   const highpassStage2 = ctx.createBiquadFilter();
   highpassStage2.type = 'highpass';
-  highpassStage2.frequency.value = 165;
+  highpassStage2.frequency.value = 185;
   highpassStage2.Q.value = 0.707;
+
+  // Atenuação suave de ressonância/eco de sala (290 Hz)
+  const roomMudCut = ctx.createBiquadFilter();
+  roomMudCut.type = 'peaking';
+  roomMudCut.frequency.value = 290;
+  roomMudCut.Q.value = 1.2;
+  roomMudCut.gain.value = -3.0;
 
   // Low-Pass 4ª ordem (-24 dB/oct): corta chiado agudo, teclas e interferências acima da voz
   const lowpassStage1 = ctx.createBiquadFilter();
   lowpassStage1.type = 'lowpass';
-  lowpassStage1.frequency.value = 3450;
+  lowpassStage1.frequency.value = 3250;
   lowpassStage1.Q.value = 0.707;
 
   const lowpassStage2 = ctx.createBiquadFilter();
   lowpassStage2.type = 'lowpass';
-  lowpassStage2.frequency.value = 3450;
+  lowpassStage2.frequency.value = 3250;
   lowpassStage2.Q.value = 0.707;
 
-  // Realce suave de presença vocal (1.85 kHz) para voz próxima clara e nítida
+  // Realce suave de presença vocal (1.95 kHz) para voz próxima nos auriculares clara e nítida
   const presenceFilter = ctx.createBiquadFilter();
   presenceFilter.type = 'peaking';
-  presenceFilter.frequency.value = 1850;
-  presenceFilter.Q.value = 0.9;
-  presenceFilter.gain.value = 2.2;
+  presenceFilter.frequency.value = 1950;
+  presenceFilter.Q.value = 0.85;
+  presenceFilter.gain.value = 2.0;
 
-  // AnalyserNode ligado estritamente APÓS High-Pass (165Hz) + Low-Pass + Noise Gate
+  // AnalyserNode ligado estritamente APÓS High-Pass (185Hz) + Low-Pass + Noise Gate
   const postGateAnalyser = ctx.createAnalyser();
   postGateAnalyser.fftSize = 256;
-  postGateAnalyser.smoothingTimeConstant = 0.72;
+  postGateAnalyser.smoothingTimeConstant = 0.76;
   postGateAnalyser.minDecibels = -75;
   postGateAnalyser.maxDecibels = -12;
 
-  // Compressor pós-gate (nunca amplifica ruído porque vem DEPOIS do Noise Gate)
+  // Compressor suave pós-gate (sem bombeamento nem distorção)
   const compressor = ctx.createDynamicsCompressor();
-  compressor.threshold.value = -20;
-  compressor.knee.value = 12;
-  compressor.ratio.value = 3.2;
-  compressor.attack.value = 0.004;
-  compressor.release.value = 0.14;
+  compressor.threshold.value = -22;
+  compressor.knee.value = 16;
+  compressor.ratio.value = 2.6;
+  compressor.attack.value = 0.008;
+  compressor.release.value = 0.18;
 
   const dest = ctx.createMediaStreamDestination();
-  // Mantém o grafo AudioWorklet / MediaStreamDestination ativo em Safari/iOS/Chromium móveis sem emitir som local
   const silentKeepAlive = ctx.createGain();
   silentKeepAlive.gain.value = 0;
 
   source.connect(highpassStage1);
   highpassStage1.connect(highpassStage2);
-  highpassStage2.connect(lowpassStage1);
+  highpassStage2.connect(roomMudCut);
+  roomMudCut.connect(lowpassStage1);
   lowpassStage1.connect(lowpassStage2);
   lowpassStage2.connect(presenceFilter);
 
@@ -354,6 +366,7 @@ export async function createVoiceAudioProcessor(
             source.disconnect();
             highpassStage1.disconnect();
             highpassStage2.disconnect();
+            roomMudCut.disconnect();
             lowpassStage1.disconnect();
             lowpassStage2.disconnect();
             presenceFilter.disconnect();
@@ -382,7 +395,7 @@ export async function createVoiceAudioProcessor(
   }
 
   // ============================================================================
-  // FALLBACK AUTOMÁTICO: ScriptProcessorNode (mesmo DSP se AudioWorklet falhar)
+  // FALLBACK AUTOMÁTICO: ScriptProcessorNode (mesmo DSP suavizado se AudioWorklet falhar)
   // ============================================================================
   try {
     const bufferSize = 512;
@@ -390,7 +403,8 @@ export async function createVoiceAudioProcessor(
     let gateEnvelope = 0;
     let gateOpen = false;
     let holdSamplesRemaining = 0;
-    let noiseFloor = 0.004;
+    let noiseFloor = 0.0045;
+    let rmsSmoothed = 0;
     let lastSentGateOpen = false;
     let lastTelemetryTime = 0;
     const sampleRateVal = ctx.sampleRate || 48000;
@@ -404,6 +418,7 @@ export async function createVoiceAudioProcessor(
       if (params.micMuted) {
         gateOpen = false;
         holdSamplesRemaining = 0;
+        rmsSmoothed = 0;
         gateEnvelope = 0;
         outCh.fill(0);
         if (lastSentGateOpen) {
@@ -417,21 +432,26 @@ export async function createVoiceAudioProcessor(
       for (let i = 0; i < len; i++) {
         sumSq += inCh[i] * inCh[i];
       }
-      const rms = Math.sqrt(sumSq / len);
+      const blockRms = Math.sqrt(sumSq / len);
+      const rmsCoeff = blockRms > rmsSmoothed ? 0.48 : 0.18;
+      rmsSmoothed = rmsSmoothed + (blockRms - rmsSmoothed) * rmsCoeff;
+      const rms = rmsSmoothed;
 
       const strictMode = params.noiseGateMode === 'strict';
-      const baseThreshold = strictMode ? 0.011 : 0.0055;
-      const floorMult = strictMode ? 2.4 : 1.9;
+      const baseThreshold = params.hasHeadset
+        ? (strictMode ? 0.0095 : 0.0052)
+        : (strictMode ? 0.0135 : 0.0075);
+      const floorMult = strictMode ? 2.5 : 2.0;
       const echoGuardActive = !params.hasHeadset && params.remoteSpeaking && !params.deafened;
-      const echoGuardBoost = echoGuardActive ? 0.008 : 0;
+      const echoGuardBoost = echoGuardActive ? (strictMode ? 0.010 : 0.007) : 0;
 
       const openThreshold = Math.max(baseThreshold, noiseFloor * floorMult) + echoGuardBoost;
-      const closeThreshold = openThreshold * 0.58;
-      const holdSamples = Math.round(sampleRateVal * (strictMode ? 0.24 : 0.32));
+      const closeThreshold = openThreshold * 0.48;
+      const holdSamples = Math.round(sampleRateVal * (strictMode ? 0.36 : 0.44));
 
-      if (!gateOpen && rms < openThreshold * 0.9) {
-        const adaptRate = rms < noiseFloor ? 0.08 : 0.015;
-        noiseFloor = Math.min(0.012, Math.max(0.0008, noiseFloor * (1 - adaptRate) + rms * adaptRate));
+      if (!gateOpen && blockRms < openThreshold * 0.85) {
+        const adaptRate = blockRms < noiseFloor ? 0.06 : 0.012;
+        noiseFloor = Math.min(0.014, Math.max(0.0008, noiseFloor * (1 - adaptRate) + blockRms * adaptRate));
       }
 
       if (rms >= openThreshold) {
@@ -439,7 +459,7 @@ export async function createVoiceAudioProcessor(
         holdSamplesRemaining = holdSamples;
       } else if (gateOpen) {
         if (rms >= closeThreshold) {
-          holdSamplesRemaining = Math.max(holdSamplesRemaining, Math.round(holdSamples * 0.5));
+          holdSamplesRemaining = Math.max(holdSamplesRemaining, Math.round(holdSamples * 0.65));
         } else if (holdSamplesRemaining > 0) {
           holdSamplesRemaining -= len;
         } else {
@@ -447,16 +467,16 @@ export async function createVoiceAudioProcessor(
         }
       }
 
-      const targetGain = gateOpen ? 1.0 : 0.0;
-      const attackStep = 1 - Math.exp(-1 / (sampleRateVal * 0.004));
-      const releaseStep = 1 - Math.exp(-1 / (sampleRateVal * 0.042));
+      const targetGain = gateOpen ? (echoGuardActive ? 0.72 : 1.0) : 0.0;
+      const attackStep = 1 - Math.exp(-1 / (sampleRateVal * 0.008));
+      const releaseStep = 1 - Math.exp(-1 / (sampleRateVal * 0.115));
 
       let postSumSq = 0;
       for (let i = 0; i < len; i++) {
         const coeff = targetGain > gateEnvelope ? attackStep : releaseStep;
         gateEnvelope += (targetGain - gateEnvelope) * coeff;
         const sample = inCh[i] * gateEnvelope;
-        const limited = sample > 0.96 ? 0.96 : sample < -0.96 ? -0.96 : sample;
+        const limited = sample > 0.94 ? 0.94 : sample < -0.94 ? -0.94 : sample;
         outCh[i] = limited;
         postSumSq += limited * limited;
       }
@@ -495,6 +515,7 @@ export async function createVoiceAudioProcessor(
           source.disconnect();
           highpassStage1.disconnect();
           highpassStage2.disconnect();
+          roomMudCut.disconnect();
           lowpassStage1.disconnect();
           lowpassStage2.disconnect();
           presenceFilter.disconnect();
