@@ -1513,9 +1513,9 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
       </div>
 
       {/* Palco 3D Three.js (sem backdrop-blur para máxima nitidez e FPS em qualquer GPU) */}
-      <div className="relative h-64 sm:h-72 w-full overflow-hidden rounded-xl border border-amber-500/35 bg-[#0b080d]">
+      <div className="king-rising-throne relative h-64 sm:h-72 w-full overflow-hidden rounded-xl border border-amber-500/35 bg-[#0b080d]">
         {!webglFailed ? (
-          <div ref={stageMountRef} className="w-full h-full" />
+          <div ref={stageMountRef} className="king-rising-throne w-full h-full" />
         ) : (
           <div className="w-full h-full flex items-center justify-around px-4 bg-gradient-to-t from-red-950/60 via-zinc-950 to-zinc-900">
             <div className="flex flex-col items-center">

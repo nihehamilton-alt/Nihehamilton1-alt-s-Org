@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
-import { Competitor, RoomAccessMode, RoomConfig } from '../types/game';
+import { Competitor, RoomAccessMode, RoomConfig, ServerRaceStatus } from '../types/game';
 import {
   MIN_BET_KZ,
   MAX_BET_KZ,
@@ -80,6 +80,9 @@ interface LobbyRoomProps {
   waitingForOpponent?: boolean;
   waitingOpponentNames?: string[];
   connectedHumansCount?: number;
+  serverRaceStatus?: ServerRaceStatus;
+  canSpectate?: boolean;
+  onEnterSpectatorMode?: () => void;
 }
 
 function formatEditableRoomBet(kz: number, decimals: number, rate: number): string {
@@ -118,6 +121,9 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   waitingForOpponent = false,
   waitingOpponentNames = [],
   connectedHumansCount: _connectedHumansCount = 1,
+  serverRaceStatus = 'idle',
+  canSpectate = false,
+  onEnterSpectatorMode,
 }) => {
   const { lang, currency, currencyMeta, t, rates, formatMoney } = useI18n();
   const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
@@ -1145,6 +1151,11 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                               {mpStrings.hostBadge}
                             </span>
                           )}
+                          {comp.isSpectating && (
+                            <span className="text-[8px] font-mono font-black px-1 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-400/50">
+                              👻
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -1311,9 +1322,37 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             </div>
           )}
 
+          {canSpectate && onEnterSpectatorMode && (
+            <div className="p-3 rounded-2xl bg-sky-950/65 border-2 border-sky-400/70 text-sky-100 text-xs font-mono flex flex-col gap-2 shadow-[0_0_24px_rgba(56,189,248,0.22)]">
+              <div className="flex flex-col gap-0.5">
+                <span className="font-black text-sky-300 flex items-center gap-1.5">
+                  <span>👻</span>
+                  <span>{mpStrings.raceInProgressBanner}</span>
+                </span>
+                <span className="text-[10px] text-sky-200/85">
+                  {mpStrings.noBetSpectatorNote}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={onEnterSpectatorMode}
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-zinc-950 font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg flex items-center justify-center gap-2 transition-all"
+              >
+                <span>👻</span>
+                <span>{mpStrings.watchLiveRaceBtn}</span>
+              </button>
+            </div>
+          )}
+
           <button
             type="button"
-            disabled={competitors.length < 2 || !canControlRoom || Boolean(arenaBetError)}
+            disabled={
+              competitors.length < 2 ||
+              !canControlRoom ||
+              Boolean(arenaBetError) ||
+              serverRaceStatus === 'running' ||
+              serverRaceStatus === 'starting'
+            }
             onClick={onStartRace}
             className="w-full py-4 rounded-2xl game-btn-gold text-zinc-950 font-black text-base uppercase tracking-wider cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed active:scale-[0.99]"
           >

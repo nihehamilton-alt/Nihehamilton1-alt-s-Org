@@ -14,6 +14,7 @@ import {
   LocalRunnerTelemetry,
   RoomStandingEntry,
   TelemetryInvestigationEntry,
+  ServerRaceStatus,
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
 import { ClientTelemetryValidator } from './utils/telemetryValidator';
@@ -21,7 +22,7 @@ import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy,
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { TOTAL_GAME_TIME_SECONDS, LANE_CENTERS, RIVAL_LANE_SLOTS } from './game/constants';
-import { ANGOLAN_BOTS } from './data/bots';
+import { ANGOLAN_BOTS, pickRotatedPublicBots } from './data/bots';
 import { AVATARS, AvatarItem } from './data/avatars';
 import { getLocalizedAvatar, getLocalizedBot } from './data/translations';
 import { useI18n } from './contexts/I18nContext';
@@ -418,6 +419,55 @@ export default function App() {
   const [authoritativeRankings, setAuthoritativeRankings] = useState<RoomStandingEntry[] | null>(null);
   const [pendingSyncPodium, setPendingSyncPodium] = useState<boolean>(false);
   const [wsReconnectNonce, setWsReconnectNonce] = useState<number>(0);
+  const [serverRaceStatus, setServerRaceStatus] = useState<ServerRaceStatus>('idle');
+  const serverRaceStatusRef = useRef<ServerRaceStatus>('idle');
+  const serverRaceRoundRef = useRef<number>(0);
+  const serverRaceSeedRef = useRef<number | null>(null);
+  const serverRaceStartAtRef = useRef<number | null>(null);
+  const [isSpectating, setIsSpectating] = useState<boolean>(false);
+  const isSpectatingRef = useRef<boolean>(false);
+  const [spectatedRunnerId, setSpectatedRunnerId] = useState<string | null>(null);
+  const [wasSpectatorOutcome, setWasSpectatorOutcome] = useState<boolean>(false);
+  const previousPublicBotIdsRef = useRef<string[]>([]);
+  const publicRoundCompletedRef = useRef<boolean>(false);
+  const rotatePublicBotsInCompetitorsRef = useRef<
+    ((targetBetKz: number, forceReplaceBots?: boolean) => void) | null
+  >(null);
+  const latestServerRoomRef = useRef<{
+    code: string;
+    raceStatus?: ServerRaceStatus;
+    raceRound?: number;
+    raceSeed?: number;
+    raceStartAt?: number | null;
+    syncedRaceStartAt?: number | null;
+    betAmount: number;
+    fillWithBots?: boolean;
+    maxPlayers?: number;
+    participants: Array<{
+      id: string;
+      name: string;
+      avatar: string;
+      avatarId: string;
+      color: string;
+      isHost: boolean;
+      lane?: number;
+      targetLane?: number;
+      laneX?: number;
+      progressDistance?: number;
+      action?: string;
+      jumpY?: number;
+      stumbling?: boolean;
+      finished?: boolean;
+      profileReady?: boolean;
+      selectingProfile?: boolean;
+      connected?: boolean;
+      betAmount?: number;
+      sessionStatus?: 'normal' | 'investigating';
+      isSpectating?: boolean;
+    }>;
+  } | null>(null);
+  const applyServerRoomStateRef = useRef<((forceCompetitorSync?: boolean) => void) | null>(null);
+
   const beginSynchronizedCountdownRef = useRef<((payload: {
     room: {
       code: string;
@@ -444,11 +494,19 @@ export default function App() {
         color: string;
         isHost: boolean;
         lane?: number;
+        targetLane?: number;
+        laneX?: number;
+        progressDistance?: number;
+        action?: string;
+        jumpY?: number;
+        stumbling?: boolean;
+        finished?: boolean;
         profileReady?: boolean;
         selectingProfile?: boolean;
         connected?: boolean;
         betAmount?: number;
         sessionStatus?: 'normal' | 'investigating';
+        isSpectating?: boolean;
       }>;
     };
     raceRound: number;
@@ -928,12 +986,81 @@ export default function App() {
     setCompetitors((prev) => assignDistinctLanes(prev, true));
   }, [assignDistinctLanes]);
 
+  // Rotaciona os competidores bots em partidas públicas garantindo aposta igual
+  const rotatePublicBotsInCompetitors = useCallback(
+    (targetBetKz: number, forceReplaceBots = true) => {
+      const safeBet = clampBetKz(targetBetKz);
+      setCompetitors((prev) => {
+        const playerEntry = prev.find((c) => c.isPlayer);
+        const remoteHumans = prev.filter((c) => !c.isPlayer && !c.isBot);
+        const maxCap = clampRoomMax(roomConfigRef.current.maxPlayers, 5);
+        const baseList: Competitor[] = [];
+        if (playerEntry) {
+          baseList.push({ ...playerEntry, betAmount: safeBet });
+        }
+        for (const h of remoteHumans) {
+          if (baseList.length >= maxCap) break;
+          baseList.push({ ...h, betAmount: safeBet });
+        }
+        const shouldFillBots =
+          roomConfigRef.current.fillWithBots ||
+          isAutoMatchRef.current ||
+          roomConfigRef.current.accessMode === 'random';
+        const neededBots = shouldFillBots ? Math.max(0, maxCap - baseList.length) : 0;
+        if (neededBots === 0) {
+          return assignDistinctLanes(baseList, true);
+        }
+        const currentBotIds = prev.filter((c) => c.isBot).map((b) => b.id);
+        const excludeForRotation = forceReplaceBots
+          ? Array.from(new Set([...previousPublicBotIdsRef.current, ...currentBotIds]))
+          : previousPublicBotIdsRef.current;
+        const pickedBots = pickRotatedPublicBots(
+          neededBots,
+          excludeForRotation,
+          baseList.map((c) => c.id)
+        );
+        previousPublicBotIdsRef.current = pickedBots.map((b) => b.id);
+        const botCompetitors: Competitor[] = pickedBots.map((b, idx) => {
+          const localized = getLocalizedBot(b.id, lang);
+          const botLane = (RIVAL_LANE_SLOTS[idx % RIVAL_LANE_SLOTS.length] ?? 0) as Lane;
+          return {
+            id: b.id,
+            name: localized.name || b.name,
+            avatar: b.avatar,
+            avatarId: b.avatarId,
+            color: b.color,
+            lane: botLane,
+            targetLane: botLane,
+            laneX: LANE_CENTERS[botLane],
+            yOffset: 0,
+            progressDistance: 0,
+            action: 'running',
+            jumpY: 0,
+            isBot: true,
+            isPlayer: false,
+            stumbling: false,
+            finished: false,
+            betAmount: safeBet,
+          };
+        });
+        return assignDistinctLanes([...baseList, ...botCompetitors].slice(0, maxCap), true);
+      });
+    },
+    [assignDistinctLanes, lang]
+  );
+  rotatePublicBotsInCompetitorsRef.current = rotatePublicBotsInCompetitors;
+
   // Gestão segura dos timers de contagem regressiva
   const countdownTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const countdownRafRef = useRef<number | null>(null);
 
   const clearCountdownTimers = useCallback(() => {
     countdownTimersRef.current.forEach((id) => clearTimeout(id));
     countdownTimersRef.current = [];
+    if (countdownRafRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+      cancelAnimationFrame(countdownRafRef.current);
+      countdownRafRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -958,6 +1085,9 @@ export default function App() {
 
   // Retorno limpo ao lobby ou sala após o fim da corrida
   const handleReturnToLobby = useCallback(() => {
+    const returningFromSpectator = isSpectatingRef.current || wasSpectatorOutcome;
+    const isPublicMatch = isAutoMatchRef.current || roomConfig.accessMode === 'random';
+    const shouldRotatePublicLobby = isPublicMatch && publicRoundCompletedRef.current;
     clearCountdownTimers();
     if (finishFallbackTimerRef.current) {
       clearTimeout(finishFallbackTimerRef.current);
@@ -966,6 +1096,10 @@ export default function App() {
     remotePlayersRef.current.clear();
     startedRoundSetRef.current.clear();
     finalizedRoundSetRef.current.clear();
+    isSpectatingRef.current = false;
+    setIsSpectating(false);
+    setSpectatedRunnerId(null);
+    setWasSpectatorOutcome(false);
     setShowPodium(false);
     setPendingSyncPodium(false);
     setAuthoritativeRankings(null);
@@ -978,15 +1112,54 @@ export default function App() {
     setStatus('idle');
     setElapsedSeconds(0);
     setCoinsCollected(0);
-    resetCompetitors();
+    if (shouldRotatePublicLobby) {
+      publicRoundCompletedRef.current = false;
+      rotatePublicBotsInCompetitors(clampBetKz(roomConfig.betAmount || betAmount), true);
+    } else {
+      resetCompetitors();
+    }
     setRoundNonce((n) => n + 1);
 
     const ws = roomWsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'room:return-lobby', roomCode: roomConfig.code }));
+      if (returningFromSpectator) {
+        ws.send(
+          JSON.stringify({
+            type: 'room:spectate-state',
+            roomCode: roomConfig.code,
+            isSpectating: false,
+          })
+        );
+      } else if (shouldRotatePublicLobby) {
+        const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
+        ws.send(
+          JSON.stringify({
+            type: 'room:find-next-public',
+            betAmount: clampBetKz(roomConfig.betAmount || betAmount),
+            isDemo,
+            excludeRoomCode: roomConfig.code,
+            autoStart: false,
+            player: {
+              id: getSessionPlayerId(),
+              name: playerName,
+              avatar: myAvatar.avatar,
+              avatarId: myAvatar.id,
+              color: myAvatar.color,
+              profileReady: true,
+              selectingProfile: false,
+            },
+          })
+        );
+      } else {
+        ws.send(JSON.stringify({ type: 'room:return-lobby', roomCode: roomConfig.code }));
+      }
     }
 
-    if (startedFromRoomRef.current) {
+    if (applyServerRoomStateRef.current && !shouldRotatePublicLobby) {
+      applyServerRoomStateRef.current(true);
+    }
+
+    if (startedFromRoomRef.current || returningFromSpectator) {
       setLobbyOpen(true);
     } else if (typeof window !== 'undefined' && window.innerWidth < 1024) {
       requestAnimationFrame(() => {
@@ -996,7 +1169,19 @@ export default function App() {
         }
       });
     }
-  }, [clearCountdownTimers, resetCompetitors, roomConfig.code]);
+  }, [
+    betAmount,
+    clearCountdownTimers,
+    isDemo,
+    playerName,
+    resetCompetitors,
+    roomConfig.accessMode,
+    roomConfig.betAmount,
+    roomConfig.code,
+    rotatePublicBotsInCompetitors,
+    selectedAvatarId,
+    wasSpectatorOutcome,
+  ]);
 
   // Aplica o desfecho oficial de uma corrida (pódio, payout, saldo, histórico, streak e missões)
   const applyCompletedRaceOutcome = useCallback(
@@ -1004,7 +1189,8 @@ export default function App() {
       finalCompetitors: Competitor[],
       usedBet: number,
       performance?: RacePerformanceMetrics | null,
-      serverRankings?: RoomStandingEntry[] | null
+      serverRankings?: RoomStandingEntry[] | null,
+      spectated?: boolean
     ) => {
       const roundKey = activeRaceRoundRef.current;
       if (roundKey > 0) {
@@ -1017,12 +1203,18 @@ export default function App() {
         finishFallbackTimerRef.current = null;
       }
 
+      const spectatedOutcome = Boolean(spectated ?? isSpectatingRef.current);
+      isSpectatingRef.current = false;
+      setIsSpectating(false);
+      setSpectatedRunnerId(null);
+      setWasSpectatorOutcome(spectatedOutcome);
+
       sounds.stopRaceBgm();
       statusRef.current = 'completed';
       setStatus('completed');
       setPendingSyncPodium(false);
       if (performance !== undefined) {
-        setLastPerformance(performance ?? null);
+        setLastPerformance(spectatedOutcome ? null : performance ?? null);
       }
 
       const myId = getSessionPlayerId();
@@ -1037,11 +1229,12 @@ export default function App() {
         const mergedById = new Map(serverRankings.map((r) => [r.id, r]));
         displayCompetitors = serverRankings.map((r) => {
           const localMatch = finalCompetitors.find(
-            (c) => c.id === r.id || (r.id === myId && c.isPlayer)
+            (c) => c.id === r.id || (!spectatedOutcome && r.id === myId && c.isPlayer)
           );
+          const isMeActive = !spectatedOutcome && r.id === myId;
           return {
             id: r.id,
-            name: r.id === myId ? (localMatch?.name || `${r.name} ${t.youTag}`) : r.name,
+            name: isMeActive ? (localMatch?.name || `${r.name} ${t.youTag}`) : r.name,
             avatar: r.avatar,
             avatarId: r.avatarId,
             color: r.color,
@@ -1053,33 +1246,53 @@ export default function App() {
             action: 'running' as const,
             jumpY: 0,
             isBot: r.isBot,
-            isPlayer: r.id === myId,
+            isPlayer: isMeActive,
             stumbling: false,
             finished: true,
           };
         });
-        const myEntry = mergedById.get(myId);
-        if (myEntry) {
-          rank = myEntry.rank;
-          payout = myEntry.payoutKz;
-        } else {
-          const sortedLocal = [...displayCompetitors].sort(
-            (a, b) => b.progressDistance - a.progressDistance
-          );
-          rank = Math.max(1, sortedLocal.findIndex((c) => c.isPlayer) + 1);
-          const torneiras = calculateThreeTorneiras(effectiveBet, displayCompetitors.length);
-          payout = rank === 1 ? torneiras.firstPrizeKz : rank === 2 ? torneiras.secondPrizeKz : 0;
+        if (!spectatedOutcome) {
+          const myEntry = mergedById.get(myId);
+          if (myEntry) {
+            rank = myEntry.rank;
+            payout = myEntry.payoutKz;
+          } else {
+            const sortedLocal = [...displayCompetitors].sort(
+              (a, b) => b.progressDistance - a.progressDistance
+            );
+            rank = Math.max(1, sortedLocal.findIndex((c) => c.isPlayer) + 1);
+            const torneiras = calculateThreeTorneiras(effectiveBet, displayCompetitors.length);
+            payout = rank === 1 ? torneiras.firstPrizeKz : rank === 2 ? torneiras.secondPrizeKz : 0;
+          }
         }
       } else {
         setAuthoritativeRankings(null);
-        const torneiras = calculateThreeTorneiras(effectiveBet, finalCompetitors.length);
-        const sorted = [...finalCompetitors].sort((a, b) => b.progressDistance - a.progressDistance);
-        rank = Math.max(1, sorted.findIndex((c) => c.isPlayer) + 1);
-        if (rank === 1) payout = torneiras.firstPrizeKz;
-        else if (rank === 2) payout = torneiras.secondPrizeKz;
+        if (!spectatedOutcome) {
+          const torneiras = calculateThreeTorneiras(effectiveBet, finalCompetitors.length);
+          const sorted = [...finalCompetitors].sort((a, b) => b.progressDistance - a.progressDistance);
+          rank = Math.max(1, sorted.findIndex((c) => c.isPlayer) + 1);
+          if (rank === 1) payout = torneiras.firstPrizeKz;
+          else if (rank === 2) payout = torneiras.secondPrizeKz;
+        }
       }
 
       setCompetitors(displayCompetitors);
+
+      if (!spectatedOutcome && (isAutoMatchRef.current || roomConfigRef.current.accessMode === 'random')) {
+        publicRoundCompletedRef.current = true;
+        const finishedBotIds = displayCompetitors.filter((c) => c.isBot).map((c) => c.id);
+        if (finishedBotIds.length > 0) {
+          previousPublicBotIdsRef.current = finishedBotIds;
+        }
+      }
+
+      if (spectatedOutcome) {
+        setUserRank(1);
+        setLastPayout(0);
+        setShowPodium(true);
+        return;
+      }
+
       setUserRank(rank);
       setLastPayout(payout);
       if (payout > 0) {
@@ -1146,10 +1359,223 @@ export default function App() {
     [setBalance, roomConfig.code, roomConfig.title, coinsCollected, top3Streak, t.youTag]
   );
 
+  // Entrar como Observador Fantasma (Spectator Mode) numa corrida já a decorrer na sala
+  const handleEnterSpectatorMode = useCallback(() => {
+    if (statusRef.current !== 'idle') return;
+    if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
+    if (serverRaceStatusRef.current !== 'running' && serverRaceStatusRef.current !== 'starting') {
+      return;
+    }
+
+    const myId = getSessionPlayerId();
+    const serverRoom = latestServerRoomRef.current;
+    const roundNum = serverRaceRoundRef.current || serverRoom?.raceRound || 1;
+    const seedVal = serverRaceSeedRef.current ?? serverRoom?.raceSeed ?? null;
+    const rawStartAt = serverRaceStartAtRef.current ?? serverRoom?.syncedRaceStartAt ?? serverRoom?.raceStartAt;
+    const localStartAt =
+      typeof rawStartAt === 'number'
+        ? rawStartAt - serverClockOffsetRef.current
+        : Date.now();
+
+    const activeParticipants = (serverRoom?.participants || []).filter(
+      (p) => p.id !== myId && p.isSpectating !== true && p.connected !== false
+    );
+
+    const activeInvestigations = telemetryValidatorRef.current.getInvestigations();
+    const spectatorList: Competitor[] = [];
+
+    for (let i = 0; i < activeParticipants.length; i++) {
+      const p = activeParticipants[i];
+      const snap = remotePlayersRef.current.get(p.id);
+      const laneNum = (typeof (snap?.lane ?? p.lane) === 'number'
+        ? Math.max(0, Math.min(4, Number(snap?.lane ?? p.lane)))
+        : (RIVAL_LANE_SLOTS[i % RIVAL_LANE_SLOTS.length] as Lane)) as Lane;
+      const targetLaneNum = (typeof (snap?.targetLane ?? p.targetLane ?? laneNum) === 'number'
+        ? Math.max(0, Math.min(4, Number(snap?.targetLane ?? p.targetLane ?? laneNum)))
+        : laneNum) as Lane;
+      const dist = snap?.progressDistance ?? Number(p.progressDistance || 0);
+      const laneXVal =
+        typeof (snap?.laneX ?? p.laneX) === 'number'
+          ? Number(snap?.laneX ?? p.laneX)
+          : LANE_CENTERS[targetLaneNum];
+      const act = (snap?.action ?? (p.action as Competitor['action'])) || 'running';
+      const jumpVal = snap?.jumpY ?? Number(p.jumpY || 0);
+
+      remotePlayersRef.current.set(p.id, {
+        playerId: p.id,
+        progressDistance: dist,
+        lane: laneNum,
+        targetLane: targetLaneNum,
+        laneX: laneXVal,
+        action: act,
+        jumpY: jumpVal,
+        stumbling: Boolean(snap?.stumbling ?? p.stumbling),
+        finished: Boolean(snap?.finished ?? p.finished),
+        updatedAt: snap?.updatedAt || Date.now(),
+      });
+
+      spectatorList.push({
+        id: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        avatarId: p.avatarId,
+        color: p.color,
+        lane: laneNum,
+        targetLane: targetLaneNum,
+        laneX: laneXVal,
+        yOffset: 0,
+        progressDistance: dist,
+        action: act,
+        jumpY: jumpVal,
+        isBot: false,
+        isPlayer: false,
+        isHost: p.isHost,
+        isRemoteHuman: true,
+        profileReady: true,
+        betAmount: typeof p.betAmount === 'number' ? clampBetKz(p.betAmount) : serverRoom?.betAmount ?? betAmountRef.current,
+        sessionStatus: activeInvestigations[p.id]?.sessionStatus ?? p.sessionStatus ?? 'normal',
+        stumbling: Boolean(snap?.stumbling ?? p.stumbling),
+        finished: Boolean(snap?.finished ?? p.finished),
+      });
+    }
+
+    if (spectatorList.length === 0) {
+      competitorsRef.current
+        .filter((c) => !c.isPlayer)
+        .forEach((c) => spectatorList.push({ ...c, isPlayer: false }));
+    }
+    if (spectatorList.length === 0) {
+      const b = ANGOLAN_BOTS[0];
+      spectatorList.push({
+        id: b.id,
+        name: b.name,
+        avatar: b.avatar,
+        avatarId: b.avatarId,
+        color: b.color,
+        lane: 2,
+        targetLane: 2,
+        laneX: LANE_CENTERS[2],
+        yOffset: 0,
+        progressDistance: 0,
+        action: 'running',
+        jumpY: 0,
+        isBot: true,
+        isPlayer: false,
+        stumbling: false,
+        finished: false,
+      });
+    }
+
+    clearCountdownTimers();
+    if (finishFallbackTimerRef.current) {
+      clearTimeout(finishFallbackTimerRef.current);
+      finishFallbackTimerRef.current = null;
+    }
+
+    activeRaceRoundRef.current = roundNum;
+    setActiveRaceRound(roundNum);
+    activeBetForRoundRef.current = clampBetKz(serverRoom?.betAmount ?? betAmountRef.current);
+    telemetryValidatorRef.current.setSessionContext({
+      roomCode: roomConfig.code,
+      raceRound: roundNum,
+      reporterId: myId,
+    });
+
+    isSpectatingRef.current = true;
+    setIsSpectating(true);
+    setSpectatedRunnerId(null);
+    setWasSpectatorOutcome(false);
+    setCompetitors(spectatorList);
+    setRaceSeed(seedVal);
+    setSyncedRaceStartAt(localStartAt);
+    setLobbyOpen(false);
+    setShowPodium(false);
+    setAuthoritativeRankings(null);
+    setPendingSyncPodium(false);
+    setLastPerformance(null);
+    setCoinsCollected(0);
+    setElapsedSeconds(
+      Math.max(0, Math.min(TOTAL_GAME_TIME_SECONDS, (Date.now() - localStartAt) / 1000))
+    );
+    setRoundNonce((n) => n + 1);
+
+    const ws = roomWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'room:spectate-state',
+          roomCode: roomConfig.code,
+          isSpectating: true,
+        })
+      );
+    }
+
+    if (localStartAt > Date.now() + 250 && serverRaceStatusRef.current === 'starting') {
+      statusRef.current = 'starting';
+      setStatus('starting');
+      const rem = Math.max(250, localStartAt - Date.now());
+      setCountdownValue(Math.max(1, Math.min(3, Math.ceil(rem / 1000))));
+      countdownTimersRef.current.push(
+        setTimeout(() => {
+          setCountdownValue(null);
+          statusRef.current = 'running';
+          setStatus('running');
+        }, rem)
+      );
+    } else {
+      setCountdownValue(null);
+      statusRef.current = 'running';
+      setStatus('running');
+    }
+
+    if (typeof window !== 'undefined') {
+      requestAnimationFrame(() => alignTrackToTop('smooth'));
+    }
+  }, [alignTrackToTop, clearCountdownTimers, roomConfig.code, wsRoomSessionKey]);
+
+  const handleExitSpectatorMode = useCallback(() => {
+    clearCountdownTimers();
+    if (finishFallbackTimerRef.current) {
+      clearTimeout(finishFallbackTimerRef.current);
+      finishFallbackTimerRef.current = null;
+    }
+    isSpectatingRef.current = false;
+    setIsSpectating(false);
+    setSpectatedRunnerId(null);
+    setWasSpectatorOutcome(false);
+    setCountdownValue(null);
+    statusRef.current = 'idle';
+    setStatus('idle');
+    setElapsedSeconds(0);
+    setShowPodium(false);
+    setPendingSyncPodium(false);
+
+    const ws = roomWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'room:spectate-state',
+          roomCode: roomConfig.code,
+          isSpectating: false,
+        })
+      );
+    }
+
+    if (applyServerRoomStateRef.current) {
+      applyServerRoomStateRef.current(true);
+    } else {
+      resetCompetitors();
+    }
+    setLobbyOpen(true);
+  }, [clearCountdownTimers, resetCompetitors, roomConfig.code]);
+
   // Início da corrida de 40 segundos (exclusivo do líder em salas sincronizadas)
   const handleStartRound = (fromRoom = false) => {
+    if (isSpectatingRef.current) return;
     const effectiveBet = clampBetKz(fromRoom ? roomConfig.betAmount : betAmount);
     if (balance < effectiveBet || status === 'running' || status === 'starting') return;
+
+    sounds.unlockAudio();
 
     const inServerRoomSession =
       !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
@@ -1160,10 +1586,50 @@ export default function App() {
         !isAutoMatchRef.current);
     const ws = roomWsRef.current;
 
+    const isPublicMatch = isAutoMatchRef.current || roomConfig.accessMode === 'random';
+
     if (inServerRoomSession) {
+      if (serverRaceStatusRef.current === 'running' || serverRaceStatusRef.current === 'starting') {
+        handleEnterSpectatorMode();
+        return;
+      }
+      if (
+        isPublicMatch &&
+        (publicRoundCompletedRef.current || serverRaceStatusRef.current === 'completed')
+      ) {
+        publicRoundCompletedRef.current = false;
+        rotatePublicBotsInCompetitors(effectiveBet, true);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          startedFromRoomRef.current = fromRoom || lobbyOpen;
+          setRoomNotice(null);
+          const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
+          ws.send(
+            JSON.stringify({
+              type: 'room:find-next-public',
+              betAmount: effectiveBet,
+              isDemo,
+              excludeRoomCode: roomConfig.code,
+              autoStart: true,
+              player: {
+                id: getSessionPlayerId(),
+                name: playerName,
+                avatar: myAvatar.avatar,
+                avatarId: myAvatar.id,
+                color: myAvatar.color,
+                profileReady: !needsInviteOnboarding,
+                selectingProfile: needsInviteOnboarding,
+              },
+            })
+          );
+          return;
+        }
+      }
       if (!isLocalRoomHost) {
         setRoomNotice(mpStrings.onlyHostCanStart);
         return;
+      }
+      if (isPublicMatch) {
+        publicRoundCompletedRef.current = false;
       }
       startedFromRoomRef.current = fromRoom || lobbyOpen;
       setRoomNotice(null);
@@ -1249,14 +1715,17 @@ export default function App() {
     setElapsedSeconds(0);
     setCoinsCollected(0);
     setLastPerformance(null);
-    resetCompetitors();
+    if (isPublicMatch && publicRoundCompletedRef.current) {
+      publicRoundCompletedRef.current = false;
+      rotatePublicBotsInCompetitors(effectiveBet, true);
+    } else {
+      resetCompetitors();
+    }
     setRoundNonce((n) => n + 1);
     setLobbyOpen(false);
     setShowPodium(false);
     setStatus('starting');
     setLastPayout(null);
-    setCountdownValue(3);
-    sounds.playCountdownTick();
 
     if (typeof window !== 'undefined') {
       requestAnimationFrame(() => alignTrackToTop('smooth'));
@@ -1265,39 +1734,70 @@ export default function App() {
       );
     }
 
-    countdownTimersRef.current.push(
-      setTimeout(() => {
+    const STEP_INTERVAL_MS = 650;
+    const GO_DURATION_MS = 650;
+    const startPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const firedSteps = { s3: false, s2: false, s1: false, s0: false, run: false };
+
+    const triggerStep = (step: 's3' | 's2' | 's1' | 's0' | 'run') => {
+      if (firedSteps[step]) return;
+      firedSteps[step] = true;
+      if (step === 's3') {
+        setCountdownValue(3);
+        sounds.playCountdownTick();
+      } else if (step === 's2') {
         setCountdownValue(2);
         sounds.playCountdownTick();
-      }, 650)
-    );
-
-    countdownTimersRef.current.push(
-      setTimeout(() => {
+      } else if (step === 's1') {
         setCountdownValue(1);
         sounds.playCountdownTick();
-      }, 1300)
-    );
-
-    countdownTimersRef.current.push(
-      setTimeout(() => {
+      } else if (step === 's0') {
         setCountdownValue(0);
         sounds.playCountdownGo();
-      }, 1950)
-    );
-
-    countdownTimersRef.current.push(
-      setTimeout(() => {
+      } else {
+        if (countdownRafRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+          cancelAnimationFrame(countdownRafRef.current);
+          countdownRafRef.current = null;
+        }
         setCountdownValue(null);
         alignTrackToTop('auto', true);
+        statusRef.current = 'running';
         setStatus('running');
-      }, 2450)
+      }
+    };
+
+    triggerStep('s3');
+
+    if (typeof requestAnimationFrame !== 'undefined') {
+      const monitorCountdown = () => {
+        const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const elapsed = nowPerf - startPerfMs;
+        if (elapsed >= STEP_INTERVAL_MS && !firedSteps.s2) triggerStep('s2');
+        if (elapsed >= STEP_INTERVAL_MS * 2 && !firedSteps.s1) triggerStep('s1');
+        if (elapsed >= STEP_INTERVAL_MS * 3 && !firedSteps.s0) triggerStep('s0');
+        if (elapsed >= STEP_INTERVAL_MS * 3 + GO_DURATION_MS && !firedSteps.run) {
+          triggerStep('run');
+          return;
+        }
+        if (!firedSteps.run) {
+          countdownRafRef.current = requestAnimationFrame(monitorCountdown);
+        }
+      };
+      countdownRafRef.current = requestAnimationFrame(monitorCountdown);
+    }
+
+    countdownTimersRef.current.push(
+      setTimeout(() => triggerStep('s2'), STEP_INTERVAL_MS),
+      setTimeout(() => triggerStep('s1'), STEP_INTERVAL_MS * 2),
+      setTimeout(() => triggerStep('s0'), STEP_INTERVAL_MS * 3),
+      setTimeout(() => triggerStep('run'), STEP_INTERVAL_MS * 3 + GO_DURATION_MS)
     );
   };
 
   // Envia telemetria em tempo real da corrida do jogador local para os adversários na sala
   const handleLocalRaceTelemetry = useCallback(
     (telemetry: LocalRunnerTelemetry) => {
+      if (isSpectatingRef.current) return;
       const ws = roomWsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (activeRaceRoundRef.current <= 0) return;
@@ -1323,11 +1823,12 @@ export default function App() {
   // Fim da corrida após os 40 segundos exatos
   const handleRaceFinish = useCallback(
     (finalCompetitors: Competitor[], performance?: RacePerformanceMetrics) => {
+      const spectatingNow = isSpectatingRef.current;
       sounds.stopRaceBgm();
       statusRef.current = 'completed';
       setStatus('completed');
       setCompetitors(finalCompetitors);
-      setLastPerformance(performance ?? null);
+      setLastPerformance(spectatingNow ? null : performance ?? null);
       void telemetryValidatorRef.current.flushBatch();
 
       const usedBet = activeBetForRoundRef.current || betAmount;
@@ -1335,9 +1836,24 @@ export default function App() {
       const ws = roomWsRef.current;
       const isMultiplayerRound =
         roundKey > 0 &&
-        (connectedHumansCount > 1 || serverHumansCountRef.current > 1) &&
+        (connectedHumansCount > 1 || serverHumansCountRef.current > 1 || spectatingNow) &&
         ws &&
         ws.readyState === WebSocket.OPEN;
+
+      if (spectatingNow) {
+        if (isMultiplayerRound) {
+          setPendingSyncPodium(true);
+          if (finishFallbackTimerRef.current) clearTimeout(finishFallbackTimerRef.current);
+          finishFallbackTimerRef.current = setTimeout(() => {
+            if (!finalizedRoundSetRef.current.has(roundKey)) {
+              applyCompletedRaceOutcome(finalCompetitors, usedBet, null, null, true);
+            }
+          }, 1800);
+          return;
+        }
+        applyCompletedRaceOutcome(finalCompetitors, usedBet, null, null, true);
+        return;
+      }
 
       if (isMultiplayerRound && ws) {
         const playerComp = finalCompetitors.find((c) => c.isPlayer);
@@ -1909,15 +2425,19 @@ export default function App() {
     isDemo?: boolean;
     accessMode?: RoomAccessMode;
     viaInvite?: boolean;
+    viaRandomMatch?: boolean;
+    fillWithBots?: boolean;
   }) => {
     const cleanCode = payload.code.trim().toUpperCase();
     const cap = clampRoomMax(payload.maxPlayers ?? roomConfig.maxPlayers, 5);
     const accessMode: RoomAccessMode = payload.accessMode || roomConfig.accessMode || 'invite-only';
-    isAutoMatchRef.current = false;
+    const shouldFillBots = payload.fillWithBots ?? (Boolean(payload.viaRandomMatch) || accessMode === 'random');
+    isAutoMatchRef.current = Boolean(payload.viaRandomMatch);
     isRoomCreatorRef.current = false;
     viaInviteRef.current = payload.viaInvite ?? true;
     setIsLocalRoomHost(!viaInviteRef.current);
     removedLocalIdsRef.current.clear();
+    publicRoundCompletedRef.current = false;
     setRoomNotice(null);
     const updatedConfig: RoomConfig = {
       code: cleanCode,
@@ -1926,7 +2446,7 @@ export default function App() {
       maxPlayers: cap,
       minPlayers: 2,
       betAmount: clampBetKz(payload.betAmount ?? betAmount),
-      fillWithBots: false,
+      fillWithBots: shouldFillBots,
       isDemo: payload.isDemo ?? isDemo,
       isPrivate: accessMode === 'invite-only',
       accessMode,
@@ -1934,7 +2454,11 @@ export default function App() {
     setRoomConfig(updatedConfig);
     setBetAmount(updatedConfig.betAmount);
     setWsRoomSessionKey(`EXPLICIT_${cleanCode}_${Date.now()}`);
-    setCompetitors((prev) => fitCompetitorsToCapacity(prev, cap, false));
+    if (shouldFillBots && (payload.viaRandomMatch || accessMode === 'random')) {
+      rotatePublicBotsInCompetitors(updatedConfig.betAmount, true);
+    } else {
+      setCompetitors((prev) => fitCompetitorsToCapacity(prev, cap, shouldFillBots));
+    }
     if (typeof payload.isDemo === 'boolean') {
       setIsDemo(payload.isDemo);
     }
@@ -2055,7 +2579,14 @@ export default function App() {
       return;
     }
     try {
-      const resp = await fetch(`/api/rooms/open/random?playerId=${encodeURIComponent(getSessionPlayerId())}`);
+      const targetBet = clampBetKz(betAmount);
+      const query = new URLSearchParams({
+        playerId: getSessionPlayerId(),
+        betAmount: String(targetBet),
+        isDemo: isDemo ? '1' : '0',
+        excludeRoom: roomConfig.code,
+      });
+      const resp = await fetch(`/api/rooms/open/random?${query.toString()}`);
       if (!resp.ok) {
         setRoomNotice(t.lobby.noRandomRoomNotice);
         return;
@@ -2068,6 +2599,7 @@ export default function App() {
           hostName: string;
           maxPlayers: number;
           betAmount: number;
+          fillWithBots?: boolean;
           isDemo: boolean;
           accessMode?: RoomAccessMode;
         };
@@ -2081,7 +2613,9 @@ export default function App() {
           betAmount: data.room.betAmount,
           isDemo: data.room.isDemo,
           accessMode: data.room.accessMode || 'random',
+          fillWithBots: data.room.fillWithBots ?? true,
           viaInvite: true,
+          viaRandomMatch: true,
         });
       } else {
         setRoomNotice(t.lobby.noRandomRoomNotice);
@@ -2194,11 +2728,19 @@ export default function App() {
       color: string;
       isHost: boolean;
       lane?: number;
+      targetLane?: number;
+      laneX?: number;
+      progressDistance?: number;
+      action?: string;
+      jumpY?: number;
+      stumbling?: boolean;
+      finished?: boolean;
       profileReady?: boolean;
       selectingProfile?: boolean;
       connected?: boolean;
       betAmount?: number;
       sessionStatus?: 'normal' | 'investigating';
+      isSpectating?: boolean;
     };
 
     type ServerRoomPayload = {
@@ -2224,6 +2766,54 @@ export default function App() {
     const applyRoomStateFromServer = (room: ServerRoomPayload, forceCompetitorSync = false) => {
       if (!room || !Array.isArray(room.participants)) return;
 
+      latestServerRoomRef.current = room;
+      const nextServerRaceStatus: ServerRaceStatus = room.raceStatus || 'idle';
+      serverRaceStatusRef.current = nextServerRaceStatus;
+      setServerRaceStatus(nextServerRaceStatus);
+      if (typeof room.raceRound === 'number') {
+        serverRaceRoundRef.current = room.raceRound;
+      }
+      if (typeof room.raceSeed === 'number') {
+        serverRaceSeedRef.current = room.raceSeed;
+      }
+      const nextServerStart = room.syncedRaceStartAt ?? room.raceStartAt;
+      if (typeof nextServerStart === 'number') {
+        serverRaceStartAtRef.current = nextServerStart;
+      }
+
+      if (nextServerRaceStatus === 'running' || nextServerRaceStatus === 'starting') {
+        room.participants.forEach((p) => {
+          if (p.id === myId || p.isSpectating || p.connected === false) return;
+          if (!remotePlayersRef.current.has(p.id)) {
+            const pLane = (typeof p.lane === 'number' ? Math.max(0, Math.min(4, p.lane)) : 1) as Lane;
+            const pTarget = (typeof p.targetLane === 'number'
+              ? Math.max(0, Math.min(4, p.targetLane))
+              : pLane) as Lane;
+            remotePlayersRef.current.set(p.id, {
+              playerId: p.id,
+              progressDistance: Number(p.progressDistance || 0),
+              lane: pLane,
+              targetLane: pTarget,
+              laneX: typeof p.laneX === 'number' ? p.laneX : LANE_CENTERS[pTarget],
+              action: (p.action as RemoteRunnerSnapshot['action']) || 'running',
+              jumpY: Number(p.jumpY || 0),
+              stumbling: Boolean(p.stumbling),
+              finished: Boolean(p.finished),
+              updatedAt: Date.now(),
+            });
+          }
+        });
+      }
+
+      if (isSpectatingRef.current && nextServerRaceStatus === 'idle') {
+        isSpectatingRef.current = false;
+        setIsSpectating(false);
+        setSpectatedRunnerId(null);
+        statusRef.current = 'idle';
+        setStatus('idle');
+        setElapsedSeconds(0);
+      }
+
       const activeServerHumans = room.participants.filter((p) => p.connected !== false);
       const meOnServer =
         activeServerHumans.find((p) => p.id === myId) ||
@@ -2234,7 +2824,7 @@ export default function App() {
         ? room.creatorId === myId
         : isRoomCreatorRef.current || !viaInviteRef.current;
       setIsLocalRoomHost(localIsHost);
-      serverHumansCountRef.current = activeServerHumans.length;
+      serverHumansCountRef.current = activeServerHumans.filter((p) => p.isSpectating !== true).length;
 
       const unreadyOthers = activeServerHumans
         .filter((p) => p.id !== myId && (p.selectingProfile || p.profileReady === false))
@@ -2288,7 +2878,7 @@ export default function App() {
         }
       }
 
-      if (statusRef.current === 'idle' || forceCompetitorSync) {
+      if (!isSpectatingRef.current && (statusRef.current === 'idle' || forceCompetitorSync)) {
         const remoteOthers = activeServerHumans.filter(
           (p) => p.id !== myId && !removedLocalIdsRef.current.has(p.id)
         );
@@ -2331,6 +2921,7 @@ export default function App() {
               betAmount: typeof p.betAmount === 'number' ? clampBetKz(p.betAmount) : serverBet,
               sessionStatus:
                 activeInvestigations[p.id]?.sessionStatus ?? p.sessionStatus ?? 'normal',
+              isSpectating: Boolean(p.isSpectating),
               stumbling: false,
               finished: false,
             };
@@ -2347,6 +2938,7 @@ export default function App() {
               isRemoteHuman: false,
               profileReady: !needsInviteOnboardingRef.current,
               betAmount: shouldAdoptServerBet ? serverBet : betAmountRef.current,
+              isSpectating: Boolean(meOnServer?.isSpectating),
             });
           }
           for (const remoteFriend of humanCompetitors) {
@@ -2360,7 +2952,9 @@ export default function App() {
               betAmount: serverBet,
             });
           }
-          if (cfg.fillWithBots) {
+          const shouldIncludeBots =
+            room.fillWithBots ?? (cfg.fillWithBots || (serverAccess || cfg.accessMode) === 'random');
+          if (shouldIncludeBots) {
             for (const bot of existingBots) {
               if (combined.length >= serverMax) break;
               if (!combined.some((c) => c.id === bot.id)) {
@@ -2370,9 +2964,47 @@ export default function App() {
                 });
               }
             }
+            const missingSlots = Math.max(0, serverMax - combined.length);
+            if (missingSlots > 0) {
+              const extraBots = pickRotatedPublicBots(
+                missingSlots,
+                previousPublicBotIdsRef.current,
+                combined.map((c) => c.id)
+              );
+              for (const b of extraBots) {
+                if (combined.length >= serverMax) break;
+                const localized = getLocalizedBot(b.id, lang);
+                const botLane = (RIVAL_LANE_SLOTS[combined.length % RIVAL_LANE_SLOTS.length] ?? 0) as Lane;
+                combined.push({
+                  id: b.id,
+                  name: localized.name || b.name,
+                  avatar: b.avatar,
+                  avatarId: b.avatarId,
+                  color: b.color,
+                  lane: botLane,
+                  targetLane: botLane,
+                  laneX: LANE_CENTERS[botLane],
+                  yOffset: 0,
+                  progressDistance: 0,
+                  action: 'running',
+                  jumpY: 0,
+                  isBot: true,
+                  isPlayer: false,
+                  stumbling: false,
+                  finished: false,
+                  betAmount: serverBet,
+                });
+              }
+            }
           }
           return assignDistinctLanes(combined.slice(0, serverMax), forceCompetitorSync);
         });
+      }
+    };
+
+    applyServerRoomStateRef.current = (forceCompetitorSync = false) => {
+      if (latestServerRoomRef.current) {
+        applyRoomStateFromServer(latestServerRoomRef.current as ServerRoomPayload, forceCompetitorSync);
       }
     };
 
@@ -2392,6 +3024,11 @@ export default function App() {
       }
       const localRaceStartAt = payload.raceStartAt - serverClockOffsetRef.current;
       const effectiveBet = clampBetKz(payload.betAmount ?? roomConfigRef.current.betAmount);
+
+      isSpectatingRef.current = false;
+      setIsSpectating(false);
+      setSpectatedRunnerId(null);
+      setWasSpectatorOutcome(false);
 
       activeRaceRoundRef.current = payload.raceRound;
       setActiveRaceRound(payload.raceRound);
@@ -2447,8 +3084,6 @@ export default function App() {
       setCoinsCollected(0);
       setLastPerformance(null);
       setRoundNonce((n) => n + 1);
-      setCountdownValue(3);
-      sounds.playCountdownTick();
 
       if (typeof window !== 'undefined') {
         requestAnimationFrame(() => alignTrackToTop('smooth'));
@@ -2456,31 +3091,64 @@ export default function App() {
       }
 
       const remainingMs = Math.max(400, localRaceStartAt - Date.now());
-      countdownTimersRef.current.push(
-        setTimeout(() => {
+      const t2 = Math.round(remainingMs * 0.25);
+      const t1 = Math.round(remainingMs * 0.5);
+      const t0 = Math.round(remainingMs * 0.75);
+      const startPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const firedSync = { s3: false, s2: false, s1: false, s0: false, run: false };
+
+      const triggerSyncStep = (step: 's3' | 's2' | 's1' | 's0' | 'run') => {
+        if (firedSync[step]) return;
+        firedSync[step] = true;
+        if (step === 's3') {
+          setCountdownValue(3);
+          sounds.playCountdownTick();
+        } else if (step === 's2') {
           setCountdownValue(2);
           sounds.playCountdownTick();
-        }, Math.round(remainingMs * 0.3))
-      );
-      countdownTimersRef.current.push(
-        setTimeout(() => {
+        } else if (step === 's1') {
           setCountdownValue(1);
           sounds.playCountdownTick();
-        }, Math.round(remainingMs * 0.6))
-      );
-      countdownTimersRef.current.push(
-        setTimeout(() => {
+        } else if (step === 's0') {
           setCountdownValue(0);
           sounds.playCountdownGo();
-        }, Math.round(remainingMs * 0.85))
-      );
-      countdownTimersRef.current.push(
-        setTimeout(() => {
+        } else {
+          if (countdownRafRef.current !== null && typeof cancelAnimationFrame !== 'undefined') {
+            cancelAnimationFrame(countdownRafRef.current);
+            countdownRafRef.current = null;
+          }
           setCountdownValue(null);
           alignTrackToTop('auto', true);
           statusRef.current = 'running';
           setStatus('running');
-        }, remainingMs)
+        }
+      };
+
+      triggerSyncStep('s3');
+
+      if (typeof requestAnimationFrame !== 'undefined') {
+        const monitorSyncCountdown = () => {
+          const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+          const elapsed = nowPerf - startPerfMs;
+          if (elapsed >= t2 && !firedSync.s2) triggerSyncStep('s2');
+          if (elapsed >= t1 && !firedSync.s1) triggerSyncStep('s1');
+          if (elapsed >= t0 && !firedSync.s0) triggerSyncStep('s0');
+          if (elapsed >= remainingMs && !firedSync.run) {
+            triggerSyncStep('run');
+            return;
+          }
+          if (!firedSync.run) {
+            countdownRafRef.current = requestAnimationFrame(monitorSyncCountdown);
+          }
+        };
+        countdownRafRef.current = requestAnimationFrame(monitorSyncCountdown);
+      }
+
+      countdownTimersRef.current.push(
+        setTimeout(() => triggerSyncStep('s2'), t2),
+        setTimeout(() => triggerSyncStep('s1'), t1),
+        setTimeout(() => triggerSyncStep('s0'), t0),
+        setTimeout(() => triggerSyncStep('run'), remainingMs)
       );
     };
 
@@ -2535,6 +3203,8 @@ export default function App() {
           type?: string;
           serverTime?: number;
           room?: ServerRoomPayload;
+          rotatedPublicMatch?: boolean;
+          startAfterJoin?: boolean;
           waitingNames?: string[];
           raceRound?: number;
           raceSeed?: number;
@@ -2560,6 +3230,27 @@ export default function App() {
         }
 
         if ((msg.type === 'room:joined' || msg.type === 'room:state') && msg.room) {
+          if (msg.type === 'room:joined' && msg.rotatedPublicMatch) {
+            startedRoundSetRef.current.clear();
+            finalizedRoundSetRef.current.clear();
+            remotePlayersRef.current.clear();
+            publicRoundCompletedRef.current = false;
+            lastLocalBetChangeAtRef.current = 0;
+            applyRoomStateFromServer(msg.room, true);
+            rotatePublicBotsInCompetitorsRef.current?.(msg.room.betAmount, true);
+            if (msg.startAfterJoin) {
+              const meInNext = msg.room.participants.find((p) => p.id === myId);
+              if (meInNext?.isHost) {
+                ws.send(JSON.stringify({ type: 'room:start-request', roomCode: msg.room.code }));
+              } else {
+                setShowPodium(false);
+                statusRef.current = 'idle';
+                setStatus('idle');
+                setLobbyOpen(true);
+              }
+            }
+            return;
+          }
           applyRoomStateFromServer(msg.room, false);
           const catchUpStartAt = msg.room.syncedRaceStartAt ?? msg.room.raceStartAt;
           if (
@@ -2609,10 +3300,16 @@ export default function App() {
         }
 
         if (msg.type === 'room:race-sync' && msg.playerId && msg.playerId !== myId) {
+          const expectedRound =
+            activeRaceRoundRef.current > 0
+              ? activeRaceRoundRef.current
+              : isSpectatingRef.current
+              ? serverRaceRoundRef.current
+              : 0;
           if (
             typeof msg.raceRound === 'number' &&
-            activeRaceRoundRef.current > 0 &&
-            msg.raceRound !== activeRaceRoundRef.current
+            expectedRound > 0 &&
+            msg.raceRound !== expectedRound
           ) {
             return;
           }
@@ -2667,6 +3364,16 @@ export default function App() {
         }
 
         if (msg.type === 'room:race-finished' && Array.isArray(msg.rankings)) {
+          serverRaceStatusRef.current = 'completed';
+          setServerRaceStatus('completed');
+          if (
+            !isSpectatingRef.current &&
+            statusRef.current === 'idle' &&
+            !startedRoundSetRef.current.has(msg.raceRound || -1)
+          ) {
+            return;
+          }
+          const finishedAsSpectator = isSpectatingRef.current;
           if (typeof msg.raceRound === 'number') {
             activeRaceRoundRef.current = msg.raceRound;
             setActiveRaceRound(msg.raceRound);
@@ -2674,7 +3381,7 @@ export default function App() {
           void telemetryValidatorRef.current.flushBatch();
           const finalCompetitorsList = msg.rankings.map((r) => ({
             id: r.id,
-            name: r.id === myId ? `${r.name} ${t.youTag}` : r.name,
+            name: !finishedAsSpectator && r.id === myId ? `${r.name} ${t.youTag}` : r.name,
             avatar: r.avatar,
             avatarId: r.avatarId,
             color: r.color,
@@ -2686,7 +3393,7 @@ export default function App() {
             action: 'running' as const,
             jumpY: 0,
             isBot: r.isBot,
-            isPlayer: r.id === myId,
+            isPlayer: !finishedAsSpectator && r.id === myId,
             stumbling: false,
             finished: true,
           }));
@@ -2694,7 +3401,8 @@ export default function App() {
             finalCompetitorsList,
             msg.betAmount ?? activeBetForRoundRef.current,
             undefined,
-            msg.rankings
+            msg.rankings,
+            finishedAsSpectator
           );
           return;
         }
@@ -2746,6 +3454,7 @@ export default function App() {
     return () => {
       closedByCleanup = true;
       beginSynchronizedCountdownRef.current = null;
+      applyServerRoomStateRef.current = null;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (roomWsRef.current === ws) {
         roomWsRef.current = null;
@@ -3195,6 +3904,10 @@ export default function App() {
             syncedRaceStartAt={syncedRaceStartAt}
             remotePlayersRef={remotePlayersRef}
             onLocalRaceTelemetry={handleLocalRaceTelemetry}
+            isSpectating={isSpectating}
+            spectatedRunnerId={spectatedRunnerId}
+            onSelectSpectatedRunner={setSpectatedRunnerId}
+            onExitSpectator={handleExitSpectatorMode}
           />
         </section>
 
@@ -3376,6 +4089,13 @@ export default function App() {
               waitingForOpponent={waitingForOpponent}
               waitingOpponentNames={waitingOpponentNames}
               connectedHumansCount={connectedHumansCount}
+              serverRaceStatus={serverRaceStatus}
+              canSpectate={
+                status === 'idle' &&
+                !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+                (serverRaceStatus === 'running' || serverRaceStatus === 'starting')
+              }
+              onEnterSpectatorMode={handleEnterSpectatorMode}
             />
           </div>
         )}
@@ -3394,11 +4114,18 @@ export default function App() {
               authoritativeRankings={authoritativeRankings}
               streak={top3Streak}
               performance={lastPerformance}
-              returnTarget={startedFromRoomRef.current ? 'room' : 'lobby'}
+              returnTarget={startedFromRoomRef.current || wasSpectatorOutcome ? 'room' : 'lobby'}
               onPlayAgain={() => handleStartRound(startedFromRoomRef.current)}
               onBackToLobby={handleReturnToLobby}
               isDemo={isDemo}
-              canPlayAgain={balance >= betAmount && (wsRoomSessionKey.startsWith('SOLO_IDLE_') || isLocalRoomHost)}
+              isSpectator={wasSpectatorOutcome}
+              canPlayAgain={
+                !wasSpectatorOutcome &&
+                balance >= betAmount &&
+                (wsRoomSessionKey.startsWith('SOLO_IDLE_') ||
+                  isLocalRoomHost ||
+                  roomConfig.accessMode === 'random')
+              }
             />
           </PodiumErrorBoundary>
         )}

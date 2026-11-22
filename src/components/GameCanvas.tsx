@@ -73,6 +73,10 @@ interface GameCanvasProps {
   syncedRaceStartAt?: number | null;
   remotePlayersRef?: React.RefObject<Map<string, RemoteRunnerSnapshot>>;
   onLocalRaceTelemetry?: (telemetry: LocalRunnerTelemetry) => void;
+  isSpectating?: boolean;
+  spectatedRunnerId?: string | null;
+  onSelectSpectatedRunner?: (id: string | null) => void;
+  onExitSpectator?: () => void;
 }
 
 interface Particle {
@@ -124,6 +128,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   syncedRaceStartAt = null,
   remotePlayersRef,
   onLocalRaceTelemetry,
+  isSpectating = false,
+  spectatedRunnerId = null,
+  onSelectSpectatedRunner,
+  onExitSpectator,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const { t, lang, formatMoney } = useI18n();
@@ -132,6 +140,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const langRef = useRef(lang);
   tRef.current = t;
   langRef.current = lang;
+
+  const isSpectatingRef = useRef<boolean>(Boolean(isSpectating));
+  const spectatedRunnerIdRef = useRef<string | null>(spectatedRunnerId ?? null);
+  isSpectatingRef.current = Boolean(isSpectating);
+  spectatedRunnerIdRef.current = spectatedRunnerId ?? null;
 
   // Refs estáveis para callbacks (evita reiniciar o loop 60 FPS a cada atualização de timer do App)
   const onFinishRef = useRef(onFinish);
@@ -347,6 +360,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     compTrailAcc: 0,
     sprintAudioAcc: 0,
     sprintStepIndex: 0,
+    isSpectating: Boolean(isSpectating),
+    followedRunnerId: spectatedRunnerId ?? null,
     competitorsList: competitors.map((c) => ({ ...c })),
     player: {
       lane: 2 as Lane, // Começa na faixa central (Faixa 3 das 5 faixas)
@@ -363,6 +378,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     } as Player,
   });
 
+  stateRef.current.isSpectating = Boolean(isSpectating);
+
   const prevStatusRef = useRef<GameStatus>(status);
 
   // Atualiza competidores apenas fora da corrida ativa para não sobrescrever a física 60 FPS
@@ -370,6 +387,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const prevStatus = prevStatusRef.current;
     prevStatusRef.current = status;
     stateRef.current.status = status;
+    stateRef.current.isSpectating = Boolean(isSpectating);
 
     if (status !== 'running') {
       stateRef.current.competitorsList = competitors.map((c) => {
@@ -610,10 +628,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }
   }, []);
 
-  // Ações de Controle nas 5 Faixas (resposta imediata sem travar inversões rápidas)
+  // Ações de Controle nas 5 Faixas (desativadas em modo espectador)
   const moveLane = useCallback((direction: 'left' | 'right') => {
     const s = stateRef.current;
-    if (s.status !== 'running') return;
+    if (s.status !== 'running' || isSpectatingRef.current) return;
     recordObstacleReaction();
     const currentTarget = clampLaneIndex(s.player.targetLane);
     const physicalLane = Number.isFinite(s.player.laneX)
@@ -635,7 +653,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const triggerJump = useCallback(() => {
     const s = stateRef.current;
-    if (s.status !== 'running') return;
+    if (s.status !== 'running' || isSpectatingRef.current) return;
     recordObstacleReaction();
     if (s.player.jumpY === 0 && s.player.action !== 'sliding') {
       s.player.jumpVelocity = JUMP_INITIAL_VELOCITY;
@@ -646,7 +664,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const triggerSlide = useCallback(() => {
     const s = stateRef.current;
-    if (s.status !== 'running') return;
+    if (s.status !== 'running' || isSpectatingRef.current) return;
     recordObstacleReaction();
     if (s.player.jumpY > 0) {
       s.player.jumpVelocity = -12; // Queda rápida se estiver no ar
@@ -675,7 +693,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const triggerDash = useCallback(() => {
     const s = stateRef.current;
-    if (s.status !== 'running') return;
+    if (s.status !== 'running' || isSpectatingRef.current) return;
     const now = performance.now();
     if (now < s.dashCooldownEnd) return;
     recordObstacleReaction();
@@ -718,7 +736,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           target.tagName === 'SELECT' ||
           target.isContentEditable);
       if (isEditingText && stateRef.current.status !== 'running') return;
-      if (stateRef.current.status !== 'running') return;
+      if (stateRef.current.status !== 'running' || isSpectatingRef.current) return;
 
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
         e.preventDefault();
@@ -753,7 +771,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   });
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (stateRef.current.status !== 'running') return;
+    if (stateRef.current.status !== 'running' || isSpectatingRef.current) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (
       gestureStateRef.current.activePointerId !== null &&
@@ -775,7 +793,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (stateRef.current.status !== 'running') return;
+    if (stateRef.current.status !== 'running' || isSpectatingRef.current) return;
     if (gestureStateRef.current.activePointerId !== e.pointerId) return;
     if (gestureStateRef.current.hasSwiped) return;
 
@@ -881,14 +899,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const s = stateRef.current;
       const canvas = canvasRef.current;
 
+      const spectatingNow = isSpectatingRef.current;
+      s.isSpectating = spectatingNow;
+
       if (s.status === 'running') {
         // Cronômetro oficial exato de 40.0 segundos via performance.now() sincronizado ao raceStartAt
         const nowPerf = performance.now();
         if (!s.raceStartTime) {
           if (syncedRaceStartAtRef.current) {
+            const maxOffsetMs = spectatingNow ? TOTAL_GAME_TIME_SECONDS * 1000 : 2000;
             const elapsedSinceStart = Math.max(
               0,
-              Math.min(2000, Date.now() - syncedRaceStartAtRef.current)
+              Math.min(maxOffsetMs, Date.now() - syncedRaceStartAtRef.current)
             );
             s.raceStartTime = nowPerf - elapsedSinceStart;
           } else {
@@ -908,8 +930,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         const isHard = s.elapsedSeconds >= HARD_MODE_START_SECONDS;
         if (isHard && !s.hardModeTriggered) {
           s.hardModeTriggered = true;
-          sounds.setRaceSpeed(true);
-          sounds.playHardModeSiren();
+          if (!spectatingNow) {
+            sounds.setRaceSpeed(true);
+            sounds.playHardModeSiren();
+          }
           pushFloatingText(s.floatingTexts, {
             id: Date.now(),
             text: tRef.current.canvas.hardModeAlert,
@@ -921,162 +945,166 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           });
         }
         const currentWave = isHard ? WAVES[1] : WAVES[0];
-
-        // Velocidade base idêntica para todos os corredores + Dash (420ms, recarga 4s) + Nitro
         const baseWaveSpeed = currentWave.speed;
-        let activeSpeed = baseWaveSpeed;
-        if (s.player.nitroTimer > 0) {
-          s.player.nitroTimer = Math.max(0, s.player.nitroTimer - dt);
-          activeSpeed *= 1.35;
-        }
-        if (s.player.dashTimer > 0) {
-          s.player.dashTimer = Math.max(0, s.player.dashTimer - dt);
-          activeSpeed *= 1.55;
-          if (s.player.dashTimer === 0 && s.player.action === 'dashing') {
-            s.player.action =
-              s.player.jumpY > 0
-                ? 'jumping'
-                : s.player.slideProgress > 0.05
-                ? 'sliding'
-                : 'running';
+
+        if (!spectatingNow) {
+          // Velocidade base idêntica para todos os corredores + Dash (420ms, recarga 4s) + Nitro
+          let activeSpeed = baseWaveSpeed;
+          if (s.player.nitroTimer > 0) {
+            s.player.nitroTimer = Math.max(0, s.player.nitroTimer - dt);
+            activeSpeed *= 1.35;
+          }
+          if (s.player.dashTimer > 0) {
+            s.player.dashTimer = Math.max(0, s.player.dashTimer - dt);
+            activeSpeed *= 1.55;
+            if (s.player.dashTimer === 0 && s.player.action === 'dashing') {
+              s.player.action =
+                s.player.jumpY > 0
+                  ? 'jumping'
+                  : s.player.slideProgress > 0.05
+                  ? 'sliding'
+                  : 'running';
+            }
+          }
+
+          // Sincronia direta via ref DOM da recarga do Dash (zero re-renders React a 60 FPS)
+          const remainingDashCd = Math.max(0, s.dashCooldownEnd - nowPerf);
+          if (
+            (remainingDashCd > 0 && nowPerf - lastDashUiEmitRef.current >= 200) ||
+            (remainingDashCd === 0 && lastDashUiEmitRef.current !== -1)
+          ) {
+            lastDashUiEmitRef.current = remainingDashCd > 0 ? nowPerf : -1;
+            syncDashUi(remainingDashCd);
+          }
+
+          // Abrandamento suave ao tocar em obstáculo (~1.1s sem teleporte brusco)
+          if (s.player.stumbleTimer > 0) {
+            s.player.stumbleTimer = Math.max(0, s.player.stumbleTimer - dt);
+            const recoveryProgress = 1 - Math.min(1, s.player.stumbleTimer / 1.1);
+            const slowdownMultiplier = 0.45 + 0.42 * recoveryProgress;
+            activeSpeed *= slowdownMultiplier;
+            if (s.player.stumbleTimer === 0 && s.player.action === 'stumbling') {
+              s.player.action =
+                s.player.jumpY > 0
+                  ? 'jumping'
+                  : s.player.slideProgress > 0.05
+                  ? 'sliding'
+                  : 'running';
+            }
+          }
+
+          if (s.player.hatImmunityTimer > 0) {
+            s.player.hatImmunityTimer = Math.max(0, s.player.hatImmunityTimer - dt);
+          }
+
+          s.speed = Math.max(2.6, activeSpeed);
+          s.playerDistance = Math.max(0, s.playerDistance + dt * (s.speed * 1.5));
+
+          // Interpolação fluida de troca de faixa + boundary check estrito
+          const clampedTargetLane = clampLaneIndex(s.player.targetLane);
+          s.player.targetLane = clampedTargetLane;
+          const targetPlayerX = LANE_CENTERS[clampedTargetLane];
+          const prevPlayerLaneX = Number.isFinite(s.player.laneX) ? s.player.laneX : targetPlayerX;
+          const playerLaneLerp = 1 - Math.exp(-34 * dt);
+          if (s.player.lane === clampedTargetLane) {
+            s.player.laneX = targetPlayerX;
+          } else {
+            s.player.laneX = prevPlayerLaneX + (targetPlayerX - prevPlayerLaneX) * playerLaneLerp;
+            if (Math.abs(targetPlayerX - s.player.laneX) < 0.85) {
+              s.player.laneX = targetPlayerX;
+              s.player.lane = clampedTargetLane;
+            }
+          }
+          enforcePlayerLaneBoundary(s.player);
+
+          // Inclinação lateral dinâmica (apenas durante troca real de faixa)
+          const targetTilt =
+            s.player.lane === clampedTargetLane
+              ? 0
+              : ((targetPlayerX - s.player.laneX) / LANE_WIDTH) * 0.32;
+          const leanLerp = 1 - Math.exp(-20 * dt);
+          s.playerLeanAngle += (targetTilt - s.playerLeanAngle) * leanLerp;
+          if (Math.abs(s.playerLeanAngle) < 0.004 && targetTilt === 0) {
+            s.playerLeanAngle = 0;
+          }
+
+          // Partículas leves de asfalto / derrapagem quando mudando de faixa
+          if (Math.abs(s.player.laneX - prevPlayerLaneX) > 1.8 * dtScale && Math.random() < 0.4) {
+            pushParticle(s.particles, {
+              x: s.player.laneX + (Math.random() - 0.5) * 10,
+              y: PLAYER_BASE_Y + PLAYER_HEIGHT * 0.4,
+              vx: (prevPlayerLaneX - s.player.laneX) * 0.14,
+              vy: -Math.random() * 1.2 - 0.3,
+              radius: Math.random() * 2 + 1.2,
+              color: '#d97706',
+              alpha: 0.55,
+              maxAlpha: 0.55,
+              life: 0,
+              maxLife: 12,
+              kind: 'dust',
+            });
+          }
+
+          // Efeito de rastro sutil apenas na base dos pés (leve para 60 FPS no telemóvel)
+          const speedNormLocal = Math.max(0.6, Math.min(1.65, s.speed / 9.0));
+          if (s.player.jumpY < 8 && s.player.stumbleTimer <= 0) {
+            const emitRate = (s.player.dashTimer > 0 ? 20 : 12) * speedNormLocal;
+            s.playerTrailAcc += dt * emitRate;
+            while (s.playerTrailAcc >= 1) {
+              s.playerTrailAcc -= 1;
+              s.playerTrailStep = (s.playerTrailStep + 1) % 2;
+              const footSide = s.playerTrailStep === 0 ? -5.5 : 5.5;
+              const trailColor =
+                s.player.dashTimer > 0 ? '#fde047' : isHard ? '#fb923c' : '#f59e0b';
+              const maxAlpha = s.player.dashTimer > 0 ? 0.42 : 0.25;
+              const spawnX = Math.max(
+                TRACK_MIN_CENTER_X - 8,
+                Math.min(TRACK_MAX_CENTER_X + 8, s.player.laneX + footSide + (Math.random() - 0.5) * 2.5)
+              );
+              pushParticle(s.particles, {
+                x: spawnX,
+                y: PLAYER_BASE_Y + PLAYER_HEIGHT * 0.44,
+                vx: (Math.random() - 0.5) * 0.16,
+                vy: Math.max(2.6, s.speed * 0.52),
+                radius: 1.2 + Math.random() * 0.6,
+                color: trailColor,
+                alpha: maxAlpha,
+                maxAlpha,
+                life: 0,
+                maxLife: 8,
+                kind: 'trail',
+              });
+            }
+          } else {
+            s.playerTrailAcc = 0;
+          }
+
+          // Áudio rítmico de sprint sincronizado às passadas do corredor no asfalto
+          if (s.player.jumpY <= 4 && s.player.slideProgress < 0.25 && s.player.stumbleTimer <= 0) {
+            const isSprintingFast = s.player.dashTimer > 0 || s.player.nitroTimer > 0;
+            const strideHz = (isSprintingFast ? 6.2 : isHard ? 4.4 : 3.5) * Math.min(1.35, speedNormLocal);
+            const sprintIntensity = isSprintingFast ? 1.45 : isHard ? 1.18 : 0.95;
+            s.sprintAudioAcc += dt * strideHz;
+            if (s.sprintAudioAcc >= 1) {
+              s.sprintAudioAcc = Math.min(0.4, s.sprintAudioAcc - 1);
+              sounds.playSprintStep(sprintIntensity, s.sprintStepIndex);
+              s.sprintStepIndex = (s.sprintStepIndex + 1) % 2;
+            }
+          } else {
+            s.sprintAudioAcc = 0;
           }
         }
 
-        // Sincronia direta via ref DOM da recarga do Dash (zero re-renders React a 60 FPS)
-        const remainingDashCd = Math.max(0, s.dashCooldownEnd - nowPerf);
-        if (
-          (remainingDashCd > 0 && nowPerf - lastDashUiEmitRef.current >= 200) ||
-          (remainingDashCd === 0 && lastDashUiEmitRef.current !== -1)
-        ) {
-          lastDashUiEmitRef.current = remainingDashCd > 0 ? nowPerf : -1;
-          syncDashUi(remainingDashCd);
-        }
-
-        // Abrandamento suave ao tocar em obstáculo (~1.1s sem teleporte brusco)
-        if (s.player.stumbleTimer > 0) {
-          s.player.stumbleTimer = Math.max(0, s.player.stumbleTimer - dt);
-          const recoveryProgress = 1 - Math.min(1, s.player.stumbleTimer / 1.1);
-          const slowdownMultiplier = 0.45 + 0.42 * recoveryProgress;
-          activeSpeed *= slowdownMultiplier;
-          if (s.player.stumbleTimer === 0 && s.player.action === 'stumbling') {
-            s.player.action =
-              s.player.jumpY > 0
-                ? 'jumping'
-                : s.player.slideProgress > 0.05
-                ? 'sliding'
-                : 'running';
-          }
-        }
-
-        if (s.player.hatImmunityTimer > 0) {
-          s.player.hatImmunityTimer = Math.max(0, s.player.hatImmunityTimer - dt);
-        }
-
-        s.speed = Math.max(2.6, activeSpeed);
+        const speedNorm = Math.max(0.6, Math.min(1.65, s.speed / 9.0));
         const frameSpeed = s.speed * dtScale;
         s.trackOffset = (s.trackOffset + frameSpeed) % 48; // Período exato [26, 22] das faixas tracejadas
         s.curbOffset = (s.curbOffset + frameSpeed) % 56; // Calçadão rolante sincronizado à velocidade real da pista
         s.palmOffset = (s.palmOffset + frameSpeed * 0.85) % 160; // Palmeiras em paralaxe fluida contínua
-        s.playerDistance = Math.max(0, s.playerDistance + dt * (s.speed * 1.5));
 
-        // Interpolação fluida de troca de faixa + boundary check estrito
-        const clampedTargetLane = clampLaneIndex(s.player.targetLane);
-        s.player.targetLane = clampedTargetLane;
-        const targetPlayerX = LANE_CENTERS[clampedTargetLane];
-        const prevPlayerLaneX = Number.isFinite(s.player.laneX) ? s.player.laneX : targetPlayerX;
-        const playerLaneLerp = 1 - Math.exp(-34 * dt);
-        if (s.player.lane === clampedTargetLane) {
-          s.player.laneX = targetPlayerX;
-        } else {
-          s.player.laneX = prevPlayerLaneX + (targetPlayerX - prevPlayerLaneX) * playerLaneLerp;
-          if (Math.abs(targetPlayerX - s.player.laneX) < 0.85) {
-            s.player.laneX = targetPlayerX;
-            s.player.lane = clampedTargetLane;
-          }
-        }
-        enforcePlayerLaneBoundary(s.player);
-
-        // Inclinação lateral dinâmica (apenas durante troca real de faixa)
-        const targetTilt =
-          s.player.lane === clampedTargetLane
-            ? 0
-            : ((targetPlayerX - s.player.laneX) / LANE_WIDTH) * 0.32;
-        const leanLerp = 1 - Math.exp(-20 * dt);
-        s.playerLeanAngle += (targetTilt - s.playerLeanAngle) * leanLerp;
-        if (Math.abs(s.playerLeanAngle) < 0.004 && targetTilt === 0) {
-          s.playerLeanAngle = 0;
-        }
-
-        // Partículas leves de asfalto / derrapagem quando mudando de faixa
-        if (Math.abs(s.player.laneX - prevPlayerLaneX) > 1.8 * dtScale && Math.random() < 0.4) {
-          pushParticle(s.particles, {
-            x: s.player.laneX + (Math.random() - 0.5) * 10,
-            y: PLAYER_BASE_Y + PLAYER_HEIGHT * 0.4,
-            vx: (prevPlayerLaneX - s.player.laneX) * 0.14,
-            vy: -Math.random() * 1.2 - 0.3,
-            radius: Math.random() * 2 + 1.2,
-            color: '#d97706',
-            alpha: 0.55,
-            maxAlpha: 0.55,
-            life: 0,
-            maxLife: 12,
-            kind: 'dust',
-          });
-        }
-
-        // Efeito de rastro sutil apenas na base dos pés (leve para 60 FPS no telemóvel)
-        const speedNorm = Math.max(0.6, Math.min(1.65, s.speed / 9.0));
-        if (s.player.jumpY < 8 && s.player.stumbleTimer <= 0) {
-          const emitRate = (s.player.dashTimer > 0 ? 20 : 12) * speedNorm;
-          s.playerTrailAcc += dt * emitRate;
-          while (s.playerTrailAcc >= 1) {
-            s.playerTrailAcc -= 1;
-            s.playerTrailStep = (s.playerTrailStep + 1) % 2;
-            const footSide = s.playerTrailStep === 0 ? -5.5 : 5.5;
-            const trailColor =
-              s.player.dashTimer > 0 ? '#fde047' : isHard ? '#fb923c' : '#f59e0b';
-            const maxAlpha = s.player.dashTimer > 0 ? 0.42 : 0.25;
-            const spawnX = Math.max(
-              TRACK_MIN_CENTER_X - 8,
-              Math.min(TRACK_MAX_CENTER_X + 8, s.player.laneX + footSide + (Math.random() - 0.5) * 2.5)
-            );
-            pushParticle(s.particles, {
-              x: spawnX,
-              y: PLAYER_BASE_Y + PLAYER_HEIGHT * 0.44,
-              vx: (Math.random() - 0.5) * 0.16,
-              vy: Math.max(2.6, s.speed * 0.52),
-              radius: 1.2 + Math.random() * 0.6,
-              color: trailColor,
-              alpha: maxAlpha,
-              maxAlpha,
-              life: 0,
-              maxLife: 8,
-              kind: 'trail',
-            });
-          }
-        } else {
-          s.playerTrailAcc = 0;
-        }
-
-        // Áudio rítmico de sprint sincronizado às passadas do corredor no asfalto
-        if (s.player.jumpY <= 4 && s.player.slideProgress < 0.25 && s.player.stumbleTimer <= 0) {
-          const isSprintingFast = s.player.dashTimer > 0 || s.player.nitroTimer > 0;
-          const strideHz = (isSprintingFast ? 6.2 : isHard ? 4.4 : 3.5) * Math.min(1.35, speedNorm);
-          const sprintIntensity = isSprintingFast ? 1.45 : isHard ? 1.18 : 0.95;
-          s.sprintAudioAcc += dt * strideHz;
-          if (s.sprintAudioAcc >= 1) {
-            s.sprintAudioAcc = Math.min(0.4, s.sprintAudioAcc - 1);
-            sounds.playSprintStep(sprintIntensity, s.sprintStepIndex);
-            s.sprintStepIndex = (s.sprintStepIndex + 1) % 2;
-          }
-        } else {
-          s.sprintAudioAcc = 0;
-        }
-
-        // Atualiza os 5 corredores nas 5 faixas (jogadores humanos reais via WebSocket + bots locais)
+        // Atualiza os corredores nas 5 faixas (jogadores humanos reais via WebSocket + bots locais)
         const remoteMap = remotePlayersRefStable.current?.current;
         for (const comp of s.competitorsList) {
-          if (comp.isPlayer) {
+          if (!spectatingNow && comp.isPlayer) {
             comp.progressDistance = s.playerDistance;
             comp.lane = s.player.lane;
             comp.targetLane = s.player.targetLane;
@@ -1344,6 +1372,54 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           }
         }
 
+        // Câmara Fantasma (Ghost Observer) segue suavemente o corredor alvo ou o líder
+        if (spectatingNow && s.competitorsList.length > 0) {
+          const requestedId = spectatedRunnerIdRef.current;
+          let followedComp = requestedId
+            ? s.competitorsList.find((c) => c.id === requestedId)
+            : undefined;
+          if (!followedComp) {
+            followedComp = [...s.competitorsList].sort(
+              (a, b) => b.progressDistance - a.progressDistance
+            )[0];
+          }
+          s.followedRunnerId = followedComp?.id ?? null;
+          if (followedComp) {
+            const distDiff = followedComp.progressDistance - s.playerDistance;
+            if (Math.abs(distDiff) > 120 || s.playerDistance === 0) {
+              s.playerDistance = Math.max(0, followedComp.progressDistance);
+            } else {
+              const distLerp = 1 - Math.exp(-10 * dt);
+              s.playerDistance = Math.max(0, s.playerDistance + distDiff * distLerp);
+            }
+            const followLane = clampLaneIndex(followedComp.targetLane ?? followedComp.lane);
+            const followX =
+              typeof followedComp.laneX === 'number' && Number.isFinite(followedComp.laneX)
+                ? followedComp.laneX
+                : LANE_CENTERS[followLane];
+            const xLerp = 1 - Math.exp(-12 * dt);
+            s.player.laneX = Number.isFinite(s.player.laneX)
+              ? s.player.laneX + (followX - s.player.laneX) * xLerp
+              : followX;
+            s.player.lane = clampLaneIndex(followedComp.lane);
+            s.player.targetLane = followLane;
+            s.playerLeanAngle = 0;
+            s.player.jumpY = 0;
+            s.player.slideProgress = 0;
+            s.player.dashTimer = 0;
+            s.player.nitroTimer = 0;
+            s.player.hatImmunityTimer = 0;
+            s.player.stumbleTimer = 0;
+            s.speed = Math.max(
+              2.6,
+              baseWaveSpeed *
+                (followedComp.stumbling ? 0.65 : followedComp.action === 'dashing' ? 1.45 : 1.0)
+            );
+          }
+        } else {
+          s.followedRunnerId = null;
+        }
+
         // Determina a posição instantânea em tempo real do jogador (1º ao 5º lugar) e quantos está à frente
         const sortedRanks = [...s.competitorsList].sort((a, b) => {
           const diff = b.progressDistance - a.progressDistance;
@@ -1352,12 +1428,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           if (!a.isPlayer && b.isPlayer) return 1;
           return a.lane - b.lane;
         });
+        const trackedRankIdx = spectatingNow
+          ? sortedRanks.findIndex((c) => c.id === s.followedRunnerId)
+          : sortedRanks.findIndex((c) => c.isPlayer);
         const currentRank = Math.max(
           1,
-          Math.min(s.competitorsList.length, sortedRanks.findIndex((c) => c.isPlayer) + 1)
+          Math.min(Math.max(1, s.competitorsList.length), trackedRankIdx >= 0 ? trackedRankIdx + 1 : 1)
         );
+        const refDistance = spectatingNow
+          ? s.competitorsList.find((c) => c.id === s.followedRunnerId)?.progressDistance ?? s.playerDistance
+          : s.playerDistance;
         const behindCount = s.competitorsList.filter(
-          (c) => !c.isPlayer && s.playerDistance > c.progressDistance + 0.0001
+          (c) => (spectatingNow ? c.id !== s.followedRunnerId : !c.isPlayer) && refDistance > c.progressDistance + 0.0001
         ).length;
 
         s.playerLiveRank = currentRank;
@@ -1368,7 +1450,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           lastBehindRef.current = behindCount;
           setLiveRank(currentRank);
           setAheadOfCount(behindCount);
-          if (onRankUpdateRef.current) onRankUpdateRef.current(currentRank);
+          if (!spectatingNow && onRankUpdateRef.current) onRankUpdateRef.current(currentRank);
         }
 
         // Fim dos 40 segundos exatos: Coroação no Trono Real!
@@ -1379,25 +1461,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           enforcePlayerLaneBoundary(s.player);
           if (!raceFinishedRef.current) {
             raceFinishedRef.current = true;
-            for (const comp of s.competitorsList) {
-              if (comp.isPlayer) {
-                comp.finished = true;
-                if (onLocalRaceTelemetryRef.current) {
-                  onLocalRaceTelemetryRef.current({
-                    progressDistance: comp.progressDistance,
-                    lane: comp.lane,
-                    targetLane: comp.targetLane,
-                    laneX: comp.laneX,
-                    action: comp.action,
-                    jumpY: comp.jumpY,
-                    stumbling: Boolean(comp.stumbling),
-                    finished: true,
-                  });
+            if (!spectatingNow) {
+              for (const comp of s.competitorsList) {
+                if (comp.isPlayer) {
+                  comp.finished = true;
+                  if (onLocalRaceTelemetryRef.current) {
+                    onLocalRaceTelemetryRef.current({
+                      progressDistance: comp.progressDistance,
+                      lane: comp.lane,
+                      targetLane: comp.targetLane,
+                      laneX: comp.laneX,
+                      action: comp.action,
+                      jumpY: comp.jumpY,
+                      stumbling: Boolean(comp.stumbling),
+                      finished: true,
+                    });
+                  }
                 }
               }
+              sounds.playCoronationFanfare();
+              onFinishRef.current(s.competitorsList, buildPerformanceSnapshot());
+            } else {
+              onFinishRef.current(s.competitorsList);
             }
-            sounds.playCoronationFanfare();
-            onFinishRef.current(s.competitorsList, buildPerformanceSnapshot());
           }
         } else {
 
@@ -1494,7 +1580,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             perf.threatStartMap.set(obs.id, nowPerf);
           }
 
-          const res = checkObstacleCollision(s.player, obs, s.speed);
+          const res = spectatingNow
+            ? { hit: false, evaded: false }
+            : checkObstacleCollision(s.player, obs, s.speed);
           if (res.hit && !obs.passed) {
             obs.passed = true;
             if (!perf.countedObsIds.has(obs.id)) {
@@ -1551,7 +1639,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             }
           } else if (!obs.passed && obs.y > PLAYER_BASE_Y + PLAYER_HEIGHT * 0.85) {
             obs.passed = true;
-            if (perf.threatStartMap.has(obs.id) && !perf.countedObsIds.has(obs.id)) {
+            if (!spectatingNow && perf.threatStartMap.has(obs.id) && !perf.countedObsIds.has(obs.id)) {
               perf.countedObsIds.add(obs.id);
               perf.evadedCount += 1;
               if (isJumpableObs) {
@@ -1571,7 +1659,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           const coin = s.coins[cIdx];
           coin.y += frameSpeed;
 
-          if (checkCoinPickup(s.player, coin)) {
+          if (!spectatingNow && checkCoinPickup(s.player, coin)) {
             coin.collected = true;
             onCoinCollectedRef.current(coin.value);
             sounds.playCoin();
@@ -1603,7 +1691,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           const pUp = s.powerUps[pIdx];
           pUp.y += frameSpeed;
 
-          if (checkPowerUpPickup(s.player, pUp)) {
+          if (!spectatingNow && checkPowerUpPickup(s.player, pUp)) {
             pUp.collected = true;
 
             if (pUp.type === 'kikuuba-nitro') {
@@ -2115,9 +2203,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ctx.restore();
           }
 
-          // 4. Renderiza os 4 Competidores Rivais
+          // 4. Renderiza os Competidores (todos visíveis em modo espectador)
           for (const comp of s.competitorsList) {
-            if (comp.isPlayer) continue;
+            if (!spectatingNow && comp.isPlayer) continue;
 
             const cx = Math.max(
               LANE_CENTERS[0],
@@ -2130,6 +2218,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             const drawY = cy - compJump + (isCompSliding ? 10 : 0);
             const compAirScale = 1 + Math.min(0.26, compJump / 340);
             const compShadowScale = Math.max(0.45, 1 - compJump / 220);
+            const isFollowedTarget = spectatingNow && s.followedRunnerId === comp.id;
 
             ctx.save();
             ctx.fillStyle = `rgba(0,0,0,${(0.42 * compShadowScale).toFixed(2)})`;
@@ -2144,6 +2233,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               Math.PI * 2
             );
             ctx.fill();
+
+            if (isFollowedTarget) {
+              ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
+              ctx.lineWidth = 2.5;
+              ctx.beginPath();
+              ctx.ellipse(cx, cy + PLAYER_HEIGHT * 0.4, 24, 9, 0, 0, Math.PI * 2);
+              ctx.stroke();
+            }
             ctx.restore();
 
             ctx.save();
@@ -2180,7 +2277,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
             const baseCompLabel = comp.stumbling
               ? tRef.current.canvas.botSlowLabel
-              : `${!comp.isBot ? '🟢 ' : ''}${comp.name.slice(0, 11)}${
+              : `${isFollowedTarget ? '👻 ' : !comp.isBot ? '🟢 ' : ''}${comp.name.slice(0, 11)}${
                   actionGlyph ? ` ${actionGlyph}` : ''
                 }`;
 
@@ -2196,7 +2293,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               strideCycle: comp.progressDistance * 0.45,
               stumbling: Boolean(comp.stumbling),
               labelText: baseCompLabel,
-              scale: 0.9,
+              scale: isFollowedTarget ? 1.0 : 0.9,
             });
 
             ctx.restore();
@@ -2208,62 +2305,79 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             setLiveHudRunners(s.competitorsList.map((c) => ({ ...c })));
           }
 
-          // 5. Renderiza o Jogador com o Avatar/Roupa selecionada
-          const p = s.player;
-          const playerComp = s.competitorsList.find((c) => c.isPlayer);
-          const px = p.laneX;
-          const jumpHeight = p.jumpY || 0;
-          const py = PLAYER_BASE_Y - jumpHeight;
-          const isSliding = p.slideProgress > 0.05;
-          const strideCycle = s.playerDistance * 0.45;
-          const airScale = 1 + Math.min(0.28, jumpHeight / 340);
-          const shadowScale = Math.max(0.45, 1 - jumpHeight / 220);
+          // 5. Renderiza o Jogador com o Avatar/Roupa selecionada (ou emblema Fantasma em modo espectador)
+          if (spectatingNow) {
+            ctx.save();
+            ctx.fillStyle = 'rgba(8, 47, 73, 0.85)';
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.roundRect(CANV_WIDTH / 2 - 58, PLAYER_BASE_Y + 40, 116, 24, 12);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = '#bae6fd';
+            ctx.font = 'bold 10px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('👻 GHOST', CANV_WIDTH / 2, PLAYER_BASE_Y + 52);
+            ctx.restore();
+          } else {
+            const p = s.player;
+            const playerComp = s.competitorsList.find((c) => c.isPlayer);
+            const px = p.laneX;
+            const jumpHeight = p.jumpY || 0;
+            const py = PLAYER_BASE_Y - jumpHeight;
+            const isSliding = p.slideProgress > 0.05;
+            const strideCycle = s.playerDistance * 0.45;
+            const airScale = 1 + Math.min(0.28, jumpHeight / 340);
+            const shadowScale = Math.max(0.45, 1 - jumpHeight / 220);
 
-          ctx.save();
-          ctx.fillStyle = `rgba(0,0,0,${(0.52 * shadowScale).toFixed(2)})`;
-          ctx.beginPath();
-          ctx.ellipse(
-            px,
-            PLAYER_BASE_Y + PLAYER_HEIGHT * 0.42,
-            (isSliding ? 24 : 18) * shadowScale,
-            7 * shadowScale,
-            0,
-            0,
-            Math.PI * 2
-          );
-          ctx.fill();
-          ctx.restore();
+            ctx.save();
+            ctx.fillStyle = `rgba(0,0,0,${(0.52 * shadowScale).toFixed(2)})`;
+            ctx.beginPath();
+            ctx.ellipse(
+              px,
+              PLAYER_BASE_Y + PLAYER_HEIGHT * 0.42,
+              (isSliding ? 24 : 18) * shadowScale,
+              7 * shadowScale,
+              0,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+            ctx.restore();
 
-          ctx.save();
-          ctx.translate(px, py);
-          ctx.scale(airScale, airScale);
+            ctx.save();
+            ctx.translate(px, py);
+            ctx.scale(airScale, airScale);
 
-          const stumbleTilt = p.stumbleTimer > 0 ? Math.sin(p.stumbleTimer * 40) * 0.15 : 0;
-          ctx.rotate((s.playerLeanAngle || 0) + stumbleTilt);
+            const stumbleTilt = p.stumbleTimer > 0 ? Math.sin(p.stumbleTimer * 40) * 0.15 : 0;
+            ctx.rotate((s.playerLeanAngle || 0) + stumbleTilt);
 
-          const rawPlayerName = playerComp?.name || `REI ZERO ${tRef.current.youTag}`;
-          const playerLabel =
-            p.stumbleTimer > 0
-              ? tRef.current.canvas.playerHitLabel
-              : rawPlayerName.slice(0, 16);
+            const rawPlayerName = playerComp?.name || `REI ZERO ${tRef.current.youTag}`;
+            const playerLabel =
+              p.stumbleTimer > 0
+                ? tRef.current.canvas.playerHitLabel
+                : rawPlayerName.slice(0, 16);
 
-          drawCanvasRunnerAvatar({
-            ctx,
-            avatarId: playerComp?.avatarId || 'rei-zero',
-            name: playerComp?.name || 'REI ZERO',
-            color: playerComp?.color || '#f59e0b',
-            isPlayer: true,
-            isBot: false,
-            isSliding,
-            isAirborne: jumpHeight > 8,
-            strideCycle,
-            stumbling: p.stumbleTimer > 0,
-            hatImmunity: p.hatImmunityTimer > 0,
-            labelText: playerLabel,
-            scale: 1,
-          });
+            drawCanvasRunnerAvatar({
+              ctx,
+              avatarId: playerComp?.avatarId || 'rei-zero',
+              name: playerComp?.name || 'REI ZERO',
+              color: playerComp?.color || '#f59e0b',
+              isPlayer: true,
+              isBot: false,
+              isSliding,
+              isAirborne: jumpHeight > 8,
+              strideCycle,
+              stumbling: p.stumbleTimer > 0,
+              hatImmunity: p.hatImmunityTimer > 0,
+              labelText: playerLabel,
+              scale: 1,
+            });
 
-          ctx.restore();
+            ctx.restore();
+          }
 
           // 6. Partículas de Rastro na Base & Poeira
           if (s.particles.length > 0) {
@@ -2349,15 +2463,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           const pRank = s.playerLiveRank || 1;
           const totalRivalsCount = Math.max(1, s.competitorsList.length - 1);
           const behindTxt = `${cTrans.aheadOfPrefix} ${s.playerBehindCount || 0}/${totalRivalsCount}`;
-          const rankColors = {
-            1: { bg: 'rgba(245, 158, 11, 0.96)', border: '#fef08a', text: '#090a10', sub: '#451a03', title: `👑 1 ${cTrans.placeLabel}`, tag: behindTxt },
-            2: { bg: 'rgba(14, 165, 233, 0.94)', border: '#7dd3fc', text: '#082f49', sub: '#0369a1', title: `🥈 2 ${cTrans.placeLabel}`, tag: behindTxt },
-            3: { bg: 'rgba(249, 115, 22, 0.94)', border: '#fed7aa', text: '#431407', sub: '#9a3412', title: `🥉 3 ${cTrans.placeLabel}`, tag: behindTxt },
-            4: { bg: 'rgba(24, 24, 27, 0.94)', border: '#71717a', text: '#f4f4f5', sub: '#a1a1aa', title: `⚡ 4 ${cTrans.placeLabel}`, tag: behindTxt },
-            5: { bg: 'rgba(225, 29, 72, 0.94)', border: '#fda4af', text: '#ffffff', sub: '#ffe4e6', title: `⚠️ 5 ${cTrans.placeLabel}`, tag: behindTxt },
-          }[pRank as 1 | 2 | 3 | 4 | 5] || {
-            bg: 'rgba(24, 24, 27, 0.94)', border: '#71717a', text: '#f4f4f5', sub: '#a1a1aa', title: `${pRank} ${cTrans.placeLabel}`, tag: behindTxt
-          };
+          const followedSpectatorTarget = s.isSpectating
+            ? s.competitorsList.find((c) => c.id === s.followedRunnerId) || s.competitorsList[0]
+            : null;
+          const rankColors = s.isSpectating
+            ? {
+                bg: 'rgba(8, 51, 68, 0.94)',
+                border: '#22d3ee',
+                text: '#cffafe',
+                sub: '#67e8f9',
+                title: '👻 GHOST',
+                tag: followedSpectatorTarget
+                  ? followedSpectatorTarget.name.replace(/\s*\(.*?\)\s*$/, '').slice(0, 18)
+                  : 'LIVE',
+              }
+            : {
+                1: { bg: 'rgba(245, 158, 11, 0.96)', border: '#fef08a', text: '#090a10', sub: '#451a03', title: `👑 1 ${cTrans.placeLabel}`, tag: behindTxt },
+                2: { bg: 'rgba(14, 165, 233, 0.94)', border: '#7dd3fc', text: '#082f49', sub: '#0369a1', title: `🥈 2 ${cTrans.placeLabel}`, tag: behindTxt },
+                3: { bg: 'rgba(249, 115, 22, 0.94)', border: '#fed7aa', text: '#431407', sub: '#9a3412', title: `🥉 3 ${cTrans.placeLabel}`, tag: behindTxt },
+                4: { bg: 'rgba(24, 24, 27, 0.94)', border: '#71717a', text: '#f4f4f5', sub: '#a1a1aa', title: `⚡ 4 ${cTrans.placeLabel}`, tag: behindTxt },
+                5: { bg: 'rgba(225, 29, 72, 0.94)', border: '#fda4af', text: '#ffffff', sub: '#ffe4e6', title: `⚠️ 5 ${cTrans.placeLabel}`, tag: behindTxt },
+              }[pRank as 1 | 2 | 3 | 4 | 5] || {
+                bg: 'rgba(24, 24, 27, 0.94)', border: '#71717a', text: '#f4f4f5', sub: '#a1a1aa', title: `${pRank} ${cTrans.placeLabel}`, tag: behindTxt
+              };
 
           ctx.fillStyle = rankColors.bg;
           ctx.beginPath();
@@ -2422,40 +2550,49 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           </span>
         </div>
 
-        {/* Posição em Tempo Real (1º ao 5º Lugar) */}
-        <div
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border shadow-md font-mono font-black text-xs transition-all ${
-            liveRank === 1
-              ? 'bg-gradient-to-r from-amber-500/25 via-yellow-500/20 to-amber-500/25 border-amber-400 text-amber-200 shadow-amber-500/25'
-              : liveRank === 2
-              ? 'bg-sky-500/20 border-sky-400 text-sky-200'
-              : liveRank === 3
-              ? 'bg-orange-500/20 border-orange-400 text-orange-200'
-              : liveRank === 4
-              ? 'bg-zinc-800/90 border-zinc-600 text-zinc-200'
-              : 'bg-rose-950/90 border-rose-500 text-rose-200'
-          }`}
-        >
-          <span>{liveRank === 1 ? '👑' : liveRank === 2 ? '🥈' : liveRank === 3 ? '🥉' : '🏃'}</span>
-          <span>
-            {liveRank} {t.canvas.placeLabel}
-          </span>
-          <span className="text-[10px] font-bold opacity-85 uppercase hidden xs:inline">
-            · {t.canvas.aheadOfPrefix} {aheadOfCount}/{Math.max(1, competitors.length - 1)}
-          </span>
-        </div>
+        {/* Posição em Tempo Real (1º ao 5º Lugar) ou Modo Espectador Fantasma */}
+        {isSpectating ? (
+          <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg border shadow-md font-mono font-black text-xs bg-cyan-950/90 border-cyan-400/70 text-cyan-200">
+            <span>👻</span>
+            <span>{mpStrings.ghostObserverBadge}</span>
+          </div>
+        ) : (
+          <div
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border shadow-md font-mono font-black text-xs transition-all ${
+              liveRank === 1
+                ? 'bg-gradient-to-r from-amber-500/25 via-yellow-500/20 to-amber-500/25 border-amber-400 text-amber-200 shadow-amber-500/25'
+                : liveRank === 2
+                ? 'bg-sky-500/20 border-sky-400 text-sky-200'
+                : liveRank === 3
+                ? 'bg-orange-500/20 border-orange-400 text-orange-200'
+                : liveRank === 4
+                ? 'bg-zinc-800/90 border-zinc-600 text-zinc-200'
+                : 'bg-rose-950/90 border-rose-500 text-rose-200'
+            }`}
+          >
+            <span>{liveRank === 1 ? '👑' : liveRank === 2 ? '🥈' : liveRank === 3 ? '🥉' : '🏃'}</span>
+            <span>
+              {liveRank} {t.canvas.placeLabel}
+            </span>
+            <span className="text-[10px] font-bold opacity-85 uppercase hidden xs:inline">
+              · {t.canvas.aheadOfPrefix} {aheadOfCount}/{Math.max(1, competitors.length - 1)}
+            </span>
+          </div>
+        )}
 
         {/* Indicador de Dash (4s cooldown) e 5 Faixas */}
         <div className="flex items-center gap-1.5 shrink-0">
-          <div
-            ref={dashPillRef}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[10px] font-black bg-amber-500/20 border-amber-400/70 text-amber-300 shadow-sm"
-          >
-            <span>⚡</span>
-            <span ref={dashPillTextRef} className="tabular-nums">
-              {t.canvas.dashReady}
-            </span>
-          </div>
+          {!isSpectating && (
+            <div
+              ref={dashPillRef}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[10px] font-black bg-amber-500/20 border-amber-400/70 text-amber-300 shadow-sm"
+            >
+              <span>⚡</span>
+              <span ref={dashPillTextRef} className="tabular-nums">
+                {t.canvas.dashReady}
+              </span>
+            </div>
+          )}
           <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg game-subplate">
             <span className="text-xs">🏁</span>
             <span className="text-[11px] font-black text-sky-300 tabular-nums">
@@ -2605,6 +2742,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             liveStateRef={stateRef}
             timeMode={timeMode}
             paused={pause3d}
+            isSpectating={Boolean(isSpectating)}
+            spectatedRunnerId={spectatedRunnerId ?? null}
             onMoveLane={moveLane}
             onJump={triggerJump}
             onSlide={triggerSlide}
@@ -2660,32 +2799,46 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               </span>
             </div>
 
-            {/* Posição Instantânea em Tempo Real */}
-            <div
-              className={`px-3.5 py-1.5 rounded-xl flex flex-col items-center border-2 shadow-2xl font-black ${
-                liveRank === 1
-                  ? 'bg-amber-500/95 border-amber-200 text-zinc-950 shadow-[0_0_20px_rgba(245,158,11,0.5)]'
-                  : liveRank === 2
-                  ? 'bg-sky-500/95 border-sky-200 text-sky-950'
-                  : liveRank === 3
-                  ? 'bg-orange-500/95 border-orange-200 text-orange-950'
-                  : liveRank === 4
-                  ? 'bg-zinc-900/95 border-zinc-600 text-zinc-100'
-                  : 'bg-rose-600/95 border-rose-300 text-white'
-              }`}
-            >
-              <span className="text-xs leading-tight flex items-center gap-1">
-                <span>
-                  {liveRank === 1 ? '👑' : liveRank === 2 ? '🥈' : liveRank === 3 ? '🥉' : liveRank === 4 ? '4️⃣' : '5️⃣'}
+            {/* Posição Instantânea em Tempo Real ou Badge Ghost */}
+            {isSpectating ? (
+              <div className="px-3.5 py-1.5 rounded-xl flex flex-col items-center border-2 shadow-2xl font-black bg-cyan-950/95 border-cyan-400 text-cyan-200">
+                <span className="text-xs leading-tight flex items-center gap-1">
+                  <span>👻</span>
+                  <span>{mpStrings.ghostObserverBadge}</span>
                 </span>
-                <span>
-                  {liveRank} {t.canvas.placeLabel}
+                <span className="text-[8px] font-extrabold uppercase opacity-90 truncate max-w-[130px]">
+                  {spectatedRunnerId
+                    ? (competitors.find((c) => c.id === spectatedRunnerId)?.name || mpStrings.autoLeaderLabel)
+                    : mpStrings.autoLeaderLabel}
                 </span>
-              </span>
-              <span className="text-[8px] font-extrabold uppercase opacity-90">
-                {t.canvas.aheadOfPrefix} {aheadOfCount}/{Math.max(1, competitors.length - 1)}
-              </span>
-            </div>
+              </div>
+            ) : (
+              <div
+                className={`px-3.5 py-1.5 rounded-xl flex flex-col items-center border-2 shadow-2xl font-black ${
+                  liveRank === 1
+                    ? 'bg-amber-500/95 border-amber-200 text-zinc-950 shadow-[0_0_20px_rgba(245,158,11,0.5)]'
+                    : liveRank === 2
+                    ? 'bg-sky-500/95 border-sky-200 text-sky-950'
+                    : liveRank === 3
+                    ? 'bg-orange-500/95 border-orange-200 text-orange-950'
+                    : liveRank === 4
+                    ? 'bg-zinc-900/95 border-zinc-600 text-zinc-100'
+                    : 'bg-rose-600/95 border-rose-300 text-white'
+                }`}
+              >
+                <span className="text-xs leading-tight flex items-center gap-1">
+                  <span>
+                    {liveRank === 1 ? '👑' : liveRank === 2 ? '🥈' : liveRank === 3 ? '🥉' : liveRank === 4 ? '4️⃣' : '5️⃣'}
+                  </span>
+                  <span>
+                    {liveRank} {t.canvas.placeLabel}
+                  </span>
+                </span>
+                <span className="text-[8px] font-extrabold uppercase opacity-90">
+                  {t.canvas.aheadOfPrefix} {aheadOfCount}/{Math.max(1, competitors.length - 1)}
+                </span>
+              </div>
+            )}
 
             {/* Faixa & Distância */}
             <div className="px-2.5 py-1.5 rounded-xl bg-zinc-950/95 border border-sky-400/70 shadow-lg flex flex-col items-end">
@@ -2758,66 +2911,142 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </AnimatePresence>
       </motion.div>
 
-      {/* Exemplo de Jogabilidade Oficial (Sem botões virtuais — 100% Controles por Gestos) */}
-      <div className="w-full mt-3 p-3.5 rounded-2xl game-panel-gold flex flex-col gap-2.5">
-        <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2">
-          <div className="flex items-center gap-2">
-            <span className="text-base">👆</span>
-            <span className="text-xs font-black font-display uppercase tracking-wider text-amber-400">
-              {t.canvas.gestureBoxTitle}
-            </span>
-          </div>
-          <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/40">
-            {t.canvas.gestureBoxBadge}
-          </span>
-        </div>
-
-        {/* 4 Movimentos + Dash (Duplo Toque, 4s recarga) */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <div className="p-2.5 rounded-xl game-subplate flex flex-col items-center text-center">
-            <div className="flex items-center gap-1.5 text-amber-400 text-lg mb-1">
-              <span>👈</span>
-              <span>👉</span>
+      {isSpectating ? (
+        <div className="w-full mt-3 p-3 rounded-2xl bg-zinc-950/95 border border-sky-400/55 flex flex-col gap-2.5 shadow-xl">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs font-mono font-black px-2 py-0.5 rounded-md bg-sky-500/20 text-sky-300 border border-sky-400/50 shrink-0">
+                👻 {mpStrings.ghostObserverBadge}
+              </span>
+              <span className="text-[11px] font-mono text-zinc-300 truncate">
+                {mpStrings.followingRunnerPrefix}{' '}
+                <strong className="text-sky-300">
+                  {(() => {
+                    const target = spectatedRunnerId
+                      ? liveHudRunners.find((r) => r.id === spectatedRunnerId)
+                      : [...liveHudRunners].sort(
+                          (a, b) => b.progressDistance - a.progressDistance
+                        )[0];
+                    return target
+                      ? target.name.replace(/\s*\(.*?\)\s*$/, '')
+                      : mpStrings.autoLeaderLabel;
+                  })()}
+                </strong>
+              </span>
             </div>
-            <span className="text-[11px] font-black text-zinc-100">{t.canvas.gestureSidesTitle}</span>
-            <span className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
-              {t.canvas.gestureSidesSub}
-            </span>
+            {onExitSpectator && (
+              <button
+                type="button"
+                onClick={onExitSpectator}
+                className="px-3 py-1.5 rounded-xl bg-rose-950/90 hover:bg-rose-600 border border-rose-500/50 text-rose-200 hover:text-white font-mono font-black text-[11px] uppercase cursor-pointer transition-colors shrink-0"
+              >
+                ✕ {mpStrings.exitSpectatorBtn}
+              </button>
+            )}
           </div>
 
-          <div className="p-2.5 rounded-xl game-subplate border-amber-500/30 flex flex-col items-center text-center">
-            <span className="text-lg text-amber-400 mb-1">👆</span>
-            <span className="text-[11px] font-black text-amber-300">{t.canvas.gestureUpTitle}</span>
-            <span className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
-              {t.canvas.gestureUpSub}
-            </span>
-          </div>
+          {onSelectSpectatedRunner && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onSelectSpectatedRunner(null)}
+                className={`px-2.5 py-1 rounded-lg border text-[10px] font-mono font-bold cursor-pointer transition-colors ${
+                  !spectatedRunnerId
+                    ? 'bg-sky-500 text-zinc-950 border-sky-300 font-black'
+                    : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:border-sky-400/60'
+                }`}
+              >
+                👑 {mpStrings.autoLeaderLabel}
+              </button>
+              {liveHudRunners.map((runner) => {
+                const selected = spectatedRunnerId === runner.id;
+                return (
+                  <button
+                    key={runner.id}
+                    type="button"
+                    onClick={() => onSelectSpectatedRunner(runner.id)}
+                    className={`px-2.5 py-1 rounded-lg border text-[10px] font-mono font-bold cursor-pointer transition-colors flex items-center gap-1 ${
+                      selected
+                        ? 'bg-sky-500 text-zinc-950 border-sky-300 font-black'
+                        : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:border-sky-400/60'
+                    }`}
+                  >
+                    <span>{runner.avatar}</span>
+                    <span className="truncate max-w-[100px]">
+                      {runner.name.replace(/\s*\(.*?\)\s*$/, '')}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-          <div className="p-2.5 rounded-xl game-subplate border-cyan-500/30 flex flex-col items-center text-center">
-            <span className="text-lg text-cyan-400 mb-1">👇</span>
-            <span className="text-[11px] font-black text-cyan-300">{t.canvas.gestureDownTitle}</span>
-            <span className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
-              {t.canvas.gestureDownSub}
-            </span>
-          </div>
-
-          <div
-            ref={dashCardRef}
-            className="p-2.5 rounded-xl border flex flex-col items-center text-center transition-colors bg-amber-950/35 border-amber-400/50"
-          >
-            <span className="text-lg text-yellow-400 mb-1">⚡</span>
-            <span className="text-[11px] font-black text-yellow-300">{t.canvas.gestureDashTitle}</span>
-            <span ref={dashCardTextRef} className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
-              {`${t.canvas.gestureDashReady} · 4s`}
-            </span>
+          <div className="text-[10px] font-mono text-sky-300/80 border-t border-zinc-800/80 pt-1.5">
+            {mpStrings.noBetSpectatorNote}
           </div>
         </div>
+      ) : (
+        /* Exemplo de Jogabilidade Oficial (Sem botões virtuais — 100% Controles por Gestos) */
+        <div className="w-full mt-3 p-3.5 rounded-2xl game-panel-gold flex flex-col gap-2.5">
+          <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2">
+            <div className="flex items-center gap-2">
+              <span className="text-base">👆</span>
+              <span className="text-xs font-black font-display uppercase tracking-wider text-amber-400">
+                {t.canvas.gestureBoxTitle}
+              </span>
+            </div>
+            <span className="text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/40">
+              {t.canvas.gestureBoxBadge}
+            </span>
+          </div>
 
-        <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-1.5 border-t border-zinc-800/80 font-mono">
-          <span>{t.canvas.gestureFooter}</span>
-          <span className="text-amber-400 font-bold">{t.canvas.officialRaceDuration}</span>
+          {/* 4 Movimentos + Dash (Duplo Toque, 4s recarga) */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="p-2.5 rounded-xl game-subplate flex flex-col items-center text-center">
+              <div className="flex items-center gap-1.5 text-amber-400 text-lg mb-1">
+                <span>👈</span>
+                <span>👉</span>
+              </div>
+              <span className="text-[11px] font-black text-zinc-100">{t.canvas.gestureSidesTitle}</span>
+              <span className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
+                {t.canvas.gestureSidesSub}
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-xl game-subplate border-amber-500/30 flex flex-col items-center text-center">
+              <span className="text-lg text-amber-400 mb-1">👆</span>
+              <span className="text-[11px] font-black text-amber-300">{t.canvas.gestureUpTitle}</span>
+              <span className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
+                {t.canvas.gestureUpSub}
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-xl game-subplate border-cyan-500/30 flex flex-col items-center text-center">
+              <span className="text-lg text-cyan-400 mb-1">👇</span>
+              <span className="text-[11px] font-black text-cyan-300">{t.canvas.gestureDownTitle}</span>
+              <span className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
+                {t.canvas.gestureDownSub}
+              </span>
+            </div>
+
+            <div
+              ref={dashCardRef}
+              className="p-2.5 rounded-xl border flex flex-col items-center text-center transition-colors bg-amber-950/35 border-amber-400/50"
+            >
+              <span className="text-lg text-yellow-400 mb-1">⚡</span>
+              <span className="text-[11px] font-black text-yellow-300">{t.canvas.gestureDashTitle}</span>
+              <span ref={dashCardTextRef} className="text-[9px] text-zinc-400 mt-0.5 font-medium leading-tight">
+                {`${t.canvas.gestureDashReady} · 4s`}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-1.5 border-t border-zinc-800/80 font-mono">
+            <span>{t.canvas.gestureFooter}</span>
+            <span className="text-amber-400 font-bold">{t.canvas.officialRaceDuration}</span>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

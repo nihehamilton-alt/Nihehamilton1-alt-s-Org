@@ -48,6 +48,7 @@ interface RoomParticipant {
   connected?: boolean;
   betAmount?: number;
   sessionStatus?: 'normal' | 'investigating';
+  isSpectating?: boolean;
 }
 
 type TelemetryAnomalyReason = 'impossible-speed' | 'lane-switch-flood' | 'position-teleport';
@@ -198,6 +199,8 @@ async function startServer() {
 
   const roomSockets = new Map<string, Set<WebSocket>>();
   const socketToRoomClient = new Map<WebSocket, { roomCode: string; playerId: string }>();
+  const lastPublicOpponents = new Map<string, Set<string>>();
+  const recentPublicOpponents = new Map<string, string[]>();
   const roomFinishControl = new Map<
     string,
     {
@@ -415,35 +418,72 @@ async function startServer() {
     });
   };
 
+  const recordPublicMatchOpponents = (room: ServerRoom) => {
+    if ((room.accessMode || 'invite-only') !== 'random') return;
+    const racers = room.participants.filter((p) => p.isSpectating !== true);
+    if (racers.length < 2) return;
+    for (const p of racers) {
+      const others = racers.filter((o) => o.id !== p.id).map((o) => o.id);
+      if (others.length === 0) continue;
+      lastPublicOpponents.set(p.id, new Set(others));
+      const existingRecent = recentPublicOpponents.get(p.id) || [];
+      const updatedRecent = [
+        ...others,
+        ...existingRecent.filter((id) => !others.includes(id)),
+      ].slice(0, 16);
+      recentPublicOpponents.set(p.id, updatedRecent);
+    }
+  };
+
   const findOrCreatePublicRoom = (
     isDemoMode: boolean,
     playerId: string,
     preferredBet: number,
-    hostDisplayName: string
+    hostDisplayName: string,
+    excludeRoomCode?: string
   ): ServerRoom => {
     const modeTag = isDemoMode ? 'DEMO' : 'REAL';
+    const safeBet = clampRoomBet(preferredBet, 500);
+    const excludeClean = excludeRoomCode ? excludeRoomCode.trim().toUpperCase() : '';
+    const lastSet = lastPublicOpponents.get(playerId) || new Set<string>();
+    const recentList = recentPublicOpponents.get(playerId) || [];
+
     const candidates = Object.values(db.rooms)
       .filter((r) => {
         pruneRoomParticipants(r);
         if ((r.accessMode || 'invite-only') !== 'random') return false;
         if (Boolean(r.isDemo) !== Boolean(isDemoMode)) return false;
         if (r.raceStatus !== 'idle') return false;
+        if (clampRoomBet(r.betAmount, 500) !== safeBet) return false;
+        if (excludeClean && r.code === excludeClean) return false;
         if (Array.isArray(r.kickedIds) && r.kickedIds.includes(playerId)) return false;
-        const alreadyIn = r.participants.some((p) => p.id === playerId);
-        return alreadyIn || r.participants.length < (r.maxPlayers || 5);
+        if (r.participants.some((p) => p.id === playerId)) return false;
+        if (r.participants.length >= (r.maxPlayers || 5)) return false;
+        const connectedOthers = r.participants.filter((p) => p.connected !== false);
+        const hasLastRepeat = connectedOthers.some((p) => lastSet.has(p.id));
+        if (hasLastRepeat) return false;
+        return true;
+      })
+      .map((r) => {
+        const connectedOthers = r.participants.filter((p) => p.connected !== false);
+        const recentOverlap = connectedOthers.filter((p) => recentList.includes(p.id)).length;
+        return {
+          room: r,
+          recentOverlap,
+          connectedCount: connectedOthers.length,
+          jitter: Math.random(),
+        };
       })
       .sort((a, b) => {
-        const aIn = a.participants.some((p) => p.id === playerId) ? 1 : 0;
-        const bIn = b.participants.some((p) => p.id === playerId) ? 1 : 0;
-        if (aIn !== bIn) return bIn - aIn;
-        const aConnected = a.participants.filter((p) => p.connected !== false).length;
-        const bConnected = b.participants.filter((p) => p.connected !== false).length;
-        if (aConnected !== bConnected) return bConnected - aConnected;
-        return b.updatedAt - a.updatedAt;
+        if (a.recentOverlap !== b.recentOverlap) return a.recentOverlap - b.recentOverlap;
+        const aHasHumans = a.connectedCount > 0 ? 1 : 0;
+        const bHasHumans = b.connectedCount > 0 ? 1 : 0;
+        if (aHasHumans !== bHasHumans) return bHasHumans - aHasHumans;
+        return a.jitter - b.jitter;
       });
 
     if (candidates.length > 0) {
-      return candidates[0];
+      return candidates[0].room;
     }
 
     let slot = 1;
@@ -454,8 +494,14 @@ async function startServer() {
       if (
         existing.raceStatus === 'idle' &&
         existing.accessMode === 'random' &&
-        existing.participants.length < (existing.maxPlayers || 5)
+        Boolean(existing.isDemo) === Boolean(isDemoMode) &&
+        existing.code !== excludeClean &&
+        existing.participants.length === 0
       ) {
+        existing.betAmount = safeBet;
+        existing.hostId = playerId;
+        existing.hostName = hostDisplayName || 'Anfitrião';
+        existing.updatedAt = Date.now();
         return existing;
       }
       slot++;
@@ -469,7 +515,7 @@ async function startServer() {
       hostName: hostDisplayName || 'Anfitrião',
       hostId: playerId,
       maxPlayers: 5,
-      betAmount: clampRoomBet(preferredBet, 500),
+      betAmount: safeBet,
       fillWithBots: true,
       isDemo: isDemoMode,
       accessMode: 'random',
@@ -521,19 +567,21 @@ async function startServer() {
     const bots = ctrl && ctrl.raceRound === room.raceRound ? ctrl.bots : [];
     roomFinishControl.delete(room.code);
 
-    const activeHumanEntries: RoomStandingEntryServer[] = room.participants.map((p) => ({
-      id: p.id,
-      name: p.name,
-      avatar: p.avatar,
-      avatarId: p.avatarId,
-      color: p.color,
-      isBot: false,
-      lane: typeof p.lane === 'number' ? p.lane : 2,
-      progressDistance: Number(p.progressDistance) || 0,
-      rank: 1,
-      betAmount: room.betAmount,
-      payoutKz: 0,
-    }));
+    const activeHumanEntries: RoomStandingEntryServer[] = room.participants
+      .filter((p) => p.isSpectating !== true)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        avatarId: p.avatarId,
+        color: p.color,
+        isBot: false,
+        lane: typeof p.lane === 'number' ? p.lane : 2,
+        progressDistance: Number(p.progressDistance) || 0,
+        rank: 1,
+        betAmount: room.betAmount,
+        payoutKz: 0,
+      }));
 
     const botEntries: RoomStandingEntryServer[] = bots
       .filter((b) => !activeHumanEntries.some((h) => h.id === b.id))
@@ -576,6 +624,10 @@ async function startServer() {
     room.raceStatus = 'completed';
     room.pendingStart = false;
     room.updatedAt = Date.now();
+    recordPublicMatchOpponents(room);
+    room.participants.forEach((p) => {
+      p.isSpectating = false;
+    });
     room.lastResults = {
       raceRound: room.raceRound,
       betAmount: room.betAmount,
@@ -647,6 +699,7 @@ async function startServer() {
       p.stumbling = false;
       p.finished = false;
       p.finishTime = undefined;
+      p.isSpectating = false;
       p.lastSeenAt = now;
     });
 
@@ -979,24 +1032,49 @@ async function startServer() {
   // Descoberta de sala aberta aleatória (declarada ANTES de /api/rooms/:code)
   app.get('/api/rooms/open/random', (req: Request, res: Response) => {
     const playerId = String(req.query.playerId || '').trim();
-    const candidates = Object.values(db.rooms)
-      .filter((r) => {
-        pruneRoomParticipants(r);
-        if ((r.accessMode || 'invite-only') !== 'random') return false;
-        if (r.raceStatus !== 'idle') return false;
-        if (r.participants.length >= (r.maxPlayers || 5)) return false;
-        if (playerId && Array.isArray(r.kickedIds) && r.kickedIds.includes(playerId)) return false;
-        if (playerId && r.participants.some((p) => p.id === playerId)) return false;
-        return true;
-      })
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const hasBetFilter = req.query.betAmount !== undefined && Number.isFinite(Number(req.query.betAmount));
+    const targetBet = hasBetFilter ? clampRoomBet(Number(req.query.betAmount), 500) : null;
+    const hasDemoFilter = req.query.isDemo !== undefined;
+    const targetDemo = req.query.isDemo === '1' || req.query.isDemo === 'true';
+    const excludeRoom = String(req.query.excludeRoom || '').trim().toUpperCase();
+    const lastSet = playerId ? lastPublicOpponents.get(playerId) || new Set<string>() : new Set<string>();
+    const recentList = playerId ? recentPublicOpponents.get(playerId) || [] : [];
 
-    if (candidates.length === 0) {
-      res.status(404).json({ ok: false, error: 'Nenhuma sala aleatória disponível.' });
+    const baseCandidates = Object.values(db.rooms).filter((r) => {
+      pruneRoomParticipants(r);
+      if ((r.accessMode || 'invite-only') !== 'random') return false;
+      if (r.raceStatus !== 'idle') return false;
+      if (r.participants.length >= (r.maxPlayers || 5)) return false;
+      if (excludeRoom && r.code === excludeRoom) return false;
+      if (hasDemoFilter && Boolean(r.isDemo) !== targetDemo) return false;
+      if (targetBet !== null && clampRoomBet(r.betAmount, 500) !== targetBet) return false;
+      if (playerId && Array.isArray(r.kickedIds) && r.kickedIds.includes(playerId)) return false;
+      if (playerId && r.participants.some((p) => p.id === playerId)) return false;
+      return true;
+    });
+
+    const freshCandidates = baseCandidates.filter(
+      (r) => !r.participants.some((p) => lastSet.has(p.id))
+    );
+    const pool = freshCandidates.length > 0 ? freshCandidates : baseCandidates;
+
+    const sorted = pool
+      .map((r) => ({
+        room: r,
+        recentOverlap: r.participants.filter((p) => recentList.includes(p.id)).length,
+        jitter: Math.random(),
+      }))
+      .sort((a, b) => {
+        if (a.recentOverlap !== b.recentOverlap) return a.recentOverlap - b.recentOverlap;
+        return a.jitter - b.jitter;
+      });
+
+    if (sorted.length === 0) {
+      res.status(404).json({ ok: false, error: 'Nenhuma sala aleatória disponível com esse valor de aposta.' });
       return;
     }
 
-    res.json({ ok: true, room: candidates[0], serverTime: Date.now() });
+    res.json({ ok: true, room: sorted[0].room, serverTime: Date.now() });
   });
 
   app.get('/api/rooms/:code', (req: Request, res: Response) => {
@@ -1160,6 +1238,7 @@ async function startServer() {
           lane: room.participants.length % 5,
           action: 'running',
           jumpY: 0,
+          isSpectating: room.raceStatus === 'running' || room.raceStatus === 'starting',
         });
       }
     }
@@ -1697,7 +1776,10 @@ async function startServer() {
           accessMode?: 'random' | 'invite-only';
           viaInvite?: boolean;
           autoMatch?: boolean;
+          autoStart?: boolean;
+          excludeRoomCode?: string;
           selectingProfile?: boolean;
+          isSpectating?: boolean;
           raceRound?: number;
           playerId?: string;
           progressDistance?: number;
@@ -1730,6 +1812,105 @@ async function startServer() {
 
         if (!msg || !msg.type) return;
 
+        if (msg.type === 'room:find-next-public') {
+          const prevRef = socketToRoomClient.get(ws);
+          const playerId = (msg.player?.id || msg.playerId || prevRef?.playerId || '').trim();
+          if (!playerId) return;
+
+          const now = Date.now();
+          const oldRoomCode = (msg.excludeRoomCode || prevRef?.roomCode || '').trim().toUpperCase();
+
+          if (prevRef) {
+            const oldSockets = roomSockets.get(prevRef.roomCode);
+            if (oldSockets) {
+              oldSockets.delete(ws);
+              if (oldSockets.size === 0) roomSockets.delete(prevRef.roomCode);
+            }
+            socketToRoomClient.delete(ws);
+
+            const oldRoom = db.rooms[prevRef.roomCode];
+            if (oldRoom) {
+              recordPublicMatchOpponents(oldRoom);
+              oldRoom.participants = oldRoom.participants.filter((p) => p.id !== playerId);
+              if (oldRoom.participants.length === 0) {
+                oldRoom.raceStatus = 'idle';
+                oldRoom.pendingStart = false;
+                oldRoom.raceStartAt = null;
+                oldRoom.syncedRaceStartAt = null;
+              }
+              resolveRoomHostAndLanes(oldRoom);
+              oldRoom.updatedAt = now;
+              broadcastToRoom(oldRoom.code, { type: 'room:state', room: oldRoom, serverTime: now }, ws);
+            }
+          }
+
+          const nextRoom = findOrCreatePublicRoom(
+            Boolean(msg.isDemo ?? true),
+            playerId,
+            clampRoomBet(msg.betAmount, 500),
+            (msg.player?.name || msg.hostName || 'Corredor').trim(),
+            oldRoomCode
+          );
+          const nextCode = nextRoom.code;
+
+          let nextSockets = roomSockets.get(nextCode);
+          if (!nextSockets) {
+            nextSockets = new Set<WebSocket>();
+            roomSockets.set(nextCode, nextSockets);
+          }
+          nextSockets.add(ws);
+          socketToRoomClient.set(ws, { roomCode: nextCode, playerId });
+
+          pruneRoomParticipants(nextRoom);
+          if (nextRoom.participants.length === 0) {
+            nextRoom.hostId = playerId;
+            nextRoom.hostName = (msg.player?.name || msg.hostName || 'Corredor').trim();
+          }
+
+          const existingIdx = nextRoom.participants.findIndex((p) => p.id === playerId);
+          if (existingIdx < 0) {
+            nextRoom.participants.push({
+              id: playerId,
+              name: (msg.player?.name || `Corredor ${nextRoom.participants.length + 1}`).trim(),
+              avatar: msg.player?.avatar || '⚡',
+              avatarId: msg.player?.avatarId || 'rei-zero',
+              color: msg.player?.color || '#38bdf8',
+              isHost: nextRoom.hostId === playerId || nextRoom.participants.length === 0,
+              joinedAt: now,
+              lastSeenAt: now,
+              progressDistance: 0,
+              lane: LANE_ORDER[nextRoom.participants.length % LANE_ORDER.length],
+              action: 'running',
+              jumpY: 0,
+              profileReady: msg.player?.profileReady !== false,
+              selectingProfile: Boolean(msg.player?.selectingProfile),
+              connected: true,
+              betAmount: nextRoom.betAmount,
+              isSpectating: false,
+            });
+          } else {
+            const p = nextRoom.participants[existingIdx];
+            p.connected = true;
+            p.lastSeenAt = now;
+            p.isSpectating = false;
+            p.betAmount = nextRoom.betAmount;
+          }
+
+          resolveRoomHostAndLanes(nextRoom);
+          nextRoom.updatedAt = now;
+          saveDb(db);
+
+          sendRoomWs(ws, {
+            type: 'room:joined',
+            room: nextRoom,
+            serverTime: now,
+            rotatedPublicMatch: true,
+            startAfterJoin: Boolean(msg.autoStart),
+          });
+          broadcastToRoom(nextCode, { type: 'room:state', room: nextRoom, serverTime: now }, ws);
+          return;
+        }
+
         if (msg.type === 'room:join' && msg.roomCode && msg.player?.id) {
           const playerId = msg.player.id.trim();
           const now = Date.now();
@@ -1741,7 +1922,8 @@ async function startServer() {
               Boolean(msg.isDemo ?? true),
               playerId,
               clampRoomBet(msg.betAmount, 500),
-              (msg.player.name || msg.hostName || 'Corredor').trim()
+              (msg.player.name || msg.hostName || 'Corredor').trim(),
+              msg.excludeRoomCode
             );
             code = room.code;
           } else {
@@ -1815,6 +1997,7 @@ async function startServer() {
               room.hostId = playerId;
               if (!room.creatorId && !msg.autoMatch) room.creatorId = playerId;
             }
+            const joinedMidRace = room.raceStatus === 'running' || room.raceStatus === 'starting';
             room.participants.push({
               id: playerId,
               name: (msg.player.name || `Corredor ${room.participants.length + 1}`).trim(),
@@ -1832,6 +2015,7 @@ async function startServer() {
               selectingProfile: Boolean(msg.player.selectingProfile),
               connected: true,
               betAmount: room.betAmount,
+              isSpectating: joinedMidRace,
             });
           } else {
             const p = room.participants[existingIdx];
@@ -1842,6 +2026,9 @@ async function startServer() {
             p.lastSeenAt = now;
             p.connected = true;
             p.betAmount = room.betAmount;
+            if (room.raceStatus === 'idle' || room.raceStatus === 'completed') {
+              p.isSpectating = false;
+            }
             if (typeof msg.player.profileReady === 'boolean') {
               p.profileReady = msg.player.profileReady;
             }
@@ -1985,7 +2172,21 @@ async function startServer() {
           return;
         }
 
+        if (msg.type === 'room:spectate-state' && participant) {
+          const canSpectateNow = room.raceStatus === 'running' || room.raceStatus === 'starting';
+          participant.isSpectating = canSpectateNow ? Boolean(msg.isSpectating) : false;
+          participant.connected = true;
+          participant.lastSeenAt = Date.now();
+          room.updatedAt = participant.lastSeenAt;
+          saveDb(db);
+          broadcastToRoom(room.code, { type: 'room:state', room, serverTime: room.updatedAt });
+          return;
+        }
+
         if (msg.type === 'room:race-telemetry' && participant) {
+          if (participant.isSpectating) {
+            return;
+          }
           if (room.raceStatus === 'starting') {
             room.raceStatus = 'running';
           }
@@ -2026,6 +2227,9 @@ async function startServer() {
         }
 
         if (msg.type === 'room:race-finish' && participant) {
+          if (participant.isSpectating) {
+            return;
+          }
           if (room.raceStatus === 'completed') {
             if (room.lastResults) {
               sendRoomWs(ws, {
@@ -2064,7 +2268,9 @@ async function startServer() {
             ctrl.bots = msg.bots;
           }
 
-          const connectedHumans = room.participants.filter((p) => p.connected !== false);
+          const connectedHumans = room.participants.filter(
+            (p) => p.connected !== false && p.isSpectating !== true
+          );
           const allHumansFinished =
             connectedHumans.length <= 1 || connectedHumans.every((p) => p.finished === true);
 
@@ -2094,6 +2300,7 @@ async function startServer() {
               p.stumbling = false;
               p.jumpY = 0;
               p.action = 'running';
+              p.isSpectating = false;
             });
             resolveRoomHostAndLanes(room);
             room.updatedAt = Date.now();

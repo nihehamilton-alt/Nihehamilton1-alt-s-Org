@@ -24,6 +24,8 @@ export interface ThreeLiveState {
   obstacles: Obstacle[];
   powerUps: PowerUpItem[];
   coins: Coin[];
+  isSpectating?: boolean;
+  followedRunnerId?: string | null;
 }
 
 interface ThreeCanvasProps {
@@ -42,6 +44,8 @@ interface ThreeCanvasProps {
   timeMode: TimeMode;
   liveStateRef?: React.RefObject<ThreeLiveState>;
   paused?: boolean;
+  isSpectating?: boolean;
+  spectatedRunnerId?: string | null;
   onMoveLane: (dir: 'left' | 'right') => void;
   onJump: () => void;
   onSlide: () => void;
@@ -1698,6 +1702,9 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         throneGroup.position.z = -180;
       }
 
+      const spectatingNow = Boolean(live?.isSpectating ?? propsRef.current.isSpectating);
+      const followedRunnerId = live?.followedRunnerId ?? propsRef.current.spectatedRunnerId ?? null;
+
       // ==========================================
       // ATUALIZA OS 5 CORREDORES NAS 5 FAIXAS (ZERO-GC RIG POOL + BOUNDARY CHECK)
       // ==========================================
@@ -1707,7 +1714,8 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         activeRunnerIds.add(comp.id);
         const rig = getOrCreateRunnerRig(comp);
 
-        const isUser = comp.isPlayer;
+        const isUser = !spectatingNow && comp.isPlayer;
+        const isFollowedTarget = spectatingNow && Boolean(followedRunnerId && comp.id === followedRunnerId);
         const safeCompLane = Math.max(0, Math.min(4, Math.round(comp.lane))) as Lane;
         const safeCompTargetLane = Math.max(0, Math.min(4, Math.round(comp.targetLane ?? comp.lane))) as Lane;
 
@@ -1859,7 +1867,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
           rig.cape.visible = Boolean(look.capeOrScarf);
         }
 
-        rig.playerRing.visible = isUser;
+        rig.playerRing.visible = isUser || isFollowedTarget;
         rig.nitroAura.visible = isUser && (isNitro || isDashing);
         if (rig.nitroAura.visible) {
           const pulse = 1 + Math.sin(now * 0.018) * 0.08;
@@ -2315,7 +2323,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
 
   // Gestos de toque e arrasto unificados via Pointer Events (1 deslize = 1 troca de faixa)
   const beginPointerGesture = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (status !== 'running') return;
+    if (status !== 'running' || propsRef.current.isSpectating) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (
       touchStartRef.current.activePointerId !== null &&

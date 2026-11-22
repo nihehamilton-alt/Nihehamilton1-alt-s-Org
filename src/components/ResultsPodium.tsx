@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { motion, useReducedMotion, Variants } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Share2, Check } from 'lucide-react';
+import { Share2, Check, LogOut } from 'lucide-react';
 import {
   Competitor,
   ThreeTorneirasSplit,
@@ -194,6 +194,12 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
     setCeremonyFinished(false);
   }, [cancelAutoReturn]);
 
+  const handleManualExitToLobby = useCallback(() => {
+    cancelAutoReturn();
+    sounds.stopCelebrationAudio();
+    onBackToLobbyRef.current();
+  }, [cancelAutoReturn]);
+
   const [explosionKey, setExplosionKey] = useState<number>(1);
   const podiumAudioPlayedRef = useRef<boolean>(false);
 
@@ -317,6 +323,15 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
       }
     };
   }, [showPodium, ceremonyFinished, activeTab]);
+
+  // Salvaguarda: caso a cerimónia 3D não emita onFinish a tempo, liberta o regresso automático
+  useEffect(() => {
+    if (!showPodium || ceremonyFinished) return;
+    const fallbackTimer = setTimeout(() => {
+      setCeremonyFinished(true);
+    }, 10_000);
+    return () => clearTimeout(fallbackTimer);
+  }, [showPodium, ceremonyFinished]);
 
   const sorted = useMemo(() => {
     if (authoritativeRankings && authoritativeRankings.length > 0) {
@@ -978,7 +993,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
 
         {/* Tabela Completa: Quanto Cada Corredor Apostou e Ganhou */}
         <motion.div
-          variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
+          variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}
           className="game-subplate rounded-2xl p-3 flex flex-col gap-2 font-mono text-xs border border-amber-500/25"
         >
           <div className="flex items-center justify-between text-[10px] text-amber-400 uppercase tracking-wider font-black px-1">
@@ -1052,7 +1067,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
 
         {/* Widget Análise de Desempenho com Framer Motion */}
         {performance && (
-          <motion.div variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}>
+          <motion.div variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}>
             <PerformanceAnalysisWidget
               performance={performance}
               userRank={userRank}
@@ -1062,7 +1077,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         )}
 
         {/* Coach IA Tático com Gemini */}
-        <motion.div variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}>
+        <motion.div variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}>
           <AiCoachPanel
             playerName={
               competitors.find((c) => c.isPlayer)?.name || 'Corredor'
@@ -1078,7 +1093,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         </motion.div>
 
         <motion.div
-          variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
+          variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}
           className="game-subplate p-2.5 rounded-2xl border border-amber-500/35 flex flex-wrap items-center justify-between text-[11px] font-mono gap-2"
         >
           <div className="flex items-center gap-2">
@@ -1100,34 +1115,36 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         </motion.div>
 
         <motion.div
-          variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
+          variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}
           className="flex flex-col gap-2 mt-0.5"
         >
-          <motion.button
-            whileHover={{ scale: 1.01 }}
-            whileTap={{ scale: 0.99 }}
-            type="button"
-            onClick={handleShareResult}
-            className={`w-full py-2.5 px-4 rounded-2xl font-mono font-bold text-xs uppercase tracking-wider cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg ${
-              shareState !== 'idle'
-                ? 'bg-emerald-950/90 border border-emerald-400 text-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.3)]'
-                : 'game-btn-secondary border-amber-500/40 text-amber-300 hover:border-amber-400 hover:text-amber-200'
-            }`}
-          >
-            {shareState !== 'idle' ? (
-              <>
-                <Check size={16} className="text-emerald-400 animate-bounce" />
-                <span>
-                  {shareState === 'shared' ? t.podium.sharedBtn : t.podium.copiedBtn}
-                </span>
-              </>
-            ) : (
-              <>
-                <Share2 size={16} className="text-amber-400" />
-                <span>{t.podium.shareBtn}</span>
-              </>
-            )}
-          </motion.button>
+          {!isSpectator && (
+            <motion.button
+              whileHover={{ scale: 1.01 }}
+              whileTap={{ scale: 0.99 }}
+              type="button"
+              onClick={handleShareResult}
+              className={`w-full py-2.5 px-4 rounded-2xl font-mono font-bold text-xs uppercase tracking-wider cursor-pointer transition-all flex items-center justify-center gap-2 shadow-lg ${
+                shareState !== 'idle'
+                  ? 'bg-emerald-950/90 border border-emerald-400 text-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.3)]'
+                  : 'game-btn-secondary border-amber-500/40 text-amber-300 hover:border-amber-400 hover:text-amber-200'
+              }`}
+            >
+              {shareState !== 'idle' ? (
+                <>
+                  <Check size={16} className="text-emerald-400 animate-bounce" />
+                  <span>
+                    {shareState === 'shared' ? t.podium.sharedBtn : t.podium.copiedBtn}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Share2 size={16} className="text-amber-400" />
+                  <span>{t.podium.shareBtn}</span>
+                </>
+              )}
+            </motion.button>
+          )}
 
           <div className="grid grid-cols-2 gap-2">
             <motion.button
@@ -1161,18 +1178,29 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
               <span>{canPlayAgain ? t.podium.newMatchBtn : t.podium.adjustBetBtn}</span>
             </motion.button>
           </div>
-          {autoReturnSeconds !== null && (
-            <div className="flex items-center justify-center gap-2 text-[11px] font-mono font-bold text-amber-300 bg-amber-500/15 border border-amber-500/40 rounded-xl py-1.5 px-3">
-              <span>⏳</span>
-              <span>
-                {returnTarget === 'room' ? t.podium.autoReturnRoom : t.podium.autoReturnLobby}{' '}
-                <strong className="tabular-nums">{autoReturnSeconds}s</strong>
-              </span>
+          <footer className="mt-1 pt-2.5 border-t border-white/10 flex flex-col gap-2">
+            {autoReturnSeconds !== null && (
+              <div className="flex items-center justify-center gap-2 text-[11px] font-mono font-bold text-amber-300 bg-amber-500/15 border border-amber-500/40 rounded-xl py-1.5 px-3">
+                <span>⏳</span>
+                <span>
+                  {returnTarget === 'room' ? t.podium.autoReturnRoom : t.podium.autoReturnLobby}{' '}
+                  <strong className="tabular-nums">{autoReturnSeconds}s</strong>
+                </span>
+              </div>
+            )}
+            <button
+              type="button"
+              data-testid="exit-to-lobby-btn"
+              onClick={handleManualExitToLobby}
+              className="w-full py-2.5 px-4 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-600/80 hover:border-amber-400/70 text-zinc-100 hover:text-amber-200 font-mono font-bold text-xs uppercase tracking-wider cursor-pointer transition-colors flex items-center justify-center gap-2 shadow-md"
+            >
+              <LogOut size={15} className="text-amber-400" />
+              <span>Sair para o Lobby</span>
+            </button>
+            <div className="flex items-center justify-center gap-2 text-[10px] text-zinc-400 font-mono text-center">
+              <span>{t.podium.footerTip}</span>
             </div>
-          )}
-          <div className="flex items-center justify-center gap-2 text-[10px] text-zinc-400 font-mono text-center">
-            <span>{t.podium.footerTip}</span>
-          </div>
+          </footer>
         </motion.div>
       </motion.div>
     </motion.div>

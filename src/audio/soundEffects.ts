@@ -33,6 +33,15 @@ class SoundEngine {
     }
   }
 
+  public unlockAudio() {
+    this.initContext();
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {
+        // Ignora bloqueio de autoplay
+      });
+    }
+  }
+
   private getCelebrationOutputs(): {
     dryDest: AudioNode;
     wetDest: AudioNode;
@@ -1152,42 +1161,60 @@ class SoundEngine {
     if (!this.enabled || this.volume <= 0) return;
     this.initContext();
     if (!this.ctx) return;
+    const ctx = this.ctx;
 
-    const now = this.ctx.currentTime;
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
+    const triggerTick = () => {
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
 
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(460, now);
-    gain.gain.setValueAtTime(0.24 * this.volume, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(460, now);
+      gain.gain.setValueAtTime(0.24 * this.volume, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
 
-    osc.connect(gain);
-    gain.connect(this.ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.12);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.12);
+    };
+
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(triggerTick).catch(() => {});
+    } else {
+      triggerTick();
+    }
   }
 
   playCountdownGo() {
     if (!this.enabled || this.volume <= 0) return;
     this.initContext();
     if (!this.ctx) return;
+    const ctx = this.ctx;
 
-    const now = this.ctx.currentTime;
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
+    const triggerGo = () => {
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
 
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(880, now);
-    osc.frequency.exponentialRampToValueAtTime(1320, now + 0.22);
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.22);
 
-    gain.gain.setValueAtTime(0.35 * this.volume, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+      gain.gain.setValueAtTime(0.35 * this.volume, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
 
-    osc.connect(gain);
-    gain.connect(this.ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.26);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.26);
+    };
+
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(triggerGo).catch(() => {});
+    } else {
+      triggerGo();
+    }
   }
 
   // Sintonizador dinâmico de BPM (126 BPM fácil -> 138 BPM modo difícil)
