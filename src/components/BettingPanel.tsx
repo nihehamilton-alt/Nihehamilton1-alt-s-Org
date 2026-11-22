@@ -37,6 +37,8 @@ interface BettingPanelProps {
   waitingForOpponent?: boolean;
   waitingOpponentNames?: string[];
   connectedHumansCount?: number;
+  onRechargeDemo?: () => void;
+  onEditingStateChange?: (isEditing: boolean) => void;
 }
 
 function formatEditableLocalAmount(kz: number, decimals: number, rate: number): string {
@@ -66,6 +68,8 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
   waitingForOpponent = false,
   waitingOpponentNames = [],
   connectedHumansCount = 1,
+  onRechargeDemo,
+  onEditingStateChange,
 }) => {
   const { lang, currency, currencyMeta, t, rates, fxState, formatMoney, openModal } = useI18n();
   const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
@@ -82,12 +86,14 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
     formatEditableLocalAmount(betAmountKz, currencyMeta.decimals, rateForCurrency)
   );
   const [isEditingInput, setIsEditingInput] = useState(false);
+  const [inputRangeError, setInputRangeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isEditingInput) {
       setLocalInput(
         formatEditableLocalAmount(betAmountKz, currencyMeta.decimals, rateForCurrency)
       );
+      setInputRangeError(null);
     }
   }, [betAmountKz, currency, currencyMeta.decimals, rateForCurrency, isEditingInput]);
 
@@ -114,34 +120,59 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
     () => convertKzToCurrency(MAX_BET_KZ, currency, rates),
     [currency, rates]
   );
+  const rangeText = `${formatMoney(MIN_BET_KZ)} – ${formatMoney(MAX_BET_KZ)}`;
 
   const handleChipClick = (kzAmount: number) => {
     sounds.playCoin();
     setIsEditingInput(false);
+    setInputRangeError(null);
+    onEditingStateChange?.(false);
     onBetChange(kzAmount);
   };
 
   const handleLocalInputChange = (raw: string) => {
     setLocalInput(raw);
     const normalized = raw.replace(',', '.').trim();
-    const parsed = Number(normalized);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      const nextKz = Math.max(
-        MIN_BET_KZ,
-        Math.min(MAX_BET_KZ, convertCurrencyToKz(parsed, currency, rates))
-      );
-      onBetChange(nextKz);
+    if (!normalized) {
+      setInputRangeError(`${mpStrings.betRangeHint} ${rangeText}`);
+      return;
     }
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setInputRangeError(`${mpStrings.betRangeHint} ${rangeText}`);
+      return;
+    }
+    const nextKz = convertCurrencyToKz(parsed, currency, rates);
+    if (nextKz < MIN_BET_KZ || nextKz > MAX_BET_KZ) {
+      setInputRangeError(`${mpStrings.betRangeHint} ${rangeText}`);
+      return;
+    }
+    setInputRangeError(null);
+    onBetChange(nextKz);
   };
 
   const handleLocalInputBlur = () => {
     setIsEditingInput(false);
+    onEditingStateChange?.(false);
+    const normalized = localInput.replace(',', '.').trim();
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      const convertedKz = convertCurrencyToKz(parsed, currency, rates);
+      const clampedKz = Math.max(MIN_BET_KZ, Math.min(MAX_BET_KZ, convertedKz));
+      onBetChange(clampedKz);
+      setLocalInput(
+        formatEditableLocalAmount(clampedKz, currencyMeta.decimals, rateForCurrency)
+      );
+      setInputRangeError(null);
+      return;
+    }
     setLocalInput(
       formatEditableLocalAmount(betAmountKz, currencyMeta.decimals, rateForCurrency)
     );
+    setInputRangeError(null);
   };
 
-  const stepAmount = currencyMeta.decimals === 0 ? 10 : 0.5;
+  const stepAmount = currencyMeta.decimals === 0 ? 1 : 0.01;
 
   return (
     <motion.div
@@ -368,18 +399,42 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                     max={Number(maxLocal.toFixed(currencyMeta.decimals))}
                     step={stepAmount}
                     value={localInput}
+                    placeholder={mpStrings.manualBetPlaceholder}
                     disabled={isMultiplayerGuest}
-                    onFocus={() => setIsEditingInput(true)}
+                    onFocus={() => {
+                      setIsEditingInput(true);
+                      onEditingStateChange?.(true);
+                    }}
                     onChange={(e) => handleLocalInputChange(e.target.value)}
                     onBlur={handleLocalInputBlur}
-                    className="w-full game-subplate rounded-xl pl-12 pr-3 py-2.5 text-zinc-100 font-mono font-black text-base focus:outline-none focus:border-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                    className={`w-full game-subplate rounded-xl pl-12 pr-8 py-2.5 text-zinc-100 font-mono font-black text-base focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed ${
+                      inputRangeError
+                        ? 'border-rose-500 focus:border-rose-400'
+                        : 'focus:border-amber-400'
+                    }`}
                   />
+                  {!isMultiplayerGuest && localInput !== '' && (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setIsEditingInput(true);
+                        setLocalInput('');
+                        setInputRangeError(`${mpStrings.betRangeHint} ${rangeText}`);
+                      }}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-mono text-zinc-400 hover:text-amber-300 cursor-pointer px-1"
+                      aria-label="Clear"
+                    >
+                      ✕
+                    </button>
+                  )}
                 </div>
                 <button
                   type="button"
                   disabled={isMultiplayerGuest}
                   onClick={() => {
                     setIsEditingInput(false);
+                    setInputRangeError(null);
                     onBetChange(Math.max(MIN_BET_KZ, Math.floor(betAmountKz / 2)));
                   }}
                   className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -391,6 +446,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                   disabled={isMultiplayerGuest}
                   onClick={() => {
                     setIsEditingInput(false);
+                    setInputRangeError(null);
                     onBetChange(Math.min(MAX_BET_KZ, betAmountKz * 2));
                   }}
                   className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -402,6 +458,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                   disabled={isMultiplayerGuest}
                   onClick={() => {
                     setIsEditingInput(false);
+                    setInputRangeError(null);
                     onBetChange(Math.max(MIN_BET_KZ, Math.min(MAX_BET_KZ, Math.floor(balanceKz))));
                   }}
                   className="px-2.5 py-2.5 game-btn-secondary text-amber-400 font-bold text-xs rounded-xl cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
@@ -409,9 +466,14 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                   {t.betting.maxBtn}
                 </button>
               </div>
+              {inputRangeError && (
+                <span className="text-[11px] font-mono font-bold text-rose-400">
+                  {inputRangeError}
+                </span>
+              )}
               {isMultiplayerGuest && (
                 <div className="px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/35 text-[10px] font-mono text-amber-300 flex items-center justify-between gap-2">
-                  <span>👑 {mpStrings.hostControlsBetNote}</span>
+                  <span>👑 {mpStrings.onlyLeaderControlsRoom}</span>
                   {hostName && <strong className="text-amber-200 shrink-0">{hostName}</strong>}
                 </div>
               )}
@@ -532,21 +594,33 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
             </div>
 
             {balanceKz < betAmountKz && (
-              <div className="px-3 py-2 rounded-xl bg-rose-950/60 border border-rose-500/40 text-[11px] font-mono text-rose-300 flex flex-col gap-1">
-                <div className="flex items-center justify-between gap-2">
+              <div className="px-3 py-2 rounded-xl bg-rose-950/60 border border-rose-500/40 text-[11px] font-mono text-rose-300 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <span>{t.betting.insufficientBalance}</span>
-                  {balanceKz >= MIN_BET_KZ && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsEditingInput(false);
-                        onBetChange(Math.floor(balanceKz));
-                      }}
-                      className="font-black text-amber-300 hover:underline cursor-pointer shrink-0"
-                    >
-                      {t.betting.useMax} ({formatMoney(balanceKz)})
-                    </button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {isDemo && onRechargeDemo && (
+                      <button
+                        type="button"
+                        onClick={onRechargeDemo}
+                        className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/60 font-black text-amber-300 hover:bg-amber-500/30 cursor-pointer shrink-0"
+                      >
+                        {t.header.addDemoBtn}
+                      </button>
+                    )}
+                    {balanceKz >= MIN_BET_KZ && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsEditingInput(false);
+                          setInputRangeError(null);
+                          onBetChange(Math.floor(balanceKz));
+                        }}
+                        className="font-black text-amber-300 hover:underline cursor-pointer shrink-0"
+                      >
+                        {t.betting.useMax} ({formatMoney(balanceKz)})
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {!isDemo && balanceKz <= 0 && (
                   <span className="text-[10px] text-amber-300/90 leading-snug">
@@ -576,12 +650,12 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
               whileTap={{ scale: isMultiplayerGuest ? 1 : 0.985 }}
               type="button"
               onClick={onStartRound}
-              disabled={balanceKz < betAmountKz || (isMultiplayerGuest && connectedHumansCount > 1)}
+              disabled={balanceKz < betAmountKz || Boolean(inputRangeError) || isMultiplayerGuest}
               className="w-full py-4 rounded-xl font-black text-base game-btn-gold flex flex-col items-center justify-center cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed px-2 text-center"
             >
               <span className="text-[11px] uppercase tracking-wider font-extrabold text-amber-950 flex items-center gap-1.5">
                 <span>👑</span>{' '}
-                {isMultiplayerGuest && connectedHumansCount > 1
+                {isMultiplayerGuest
                   ? mpStrings.waitingHostToStartBtn
                   : t.betting.ctaTop}
               </span>

@@ -22,6 +22,7 @@ import { useVoiceChat, type VoiceActivitySessionLog } from '../contexts/VoiceCha
 import { useI18n } from '../contexts/I18nContext';
 import { AvatarDoll } from './AvatarDoll';
 import { DynamicVoiceAnalyserMeter } from './DynamicVoiceAnalyserMeter';
+import { VoiceWaveformVisualizer } from './VoiceWaveformVisualizer';
 import type { TelemetryAnomalyReason, TelemetryInvestigationEntry } from '../types/game';
 
 interface VoiceChatPanelProps {
@@ -51,9 +52,11 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
     errorMsg,
     noiseGateMode,
     hasHeadset,
+    localPlayerName,
     investigatingCompetitors,
     voiceSessionHistory,
     currentVoiceActivity,
+    getSpeakerAudioSnapshot,
     setNoiseGateMode,
     joinVoice,
     leaveVoice,
@@ -104,6 +107,18 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         historyRoundLabel: 'Round',
         historyLobbyLabel: 'Lobby',
         historyLiveTag: 'LIVE',
+        waveformTitle: 'Lobby Waveform',
+        waveformAria: 'Real-time audio waveform of active speakers',
+        youLabel: 'You',
+        speakingNow: 'Speaking',
+        listeningIdle: 'Silence in lobby · Waiting for voice',
+        joinPrompt: 'Join voice to see live waveforms',
+        mutedLabel: 'Mic muted · Silent',
+        activeSpeakersCount: 'Active speakers',
+        muteAllBtn: 'Mute All',
+        allMutedBadge: 'All Muted',
+        muteAllBanner: 'All incoming voice audio muted · Connected in lobby',
+        muteAllTip: 'Instantly mute or unmute all incoming voice chat audio without leaving the lobby',
       };
     }
     if (code === 'es') {
@@ -140,6 +155,18 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         historyRoundLabel: 'Ronda',
         historyLobbyLabel: 'Sala',
         historyLiveTag: 'VIVO',
+        waveformTitle: 'Onda de Voz en Vivo',
+        waveformAria: 'Forma de onda de audio en tiempo real de los participantes que hablan',
+        youLabel: 'Tú',
+        speakingNow: 'Hablando',
+        listeningIdle: 'Silencio en la sala · Esperando voz',
+        joinPrompt: 'Únete a la voz para ver las ondas en vivo',
+        mutedLabel: 'Micrófono silenciado',
+        activeSpeakersCount: 'Hablando ahora',
+        muteAllBtn: 'Silenciar Todos',
+        allMutedBadge: 'Todos Silenciados',
+        muteAllBanner: 'Todo el audio entrante silenciado · Sigues en la sala',
+        muteAllTip: 'Silencia o activa todo el audio entrante del chat sin salir de la sala',
       };
     }
     if (code === 'fr') {
@@ -176,6 +203,18 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         historyRoundLabel: 'Manche',
         historyLobbyLabel: 'Salon',
         historyLiveTag: 'DIRECT',
+        waveformTitle: 'Onde Vocale en Direct',
+        waveformAria: 'Forme d’onde audio en temps réel des participants actifs',
+        youLabel: 'Vous',
+        speakingNow: 'En train de parler',
+        listeningIdle: 'Silence dans le salon · En attente de voix',
+        joinPrompt: 'Rejoignez le vocal pour voir les ondes en direct',
+        mutedLabel: 'Micro coupé',
+        activeSpeakersCount: 'Orateurs actifs',
+        muteAllBtn: 'Couper Tous',
+        allMutedBadge: 'Tous Coupés',
+        muteAllBanner: 'Tout l’audio vocal entrant est coupé · Toujours dans le salon',
+        muteAllTip: 'Couper ou réactiver tout l’audio vocal entrant sans quitter le salon',
       };
     }
     return {
@@ -211,6 +250,18 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
       historyRoundLabel: 'Corrida',
       historyLobbyLabel: 'Sala',
       historyLiveTag: 'ATIVO',
+      waveformTitle: 'Forma de Onda ao Vivo',
+      waveformAria: 'Visualizador de onda de áudio em tempo real dos oradores ativos no lobby',
+      youLabel: 'Você',
+      speakingNow: 'A falar',
+      listeningIdle: 'Silêncio na sala · A aguardar voz',
+      joinPrompt: 'Entre na voz para ver as ondas em tempo real',
+      mutedLabel: 'Microfone silenciado',
+      activeSpeakersCount: 'Oradores ativos',
+      muteAllBtn: 'Silenciar Todos',
+      allMutedBadge: 'Todos Silenciados',
+      muteAllBanner: 'Áudio de voz de todos os jogadores silenciado · Permanece na sala',
+      muteAllTip: 'Silenciar ou reativar todo o áudio de voz recebido sem sair da sala',
     };
   }, [lang]);
 
@@ -453,6 +504,23 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
                 </button>
                 <button
                   type="button"
+                  onClick={toggleDeafen}
+                  aria-pressed={isDeafened}
+                  aria-label={audioUiLabels.muteAllBtn}
+                  className={`px-2 py-1.5 min-h-[34px] rounded-xl text-[11px] font-bold flex items-center gap-1 cursor-pointer border transition-colors ${
+                    isDeafened
+                      ? 'bg-rose-600/90 border-rose-400 text-white shadow-[0_0_12px_rgba(244,63,94,0.35)]'
+                      : 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
+                  }`}
+                  title={audioUiLabels.muteAllTip}
+                >
+                  {isDeafened ? <VolumeX size={13} /> : <Volume2 size={13} />}
+                  <span className="whitespace-nowrap">
+                    {isDeafened ? audioUiLabels.allMutedBadge : audioUiLabels.muteAllBtn}
+                  </span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => joinVoice({ mode: channelMode, withMic: false })}
                   className="px-2.5 py-1.5 min-h-[34px] rounded-xl game-btn-secondary text-zinc-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
                   title={t.voice.listenOnlyTip}
@@ -506,14 +574,19 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
                 <button
                   type="button"
                   onClick={toggleDeafen}
+                  aria-pressed={isDeafened}
+                  aria-label={audioUiLabels.muteAllBtn}
                   className={`px-2 py-1.5 min-h-[34px] rounded-xl text-[11px] font-bold flex items-center gap-1 cursor-pointer border transition-colors ${
                     isDeafened
-                      ? 'bg-rose-950/70 border-rose-500/60 text-rose-300'
+                      ? 'bg-rose-600/90 border-rose-400 text-white shadow-[0_0_12px_rgba(244,63,94,0.35)]'
                       : 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
                   }`}
-                  title={isDeafened ? t.voice.unmuteAudioTip : t.voice.muteAudioTip}
+                  title={audioUiLabels.muteAllTip}
                 >
                   {isDeafened ? <VolumeX size={13} /> : <Volume2 size={13} />}
+                  <span className="whitespace-nowrap">
+                    {isDeafened ? audioUiLabels.allMutedBadge : audioUiLabels.muteAllBtn}
+                  </span>
                 </button>
 
                 <button
@@ -553,6 +626,22 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
           </div>
         </div>
 
+        {isDeafened && (
+          <div className="px-2.5 py-1 rounded-xl bg-rose-950/65 border border-rose-500/55 text-rose-200 text-[10px] font-mono font-bold flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 truncate">
+              <VolumeX size={12} className="text-rose-400 shrink-0" />
+              <span className="truncate">{audioUiLabels.muteAllBanner}</span>
+            </span>
+            <button
+              type="button"
+              onClick={toggleDeafen}
+              className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-rose-500/30 hover:bg-rose-500/45 border border-rose-400/55 text-rose-100 shrink-0 cursor-pointer"
+            >
+              {audioUiLabels.unmuteMicBtn}
+            </button>
+          </div>
+        )}
+
         {/* Feedback visual claro quando o microfone está silenciado ou medidor em tempo real */}
         {isJoined && isMicMuted && (
           <div className="px-2.5 py-1 rounded-xl bg-rose-950/65 border border-rose-500/55 text-rose-200 text-[10px] font-mono font-bold flex items-center justify-between gap-2">
@@ -566,18 +655,32 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
           </div>
         )}
 
-        {isJoined && !isMicMuted && (
-          <div className="pt-1 border-t border-zinc-800/70">
-            <DynamicVoiceAnalyserMeter
-              analyserNode={analyserNode}
-              isMuted={isMicMuted}
-              isSpeaking={isLocalSpeaking}
-              isNoiseSuppressed={isNoiseSuppressed}
-              fallbackLevel={localMicLevel}
-              preGateLevel={preGateMicLevel}
+        {isJoined && (
+          <div className="pt-1 border-t border-zinc-800/70 flex flex-col gap-1.5">
+            <VoiceWaveformVisualizer
+              isJoined={isJoined}
+              isMicMuted={isMicMuted}
+              isDeafened={isDeafened}
+              isLocalSpeaking={isLocalSpeaking}
+              localPlayerName={localPlayerName}
+              peers={peers}
+              mutedPeerIds={mutedPeerIds}
+              getSpeakerAudioSnapshot={getSpeakerAudioSnapshot}
               compact
               labels={audioUiLabels}
             />
+            {!isMicMuted && (
+              <DynamicVoiceAnalyserMeter
+                analyserNode={analyserNode}
+                isMuted={isMicMuted}
+                isSpeaking={isLocalSpeaking}
+                isNoiseSuppressed={isNoiseSuppressed}
+                fallbackLevel={localMicLevel}
+                preGateLevel={preGateMicLevel}
+                compact
+                labels={audioUiLabels}
+              />
+            )}
           </div>
         )}
 
@@ -813,7 +916,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         </button>
       </div>
 
-      {/* Controlos Principais de Voz (Falar, Desligar Mic para só ouvir, Sair) */}
+      {/* Controlos Principais de Voz (Falar, Desligar Mic para só ouvir, Mute All global, Sair) */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
         {!isJoined ? (
           <>
@@ -821,7 +924,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
               type="button"
               disabled={isConnecting}
               onClick={() => joinVoice({ mode: channelMode, withMic: true })}
-              className="col-span-1 sm:col-span-2 py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+              className="col-span-2 sm:col-span-1 py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 cursor-pointer transition-all"
             >
               <Mic size={14} />
               <span>{isConnecting ? '...' : t.voice.joinSpeakBtn}</span>
@@ -835,6 +938,23 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
             >
               <Volume2 size={14} className="text-amber-400" />
               <span>{t.voice.listenOnlyBtn}</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleDeafen}
+              aria-pressed={isDeafened}
+              aria-label={audioUiLabels.muteAllBtn}
+              className={`py-2.5 px-3 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-1.5 cursor-pointer border transition-all ${
+                isDeafened
+                  ? 'bg-rose-600 text-white border-rose-400 shadow-[0_0_14px_rgba(244,63,94,0.35)]'
+                  : 'bg-zinc-900 text-zinc-200 border-zinc-700 hover:bg-zinc-800'
+              }`}
+              title={audioUiLabels.muteAllTip}
+            >
+              {isDeafened ? <VolumeX size={14} /> : <Volume2 size={14} />}
+              <span className="whitespace-nowrap">
+                {isDeafened ? audioUiLabels.allMutedBadge : audioUiLabels.muteAllBtn}
+              </span>
             </button>
           </>
         ) : (
@@ -872,14 +992,19 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
             <button
               type="button"
               onClick={toggleDeafen}
-              className={`py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer border transition-all ${
+              aria-pressed={isDeafened}
+              aria-label={audioUiLabels.muteAllBtn}
+              className={`py-2.5 px-3 rounded-xl font-black text-xs uppercase flex items-center justify-center gap-1.5 cursor-pointer border transition-all ${
                 isDeafened
-                  ? 'bg-rose-950/70 text-rose-300 border-rose-600'
+                  ? 'bg-rose-600 text-white border-rose-400 shadow-[0_0_14px_rgba(244,63,94,0.35)]'
                   : 'bg-zinc-900 text-zinc-200 border-zinc-700 hover:bg-zinc-800'
               }`}
+              title={audioUiLabels.muteAllTip}
             >
               {isDeafened ? <VolumeX size={14} /> : <Volume2 size={14} />}
-              <span>{isDeafened ? t.voice.audioOffBtn : t.voice.audioOnBtn}</span>
+              <span className="whitespace-nowrap">
+                {isDeafened ? audioUiLabels.allMutedBadge : audioUiLabels.muteAllBtn}
+              </span>
             </button>
 
             <button
@@ -894,6 +1019,22 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         )}
       </div>
 
+      {isDeafened && (
+        <div className="px-3 py-2 rounded-xl bg-rose-950/70 border border-rose-500/60 text-rose-200 text-[11px] font-mono font-bold flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2 min-w-0">
+            <VolumeX size={14} className="text-rose-400 shrink-0" />
+            <span className="truncate">{audioUiLabels.muteAllBanner}</span>
+          </span>
+          <button
+            type="button"
+            onClick={toggleDeafen}
+            className="px-2 py-0.5 rounded-md bg-rose-500/30 hover:bg-rose-500/45 border border-rose-400/55 text-[10px] uppercase tracking-wider text-rose-100 shrink-0 cursor-pointer"
+          >
+            {audioUiLabels.unmuteMicBtn}
+          </button>
+        </div>
+      )}
+
       {/* Feedback visual dedicado quando o utilizador está silenciado */}
       {isJoined && isMicMuted && (
         <div className="px-3 py-2 rounded-xl bg-rose-950/70 border border-rose-500/60 text-rose-200 text-[11px] font-mono font-bold flex items-center justify-between gap-2">
@@ -906,6 +1047,19 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
           </span>
         </div>
       )}
+
+      {/* Visualizador de onda em tempo real para todos os oradores ativos no lobby */}
+      <VoiceWaveformVisualizer
+        isJoined={isJoined}
+        isMicMuted={isMicMuted}
+        isDeafened={isDeafened}
+        isLocalSpeaking={isLocalSpeaking}
+        localPlayerName={localPlayerName}
+        peers={peers}
+        mutedPeerIds={mutedPeerIds}
+        getSpeakerAudioSnapshot={getSpeakerAudioSnapshot}
+        labels={audioUiLabels}
+      />
 
       {/* Medidor pós High-Pass & Noise Gate + Lista de Jogadores Ligados na Voz */}
       {isJoined && (

@@ -17,7 +17,7 @@ import {
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
 import { ClientTelemetryValidator } from './utils/telemetryValidator';
-import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy, Camera } from 'lucide-react';
+import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy, Camera, LogOut } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { TOTAL_GAME_TIME_SECONDS, LANE_CENTERS, RIVAL_LANE_SLOTS } from './game/constants';
@@ -346,7 +346,7 @@ export default function App() {
           maxPlayers: clampRoomMax(maxParam, 5),
           minPlayers: 2,
           betAmount: isNaN(betParam) ? 500 : clampBetKz(betParam),
-          fillWithBots: params.get('bots') !== 'false',
+          fillWithBots: params.get('bots') === 'true',
           isDemo: params.get('mode') !== 'real',
           isPrivate: accessMode === 'invite-only',
           accessMode,
@@ -388,6 +388,7 @@ export default function App() {
         new URLSearchParams(window.location.search).get('sala')
     );
   const isAutoMatchRef = useRef<boolean>(!initialHasUrlRoom);
+  const isRoomCreatorRef = useRef<boolean>(false);
   const [wsRoomSessionKey, setWsRoomSessionKey] = useState<string>(() =>
     initialHasUrlRoom
       ? `EXPLICIT_${roomConfig.code}`
@@ -410,12 +411,52 @@ export default function App() {
   const serverHumansCountRef = useRef<number>(1);
   const [raceSeed, setRaceSeed] = useState<number | null>(null);
   const [syncedRaceStartAt, setSyncedRaceStartAt] = useState<number | null>(null);
-  const [isLocalRoomHost, setIsLocalRoomHost] = useState<boolean>(true);
+  const [isLocalRoomHost, setIsLocalRoomHost] = useState<boolean>(() => !initialHasUrlRoom);
+  const [isEditingRoomOrProfile, setIsEditingRoomOrProfile] = useState<boolean>(false);
   const [waitingForOpponent, setWaitingForOpponent] = useState<boolean>(false);
   const [waitingOpponentNames, setWaitingOpponentNames] = useState<string[]>([]);
   const [authoritativeRankings, setAuthoritativeRankings] = useState<RoomStandingEntry[] | null>(null);
   const [pendingSyncPodium, setPendingSyncPodium] = useState<boolean>(false);
   const [wsReconnectNonce, setWsReconnectNonce] = useState<number>(0);
+  const beginSynchronizedCountdownRef = useRef<((payload: {
+    room: {
+      code: string;
+      title: string;
+      hostName: string;
+      hostId?: string;
+      creatorId?: string;
+      maxPlayers?: number;
+      betAmount: number;
+      fillWithBots?: boolean;
+      isDemo?: boolean;
+      accessMode?: RoomAccessMode;
+      pendingStart?: boolean;
+      raceStatus?: 'idle' | 'starting' | 'running' | 'completed';
+      raceRound?: number;
+      raceSeed?: number;
+      raceStartAt?: number | null;
+      syncedRaceStartAt?: number | null;
+      participants: Array<{
+        id: string;
+        name: string;
+        avatar: string;
+        avatarId: string;
+        color: string;
+        isHost: boolean;
+        lane?: number;
+        profileReady?: boolean;
+        selectingProfile?: boolean;
+        connected?: boolean;
+        betAmount?: number;
+        sessionStatus?: 'normal' | 'investigating';
+      }>;
+    };
+    raceRound: number;
+    raceSeed: number;
+    raceStartAt: number;
+    betAmount: number;
+    serverTime?: number;
+  }) => void) | null>(null);
 
   useEffect(() => {
     telemetryValidatorRef.current.setSessionContext({
@@ -428,6 +469,8 @@ export default function App() {
   useEffect(() => {
     void telemetryValidatorRef.current.flushBatch();
     telemetryValidatorRef.current.resetAll();
+    startedRoundSetRef.current.clear();
+    finalizedRoundSetRef.current.clear();
     setInvestigatingCompetitors({});
   }, [wsRoomSessionKey]);
 
@@ -641,6 +684,23 @@ export default function App() {
           new URLSearchParams(window.location.search).get('sala')
       )
   );
+
+  const isLocalActivityBusy =
+    needsInviteOnboarding || shopOpen || rulesOpen || isEditingRoomOrProfile || showTrackQr;
+
+  useEffect(() => {
+    if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
+    const ws = roomWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'room:activity-state',
+          roomCode: roomConfig.code,
+          selectingProfile: Boolean(isLocalActivityBusy),
+        })
+      );
+    }
+  }, [isLocalActivityBusy, roomConfig.code, wsRoomSessionKey, serverRoomConnected]);
 
   const handleChangePlayerName = (newName: string) => {
     const clean = newName.trim() || 'REI ZERO';
@@ -904,6 +964,8 @@ export default function App() {
       finishFallbackTimerRef.current = null;
     }
     remotePlayersRef.current.clear();
+    startedRoundSetRef.current.clear();
+    finalizedRoundSetRef.current.clear();
     setShowPodium(false);
     setPendingSyncPodium(false);
     setAuthoritativeRankings(null);
@@ -1084,23 +1146,79 @@ export default function App() {
     [setBalance, roomConfig.code, roomConfig.title, coinsCollected, top3Streak, t.youTag]
   );
 
-  // Início da corrida de 40 segundos (modo solo local ou pedido sincronizado ao servidor em sala multiplayer)
+  // Início da corrida de 40 segundos (exclusivo do líder em salas sincronizadas)
   const handleStartRound = (fromRoom = false) => {
     const effectiveBet = clampBetKz(fromRoom ? roomConfig.betAmount : betAmount);
     if (balance < effectiveBet || status === 'running' || status === 'starting') return;
 
-    const isMultiplayerRoom = connectedHumansCount > 1 || serverHumansCountRef.current > 1;
+    const inServerRoomSession =
+      !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+      (serverRoomConnected ||
+        viaInviteRef.current ||
+        connectedHumansCount > 1 ||
+        serverHumansCountRef.current > 1 ||
+        !isAutoMatchRef.current);
     const ws = roomWsRef.current;
 
-    if (isMultiplayerRoom) {
+    if (inServerRoomSession) {
       if (!isLocalRoomHost) {
         setRoomNotice(mpStrings.onlyHostCanStart);
         return;
       }
+      startedFromRoomRef.current = fromRoom || lobbyOpen;
+      setRoomNotice(null);
       if (ws && ws.readyState === WebSocket.OPEN) {
-        startedFromRoomRef.current = fromRoom || lobbyOpen;
-        setRoomNotice(null);
         ws.send(JSON.stringify({ type: 'room:start-request', roomCode: roomConfig.code }));
+        return;
+      }
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        fetch(`/api/rooms/${encodeURIComponent(roomConfig.code)}/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requesterId: getSessionPlayerId() }),
+        })
+          .then(async (resp) => {
+            const data = (await resp.json().catch(() => ({}))) as {
+              ok?: boolean;
+              onlyHost?: boolean;
+              started?: boolean;
+              syncedRaceStartAt?: number | null;
+              waitingNames?: string[];
+              serverTime?: number;
+              room?: Parameters<NonNullable<typeof beginSynchronizedCountdownRef.current>>[0]['room'];
+            };
+            if (resp.status === 403 && data.onlyHost) {
+              setRoomNotice(mpStrings.onlyHostCanStart);
+              return;
+            }
+            if (data.ok && data.room) {
+              const targetStart = data.syncedRaceStartAt ?? data.room.syncedRaceStartAt ?? data.room.raceStartAt;
+              if (
+                data.started &&
+                typeof targetStart === 'number' &&
+                typeof data.room.raceRound === 'number' &&
+                typeof data.room.raceSeed === 'number' &&
+                beginSynchronizedCountdownRef.current
+              ) {
+                beginSynchronizedCountdownRef.current({
+                  room: data.room,
+                  raceRound: data.room.raceRound,
+                  raceSeed: data.room.raceSeed,
+                  raceStartAt: targetStart,
+                  betAmount: data.room.betAmount,
+                  serverTime: data.serverTime,
+                });
+              } else {
+                setWaitingForOpponent(true);
+                setWaitingOpponentNames(Array.isArray(data.waitingNames) ? data.waitingNames : []);
+              }
+            } else {
+              setWsReconnectNonce((n) => n + 1);
+            }
+          })
+          .catch(() => {
+            setWsReconnectNonce((n) => n + 1);
+          });
         return;
       }
     }
@@ -1382,6 +1500,10 @@ export default function App() {
 
   // Gerenciamento e Simulação Realista de Amigos Entrando pelo Link
   const handleAddFriendSimulation = () => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+      return;
+    }
     const cap = clampRoomMax(roomConfig.maxPlayers, 5);
     if (competitors.length >= cap) return;
     const botIdx = competitors.length;
@@ -1432,7 +1554,9 @@ export default function App() {
     };
     removedLocalIdsRef.current.clear();
     isAutoMatchRef.current = false;
-    viaInviteRef.current = true;
+    viaInviteRef.current = false;
+    isRoomCreatorRef.current = true;
+    setIsLocalRoomHost(true);
     setRoomNotice(null);
     setConfirmDeleteMain(false);
     setRoomConfig(normalizedConfig);
@@ -1461,13 +1585,16 @@ export default function App() {
     }
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
+      const myId = getSessionPlayerId();
       fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...normalizedConfig,
+          creatorId: myId,
+          requesterId: myId,
           player: {
-            id: getSessionPlayerId(),
+            id: myId,
             name: playerName,
             avatar: myAvatar.avatar,
             avatarId: myAvatar.id,
@@ -1505,7 +1632,8 @@ export default function App() {
 
   const handleMainBetChange = useCallback(
     (nextAmt: number) => {
-      if (connectedHumansCount > 1 && !isLocalRoomHost) {
+      if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+        setRoomNotice(mpStrings.onlyLeaderControlsRoom);
         return;
       }
       const clamped = clampBetKz(nextAmt);
@@ -1535,7 +1663,11 @@ export default function App() {
       if (betSyncTimerRef.current) {
         clearTimeout(betSyncTimerRef.current);
       }
-      if (typeof navigator !== 'undefined' && navigator.onLine) {
+      if (
+        !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+        typeof navigator !== 'undefined' &&
+        navigator.onLine
+      ) {
         const currentCode = roomConfig.code;
         betSyncTimerRef.current = setTimeout(() => {
           fetch('/api/rooms', {
@@ -1543,16 +1675,21 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               code: currentCode,
+              requesterId: getSessionPlayerId(),
               betAmount: clamped,
             }),
           }).catch(() => {});
         }, 250);
       }
     },
-    [roomConfig.code, connectedHumansCount, isLocalRoomHost]
+    [roomConfig.code, isLocalRoomHost, wsRoomSessionKey, mpStrings.onlyLeaderControlsRoom]
   );
 
   const handleUpdateMaxPlayers = (newMax: 2 | 3 | 4 | 5) => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+      return;
+    }
     const cap = clampRoomMax(newMax, 5);
     setRoomConfig((prev) => ({ ...prev, maxPlayers: cap }));
     setCompetitors((prev) => fitCompetitorsToCapacity(prev, cap, roomConfig.fillWithBots));
@@ -1571,12 +1708,17 @@ export default function App() {
         })
       );
     }
-    if (typeof navigator !== 'undefined' && navigator.onLine) {
+    if (
+      !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+      typeof navigator !== 'undefined' &&
+      navigator.onLine
+    ) {
       fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: roomConfig.code,
+          requesterId: getSessionPlayerId(),
           maxPlayers: cap,
         }),
       }).catch(() => {});
@@ -1584,6 +1726,10 @@ export default function App() {
   };
 
   const handleToggleAccessMode = (explicitMode?: RoomAccessMode) => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+      return;
+    }
     const current: RoomAccessMode = roomConfig.accessMode || 'invite-only';
     const nextMode: RoomAccessMode = explicitMode ?? (current === 'random' ? 'invite-only' : 'random');
     setRoomConfig((prev) => ({
@@ -1606,13 +1752,19 @@ export default function App() {
         })
       );
     }
-    if (typeof navigator !== 'undefined' && navigator.onLine) {
+    if (
+      !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+      typeof navigator !== 'undefined' &&
+      navigator.onLine
+    ) {
       const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
+      const myId = getSessionPlayerId();
       fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: roomConfig.code,
+          requesterId: myId,
           title: roomConfig.title,
           hostName: roomConfig.hostName,
           maxPlayers: roomConfig.maxPlayers,
@@ -1621,7 +1773,7 @@ export default function App() {
           isDemo,
           accessMode: nextMode,
           player: {
-            id: getSessionPlayerId(),
+            id: myId,
             name: playerName,
             avatar: myAvatar.avatar,
             avatarId: myAvatar.id,
@@ -1632,53 +1784,120 @@ export default function App() {
     }
   };
 
-  const handleDeleteRoom = async () => {
-    const codeToDelete = roomConfig.code;
-    setConfirmDeleteMain(false);
-    startedFromRoomRef.current = false;
-    isAutoMatchRef.current = false;
-    viaInviteRef.current = false;
-    removedLocalIdsRef.current.clear();
-    setServerRoomConnected(false);
+  const enterSoloLobbyState = useCallback(
+    (noticeMessage?: string) => {
+      clearCountdownTimers();
+      if (finishFallbackTimerRef.current) {
+        clearTimeout(finishFallbackTimerRef.current);
+        finishFallbackTimerRef.current = null;
+      }
+      setConfirmDeleteMain(false);
+      startedFromRoomRef.current = false;
+      isAutoMatchRef.current = false;
+      viaInviteRef.current = false;
+      isRoomCreatorRef.current = false;
+      removedLocalIdsRef.current.clear();
+      remotePlayersRef.current.clear();
+      startedRoundSetRef.current.clear();
+      finalizedRoundSetRef.current.clear();
+      setIsLocalRoomHost(true);
+      setServerRoomConnected(false);
+      setWaitingForOpponent(false);
+      setWaitingOpponentNames([]);
+      setCountdownValue(null);
+      setRaceSeed(null);
+      setSyncedRaceStartAt(null);
+      setPendingSyncPodium(false);
+      setAuthoritativeRankings(null);
+      statusRef.current = 'idle';
+      setStatus('idle');
 
-    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const freshCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
+      const myAvatar = getLocalizedAvatar(selectedAvatarId, lang);
+      const displayName = playerName && playerName !== 'REI ZERO' ? playerName : myAvatar.name;
+
+      setRoomConfig({
+        code: freshCode,
+        title: `Arena de ${playerName}`,
+        hostName: playerName,
+        maxPlayers: 5,
+        minPlayers: 2,
+        betAmount: 500,
+        fillWithBots: false,
+        isDemo,
+        isPrivate: true,
+        accessMode: 'invite-only',
+      });
+      setBetAmount(500);
+      setWsRoomSessionKey(`SOLO_IDLE_${Date.now()}`);
+      setCompetitors([
+        {
+          id: 'player-rei-zero',
+          name: `${displayName} ${t.youTag}`,
+          avatar: myAvatar.avatar,
+          avatarId: myAvatar.id,
+          color: myAvatar.color,
+          lane: 2 as Lane,
+          targetLane: 2 as Lane,
+          laneX: LANE_CENTERS[2],
+          yOffset: 0,
+          progressDistance: 0,
+          action: 'running',
+          jumpY: 0,
+          isBot: false,
+          isPlayer: true,
+          isHost: true,
+          stumbling: false,
+          finished: false,
+          betAmount: 500,
+        },
+      ]);
+
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        ['room', 'sala', 'host', 'title', 'max', 'bet', 'access', 'new', 'onboard'].forEach((k) =>
+          url.searchParams.delete(k)
+        );
+        window.history.replaceState({}, '', url.toString());
+      }
+
+      setShowPodium(false);
+      setShowTrackQr(false);
+      setLobbyOpen(true);
+
+      if (noticeMessage) {
+        setRoomNotice(noticeMessage);
+        setTimeout(() => setRoomNotice(null), 4500);
+      }
+    },
+    [clearCountdownTimers, isDemo, lang, playerName, selectedAvatarId, t.youTag]
+  );
+
+  const enterSoloLobbyStateRef = useRef(enterSoloLobbyState);
+  enterSoloLobbyStateRef.current = enterSoloLobbyState;
+
+  const handleLeaveRoom = useCallback(() => {
+    const ws = roomWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'room:leave', roomCode: roomConfig.code }));
+    }
+    enterSoloLobbyState(mpStrings.leftRoomNotice);
+  }, [enterSoloLobbyState, mpStrings.leftRoomNotice, roomConfig.code]);
+
+  const handleDeleteRoom = async () => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      handleLeaveRoom();
+      return;
+    }
+    const codeToDelete = roomConfig.code;
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && typeof navigator !== 'undefined' && navigator.onLine) {
       await fetch(`/api/rooms/${encodeURIComponent(codeToDelete)}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requesterId: getSessionPlayerId() }),
       }).catch(() => {});
     }
-
-    const freshCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
-    setRoomConfig({
-      code: freshCode,
-      title: `Arena de ${playerName}`,
-      hostName: playerName,
-      maxPlayers: 5,
-      minPlayers: 2,
-      betAmount: 500,
-      fillWithBots: true,
-      isDemo,
-      isPrivate: true,
-      accessMode: 'invite-only',
-    });
-    setBetAmount(500);
-    setWsRoomSessionKey(`EXPLICIT_${freshCode}_${Date.now()}`);
-    setCompetitors((prev) => {
-      const playerOnly = prev.filter((c) => c.isPlayer);
-      return fitCompetitorsToCapacity(playerOnly.length > 0 ? playerOnly : prev, 5, true);
-    });
-
-    if (typeof window !== 'undefined') {
-      const url = new URL(window.location.href);
-      ['room', 'sala', 'host', 'title', 'max', 'bet', 'access', 'new', 'onboard'].forEach((k) =>
-        url.searchParams.delete(k)
-      );
-      window.history.replaceState({}, '', url.toString());
-    }
-
-    setRoomNotice(t.app.roomDeletedNotice);
-    setTimeout(() => setRoomNotice(null), 4500);
+    enterSoloLobbyState(t.app.roomDeletedNotice);
   };
 
   const handleJoinRoom = (payload: {
@@ -1695,7 +1914,9 @@ export default function App() {
     const cap = clampRoomMax(payload.maxPlayers ?? roomConfig.maxPlayers, 5);
     const accessMode: RoomAccessMode = payload.accessMode || roomConfig.accessMode || 'invite-only';
     isAutoMatchRef.current = false;
+    isRoomCreatorRef.current = false;
     viaInviteRef.current = payload.viaInvite ?? true;
+    setIsLocalRoomHost(!viaInviteRef.current);
     removedLocalIdsRef.current.clear();
     setRoomNotice(null);
     const updatedConfig: RoomConfig = {
@@ -1705,7 +1926,7 @@ export default function App() {
       maxPlayers: cap,
       minPlayers: 2,
       betAmount: clampBetKz(payload.betAmount ?? betAmount),
-      fillWithBots: roomConfig.fillWithBots,
+      fillWithBots: false,
       isDemo: payload.isDemo ?? isDemo,
       isPrivate: accessMode === 'invite-only',
       accessMode,
@@ -1713,7 +1934,7 @@ export default function App() {
     setRoomConfig(updatedConfig);
     setBetAmount(updatedConfig.betAmount);
     setWsRoomSessionKey(`EXPLICIT_${cleanCode}_${Date.now()}`);
-    setCompetitors((prev) => fitCompetitorsToCapacity(prev, cap, updatedConfig.fillWithBots));
+    setCompetitors((prev) => fitCompetitorsToCapacity(prev, cap, false));
     if (typeof payload.isDemo === 'boolean') {
       setIsDemo(payload.isDemo);
     }
@@ -1952,6 +2173,10 @@ export default function App() {
   // Conexão WebSocket em tempo real (/ws/room): sincronização de sala, apostas, início simultâneo, telemetria e pódio
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) {
+      setServerRoomConnected(false);
+      return;
+    }
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       setServerRoomConnected(false);
       return;
@@ -1980,6 +2205,8 @@ export default function App() {
       code: string;
       title: string;
       hostName: string;
+      hostId?: string;
+      creatorId?: string;
       maxPlayers?: number;
       betAmount: number;
       fillWithBots?: boolean;
@@ -1990,6 +2217,7 @@ export default function App() {
       raceRound?: number;
       raceSeed?: number;
       raceStartAt?: number | null;
+      syncedRaceStartAt?: number | null;
       participants: ServerRoomParticipantPayload[];
     };
 
@@ -2000,7 +2228,11 @@ export default function App() {
       const meOnServer =
         activeServerHumans.find((p) => p.id === myId) ||
         room.participants.find((p) => p.id === myId);
-      const localIsHost = meOnServer ? Boolean(meOnServer.isHost) : !viaInviteRef.current;
+      const localIsHost = meOnServer
+        ? Boolean(meOnServer.isHost)
+        : room.creatorId
+        ? room.creatorId === myId
+        : isRoomCreatorRef.current || !viaInviteRef.current;
       setIsLocalRoomHost(localIsHost);
       serverHumansCountRef.current = activeServerHumans.length;
 
@@ -2252,6 +2484,8 @@ export default function App() {
       );
     };
 
+    beginSynchronizedCountdownRef.current = beginSynchronizedCountdown;
+
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProto}//${window.location.host}/ws/room`;
     const ws = new WebSocket(wsUrl);
@@ -2272,6 +2506,8 @@ export default function App() {
           roomCode: cfg.code,
           title: cfg.title,
           hostName: cfg.hostName,
+          creatorId: isRoomCreatorRef.current ? myId : undefined,
+          isRoomCreator: isRoomCreatorRef.current,
           maxPlayers: cfg.maxPlayers,
           betAmount: cfg.betAmount,
           fillWithBots: cfg.fillWithBots,
@@ -2303,6 +2539,7 @@ export default function App() {
           raceRound?: number;
           raceSeed?: number;
           raceStartAt?: number;
+          syncedRaceStartAt?: number;
           betAmount?: number;
           playerId?: string;
           progressDistance?: number;
@@ -2324,6 +2561,24 @@ export default function App() {
 
         if ((msg.type === 'room:joined' || msg.type === 'room:state') && msg.room) {
           applyRoomStateFromServer(msg.room, false);
+          const catchUpStartAt = msg.room.syncedRaceStartAt ?? msg.room.raceStartAt;
+          if (
+            msg.room.raceStatus === 'starting' &&
+            typeof catchUpStartAt === 'number' &&
+            typeof msg.room.raceRound === 'number' &&
+            typeof msg.room.raceSeed === 'number' &&
+            statusRef.current === 'idle' &&
+            !startedRoundSetRef.current.has(msg.room.raceRound)
+          ) {
+            beginSynchronizedCountdown({
+              room: msg.room,
+              raceRound: msg.room.raceRound,
+              raceSeed: msg.room.raceSeed,
+              raceStartAt: catchUpStartAt,
+              betAmount: msg.room.betAmount,
+              serverTime: msg.serverTime,
+            });
+          }
           return;
         }
 
@@ -2334,18 +2589,19 @@ export default function App() {
           return;
         }
 
+        const startTimestamp = msg.syncedRaceStartAt ?? msg.raceStartAt;
         if (
           msg.type === 'room:race-start' &&
           msg.room &&
           typeof msg.raceRound === 'number' &&
           typeof msg.raceSeed === 'number' &&
-          typeof msg.raceStartAt === 'number'
+          typeof startTimestamp === 'number'
         ) {
           beginSynchronizedCountdown({
             room: msg.room,
             raceRound: msg.raceRound,
             raceSeed: msg.raceSeed,
-            raceStartAt: msg.raceStartAt,
+            raceStartAt: startTimestamp,
             betAmount: msg.betAmount ?? msg.room.betAmount,
             serverTime: msg.serverTime,
           });
@@ -2444,21 +2700,12 @@ export default function App() {
         }
 
         if (msg.type === 'room:kicked' && (!msg.targetId || msg.targetId === myId)) {
-          setServerRoomConnected(false);
-          setRoomNotice(t.lobby.kickedNotice);
-          isAutoMatchRef.current = false;
-          const freshCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
-          setRoomConfig((prev) => ({ ...prev, code: freshCode }));
-          setWsRoomSessionKey(`EXPLICIT_${freshCode}_${Date.now()}`);
-          const url = new URL(window.location.href);
-          url.searchParams.set('room', freshCode);
-          window.history.replaceState({}, '', url.toString());
+          enterSoloLobbyStateRef.current(t.lobby.kickedNotice);
           return;
         }
 
         if (msg.type === 'room:deleted') {
-          setServerRoomConnected(false);
-          setRoomNotice(t.app.roomDeletedNotice);
+          enterSoloLobbyStateRef.current(t.app.roomDeletedNotice);
           return;
         }
 
@@ -2498,6 +2745,7 @@ export default function App() {
 
     return () => {
       closedByCleanup = true;
+      beginSynchronizedCountdownRef.current = null;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (roomWsRef.current === ws) {
         roomWsRef.current = null;
@@ -2522,6 +2770,10 @@ export default function App() {
   ]);
 
   const handleRemoveCompetitor = (id: string) => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+      return;
+    }
     const target = competitors.find((c) => c.id === id);
     if (!target || target.isPlayer) return;
 
@@ -2541,12 +2793,23 @@ export default function App() {
   };
 
   const handleToggleFillBots = () => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+      return;
+    }
     setRoomConfig((prev) => ({ ...prev, fillWithBots: !prev.fillWithBots }));
   };
 
   const handleRegenerateRoomCode = () => {
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+      return;
+    }
     const newCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
     isAutoMatchRef.current = false;
+    viaInviteRef.current = false;
+    isRoomCreatorRef.current = true;
+    setIsLocalRoomHost(true);
     setWsRoomSessionKey(`EXPLICIT_${newCode}_${Date.now()}`);
     setRoomConfig((prev) => {
       const updated = { ...prev, code: newCode };
@@ -2690,7 +2953,7 @@ export default function App() {
         onOpenProvablyFair={() => setIsProvablyFairOpen(true)}
         onOpenRules={() => setRulesOpen(true)}
         coinsCollected={coinsCollected}
-        onResetBalance={() => setDemoBalance((prev) => prev + 50_000)}
+        onResetBalance={() => setDemoBalance((prev) => prev + 1_000_000)}
         isDemo={isDemo}
         onToggleDemo={() => {
           setIsDemo((prev) => {
@@ -2772,9 +3035,13 @@ export default function App() {
                 variants={roomControlItemVariants}
                 whileTap={{ scale: 0.97 }}
                 type="button"
-                disabled={status === 'running' || status === 'starting'}
+                disabled={
+                  status === 'running' ||
+                  status === 'starting' ||
+                  (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost)
+                }
                 onClick={() => handleToggleAccessMode()}
-                className={`w-full px-2 py-2 sm:py-1.5 rounded-xl border text-[10px] font-mono font-black flex items-center justify-center gap-1 cursor-pointer transition-colors disabled:opacity-50 ${
+                className={`w-full px-2 py-2 sm:py-1.5 rounded-xl border text-[10px] font-mono font-black flex items-center justify-center gap-1 cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                   (roomConfig.accessMode || 'invite-only') === 'random'
                     ? 'bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-400/60 text-emerald-300'
                     : 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/50 text-amber-300'
@@ -2827,7 +3094,18 @@ export default function App() {
               </motion.button>
 
               <motion.div variants={roomControlItemVariants} className="w-full">
-                {confirmDeleteMain ? (
+                {!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost ? (
+                  <motion.button
+                    whileTap={{ scale: 0.97 }}
+                    type="button"
+                    disabled={status === 'running' || status === 'starting'}
+                    onClick={handleLeaveRoom}
+                    className="w-full px-2 py-2 sm:py-1.5 rounded-xl bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 text-rose-300 text-[10px] font-mono font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
+                  >
+                    <LogOut size={12} className="shrink-0" />
+                    <span className="truncate">{mpStrings.leaveRoomBtn}</span>
+                  </motion.button>
+                ) : confirmDeleteMain ? (
                   <motion.div
                     initial={{ opacity: 0, scale: 0.96 }}
                     animate={{ opacity: 1, scale: 1 }}
@@ -2981,11 +3259,13 @@ export default function App() {
             playerAvatar={currentAvatar}
             competitors={competitors}
             maxPlayers={roomConfig.maxPlayers}
-            isMultiplayerGuest={connectedHumansCount > 1 && !isLocalRoomHost}
+            isMultiplayerGuest={!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost}
             hostName={roomConfig.hostName}
             waitingForOpponent={waitingForOpponent}
             waitingOpponentNames={waitingOpponentNames}
             connectedHumansCount={connectedHumansCount}
+            onRechargeDemo={() => setDemoBalance((prev) => prev + 1_000_000)}
+            onEditingStateChange={setIsEditingRoomOrProfile}
           />
 
           {/* Resumo Animado de Análise de Desempenho da Última Corrida */}
@@ -3082,7 +3362,9 @@ export default function App() {
               onToggleAccessMode={handleToggleAccessMode}
               onUpdateBet={handleMainBetChange}
               onDeleteRoom={handleDeleteRoom}
+              onLeaveRoom={handleLeaveRoom}
               onFindRandomRoom={handleFindRandomRoom}
+              onEditingStateChange={setIsEditingRoomOrProfile}
               roomNotice={roomNotice}
               playerName={playerName}
               onChangePlayerName={handleChangePlayerName}
@@ -3090,7 +3372,7 @@ export default function App() {
               isDemo={isDemo}
               onCloseLobby={() => setLobbyOpen(false)}
               streak={top3Streak}
-              isRoomHost={isLocalRoomHost || connectedHumansCount <= 1}
+              isRoomHost={wsRoomSessionKey.startsWith('SOLO_IDLE_') || isLocalRoomHost}
               waitingForOpponent={waitingForOpponent}
               waitingOpponentNames={waitingOpponentNames}
               connectedHumansCount={connectedHumansCount}
@@ -3116,7 +3398,7 @@ export default function App() {
               onPlayAgain={() => handleStartRound(startedFromRoomRef.current)}
               onBackToLobby={handleReturnToLobby}
               isDemo={isDemo}
-              canPlayAgain={balance >= betAmount && (connectedHumansCount <= 1 || isLocalRoomHost)}
+              canPlayAgain={balance >= betAmount && (wsRoomSessionKey.startsWith('SOLO_IDLE_') || isLocalRoomHost)}
             />
           </PodiumErrorBoundary>
         )}

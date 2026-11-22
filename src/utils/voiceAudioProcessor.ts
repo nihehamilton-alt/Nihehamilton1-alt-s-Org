@@ -20,6 +20,7 @@ export interface VoiceAudioProcessorHandle {
   analyserNode: AnalyserNode | null;
   mode: 'audioworklet' | 'scriptprocessor' | 'passthrough';
   updateParams: (next: Partial<VoiceProcessorParams>) => void;
+  resume: () => Promise<void>;
   dispose: () => void;
 }
 
@@ -101,22 +102,22 @@ class ReiVoiceGateProcessor extends AudioWorkletProcessor {
     }
     const rms = Math.sqrt(sumSq / len);
 
-    // 2. Limiar adaptativo + proteção anti-eco quando não há auriculares
-    const baseThreshold = this.strictMode ? 0.03 : 0.015;
-    const floorMult = this.strictMode ? 3.1 : 2.3;
+    // 2. Limiar adaptativo + proteção anti-eco suave para voz humana clara (sem cortar falas normais)
+    const baseThreshold = this.strictMode ? 0.011 : 0.0055;
+    const floorMult = this.strictMode ? 2.4 : 1.9;
     const echoGuardActive = !this.hasHeadset && this.remoteSpeaking && !this.deafened;
-    const echoGuardBoost = echoGuardActive ? 0.028 : 0;
+    const echoGuardBoost = echoGuardActive ? 0.008 : 0;
 
     const openThreshold = Math.max(baseThreshold, this.noiseFloor * floorMult) + echoGuardBoost;
-    const closeThreshold = openThreshold * 0.62;
-    const holdSamples = Math.round(sampleRate * (this.strictMode ? 0.19 : 0.27));
+    const closeThreshold = openThreshold * 0.58;
+    const holdSamples = Math.round(sampleRate * (this.strictMode ? 0.24 : 0.32));
 
     // Atualiza piso de ruído ambiente somente quando o gate está fechado e sem falar
     if (!this.gateOpen && rms < openThreshold * 0.9) {
       const adaptRate = rms < this.noiseFloor ? 0.08 : 0.015;
       this.noiseFloor = this.noiseFloor * (1 - adaptRate) + rms * adaptRate;
-      if (this.noiseFloor < 0.001) this.noiseFloor = 0.001;
-      if (this.noiseFloor > 0.02) this.noiseFloor = 0.02;
+      if (this.noiseFloor < 0.0008) this.noiseFloor = 0.0008;
+      if (this.noiseFloor > 0.012) this.noiseFloor = 0.012;
     }
 
     if (rms >= openThreshold) {
@@ -191,6 +192,7 @@ export async function createVoiceAudioProcessor(
       analyserNode: null,
       mode: 'passthrough',
       updateParams: () => {},
+      resume: async () => {},
       dispose: () => {},
     };
   }
@@ -260,12 +262,21 @@ export async function createVoiceAudioProcessor(
   compressor.release.value = 0.14;
 
   const dest = ctx.createMediaStreamDestination();
+  // Mantém o grafo AudioWorklet / MediaStreamDestination ativo em Safari/iOS/Chromium móveis sem emitir som local
+  const silentKeepAlive = ctx.createGain();
+  silentKeepAlive.gain.value = 0;
 
   source.connect(highpassStage1);
   highpassStage1.connect(highpassStage2);
   highpassStage2.connect(lowpassStage1);
   lowpassStage1.connect(lowpassStage2);
   lowpassStage2.connect(presenceFilter);
+
+  const ensureCtxRunning = async () => {
+    if (ctx && ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
+    }
+  };
 
   // ============================================================================
   // ESTÁGIO 2: PROCESSADOR NOISE GATE + ANTI-ECO EM TEMPO REAL (AudioWorklet)
@@ -284,6 +295,7 @@ export async function createVoiceAudioProcessor(
           analyserNode: null,
           mode: 'passthrough',
           updateParams: () => {},
+          resume: async () => {},
           dispose: () => {},
         };
       }
@@ -318,6 +330,8 @@ export async function createVoiceAudioProcessor(
       workletNode.connect(postGateAnalyser);
       postGateAnalyser.connect(compressor);
       compressor.connect(dest);
+      compressor.connect(silentKeepAlive);
+      silentKeepAlive.connect(ctx.destination);
 
       return {
         outputStream: dest.stream,
@@ -325,8 +339,14 @@ export async function createVoiceAudioProcessor(
         mode: 'audioworklet',
         updateParams: (next) => {
           params = { ...params, ...next };
-          if (!disposed) pushWorkletParams();
+          if (!disposed) {
+            pushWorkletParams();
+            if (params.micMuted === false) {
+              void ensureCtxRunning();
+            }
+          }
         },
+        resume: ensureCtxRunning,
         dispose: () => {
           disposed = true;
           try {
@@ -340,6 +360,7 @@ export async function createVoiceAudioProcessor(
             workletNode.disconnect();
             postGateAnalyser.disconnect();
             compressor.disconnect();
+            silentKeepAlive.disconnect();
             dest.disconnect();
           } catch {
             // noop
@@ -399,18 +420,18 @@ export async function createVoiceAudioProcessor(
       const rms = Math.sqrt(sumSq / len);
 
       const strictMode = params.noiseGateMode === 'strict';
-      const baseThreshold = strictMode ? 0.03 : 0.015;
-      const floorMult = strictMode ? 3.1 : 2.3;
+      const baseThreshold = strictMode ? 0.011 : 0.0055;
+      const floorMult = strictMode ? 2.4 : 1.9;
       const echoGuardActive = !params.hasHeadset && params.remoteSpeaking && !params.deafened;
-      const echoGuardBoost = echoGuardActive ? 0.028 : 0;
+      const echoGuardBoost = echoGuardActive ? 0.008 : 0;
 
       const openThreshold = Math.max(baseThreshold, noiseFloor * floorMult) + echoGuardBoost;
-      const closeThreshold = openThreshold * 0.62;
-      const holdSamples = Math.round(sampleRateVal * (strictMode ? 0.19 : 0.27));
+      const closeThreshold = openThreshold * 0.58;
+      const holdSamples = Math.round(sampleRateVal * (strictMode ? 0.24 : 0.32));
 
       if (!gateOpen && rms < openThreshold * 0.9) {
         const adaptRate = rms < noiseFloor ? 0.08 : 0.015;
-        noiseFloor = Math.min(0.02, Math.max(0.001, noiseFloor * (1 - adaptRate) + rms * adaptRate));
+        noiseFloor = Math.min(0.012, Math.max(0.0008, noiseFloor * (1 - adaptRate) + rms * adaptRate));
       }
 
       if (rms >= openThreshold) {
@@ -453,6 +474,8 @@ export async function createVoiceAudioProcessor(
     scriptNode.connect(postGateAnalyser);
     postGateAnalyser.connect(compressor);
     compressor.connect(dest);
+    compressor.connect(silentKeepAlive);
+    silentKeepAlive.connect(ctx.destination);
 
     return {
       outputStream: dest.stream,
@@ -460,7 +483,11 @@ export async function createVoiceAudioProcessor(
       mode: 'scriptprocessor',
       updateParams: (next) => {
         params = { ...params, ...next };
+        if (!disposed && params.micMuted === false) {
+          void ensureCtxRunning();
+        }
       },
+      resume: ensureCtxRunning,
       dispose: () => {
         disposed = true;
         try {
@@ -474,6 +501,7 @@ export async function createVoiceAudioProcessor(
           scriptNode.disconnect();
           postGateAnalyser.disconnect();
           compressor.disconnect();
+          silentKeepAlive.disconnect();
           dest.disconnect();
         } catch {
           // noop
@@ -489,6 +517,7 @@ export async function createVoiceAudioProcessor(
       analyserNode: null,
       mode: 'passthrough',
       updateParams: () => {},
+      resume: async () => {},
       dispose: () => {},
     };
   }

@@ -66,7 +66,9 @@ interface LobbyRoomProps {
   onToggleAccessMode?: (mode?: RoomAccessMode) => void;
   onUpdateBet?: (amount: number) => void;
   onDeleteRoom?: () => void;
+  onLeaveRoom?: () => void;
   onFindRandomRoom?: () => Promise<void> | void;
+  onEditingStateChange?: (isEditing: boolean) => void;
   roomNotice?: string | null;
   playerName?: string;
   onChangePlayerName?: (name: string) => void;
@@ -102,7 +104,9 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   onToggleAccessMode,
   onUpdateBet,
   onDeleteRoom,
+  onLeaveRoom,
   onFindRandomRoom,
+  onEditingStateChange,
   roomNotice = null,
   playerName = 'REI ZERO',
   onChangePlayerName,
@@ -113,7 +117,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   isRoomHost = true,
   waitingForOpponent = false,
   waitingOpponentNames = [],
-  connectedHumansCount = 1,
+  connectedHumansCount: _connectedHumansCount = 1,
 }) => {
   const { lang, currency, currencyMeta, t, rates, formatMoney } = useI18n();
   const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
@@ -125,6 +129,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     mutedPeerIds,
   } = useVoiceChat();
 
+  const canControlRoom = isRoomHost;
   const maxPlayers = Math.max(2, Math.min(5, roomConfig.maxPlayers || 5)) as 2 | 3 | 4 | 5;
   const currentAccessMode: RoomAccessMode = roomConfig.accessMode || 'invite-only';
   const [activeTab, setActiveTab] = useState<'arena' | 'create' | 'scan'>('arena');
@@ -135,6 +140,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [confirmDeleteRoom, setConfirmDeleteRoom] = useState<boolean>(false);
   const [findingRandom, setFindingRandom] = useState<boolean>(false);
+  const [isEditingField, setIsEditingField] = useState<boolean>(false);
 
   const [manualJoinInput, setManualJoinInput] = useState<string>('');
   const [cameraActive, setCameraActive] = useState<boolean>(false);
@@ -145,36 +151,38 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   const streamRef = useRef<MediaStream | null>(null);
 
   const rateForCurrency = rates[currency] || currencyMeta.defaultKzPerUnit || 1;
-  const initialRoomBet = clampBetKz(roomConfig.betAmount || 500);
+  const [arenaBetInput, setArenaBetInput] = useState<string>('');
+  const [arenaBetError, setArenaBetError] = useState<string | null>(null);
+
   const [newTitle, setNewTitle] = useState<string>(roomConfig.title || 'Arena do Hamilton');
   const [newHost, setNewHost] = useState<string>(roomConfig.hostName || 'Hamilton O Zero');
-  const [newBet, setNewBet] = useState<number>(initialRoomBet);
-  const [newBetInput, setNewBetInput] = useState<string>(() =>
-    formatEditableRoomBet(initialRoomBet, currencyMeta.decimals, rateForCurrency)
-  );
+  const [newBet, setNewBet] = useState<number | null>(null);
+  const [newBetInput, setNewBetInput] = useState<string>('');
   const [isEditingNewBet, setIsEditingNewBet] = useState<boolean>(false);
   const [newBetError, setNewBetError] = useState<string | null>(null);
   const [newMaxPlayers, setNewMaxPlayers] = useState<2 | 3 | 4 | 5>(maxPlayers);
   const [newAccessMode, setNewAccessMode] = useState<RoomAccessMode>(currentAccessMode);
-  const [fillBotsOption, setFillBotsOption] = useState<boolean>(roomConfig.fillWithBots);
+  const [fillBotsOption, setFillBotsOption] = useState<boolean>(false);
 
   useEffect(() => {
     setNewMaxPlayers(maxPlayers);
   }, [maxPlayers]);
 
   useEffect(() => {
-    if (activeTab !== 'create' && !isEditingNewBet) {
-      const synced = clampBetKz(roomConfig.betAmount || 500);
-      setNewBet(synced);
-      setNewBetError(null);
-    }
-  }, [roomConfig.betAmount, activeTab, isEditingNewBet]);
+    onEditingStateChange?.(isEditingField || activeTab === 'create' || activeTab === 'scan');
+  }, [isEditingField, activeTab, onEditingStateChange]);
 
   useEffect(() => {
-    if (!isEditingNewBet) {
+    return () => {
+      onEditingStateChange?.(false);
+    };
+  }, [onEditingStateChange]);
+
+  useEffect(() => {
+    if (newBet !== null && !isEditingNewBet && newBetInput !== '') {
       setNewBetInput(formatEditableRoomBet(newBet, currencyMeta.decimals, rateForCurrency));
     }
-  }, [newBet, currency, currencyMeta.decimals, rateForCurrency, isEditingNewBet]);
+  }, [newBet, currency, currencyMeta.decimals, rateForCurrency, isEditingNewBet, newBetInput]);
 
   const minLocalBet = useMemo(
     () => convertKzToCurrency(MIN_BET_KZ, currency, rates),
@@ -349,7 +357,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   }, [cameraActive, parseAndJoinInput]);
 
   useEffect(() => {
-    if (competitors.length >= maxPlayers || !roomConfig.fillWithBots) return;
+    if (!canControlRoom || competitors.length >= maxPlayers || !roomConfig.fillWithBots) return;
     const interval = setInterval(() => {
       setCountdownToAutoBot((prev) => {
         if (prev <= 1) {
@@ -360,7 +368,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [competitors.length, maxPlayers, roomConfig.fillWithBots, onAddFriendSimulation]);
+  }, [canControlRoom, competitors.length, maxPlayers, roomConfig.fillWithBots, onAddFriendSimulation]);
 
   const torneiras = calculateThreeTorneiras(roomConfig.betAmount, Math.max(2, competitors.length));
 
@@ -464,22 +472,46 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     await handleCopyLink();
   };
 
-  const rangeLabel = `${formatMoney(MIN_BET_KZ)} – ${formatMoney(MAX_BET_KZ)}`;
+  const rangeLabel = `${mpStrings.betRangeHint} ${formatMoney(MIN_BET_KZ)} – ${formatMoney(MAX_BET_KZ)}`;
+
+  const handleArenaBetInputChange = (raw: string) => {
+    setArenaBetInput(raw);
+    const normalized = raw.replace(',', '.').trim();
+    if (!normalized) {
+      setArenaBetError(null);
+      return;
+    }
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setArenaBetError(rangeLabel);
+      return;
+    }
+    const rawKz = convertCurrencyToKz(parsed, currency, rates);
+    if (rawKz < MIN_BET_KZ || rawKz > MAX_BET_KZ) {
+      setArenaBetError(rangeLabel);
+      return;
+    }
+    setArenaBetError(null);
+    onUpdateBet?.(clampBetKz(rawKz));
+  };
 
   const handleManualRoomBetChange = (raw: string) => {
     setNewBetInput(raw);
     const normalized = raw.replace(',', '.').trim();
     if (!normalized) {
+      setNewBet(null);
       setNewBetError(rangeLabel);
       return;
     }
     const parsed = Number(normalized);
     if (!Number.isFinite(parsed) || parsed <= 0) {
+      setNewBet(null);
       setNewBetError(rangeLabel);
       return;
     }
     const rawKz = convertCurrencyToKz(parsed, currency, rates);
     if (rawKz < MIN_BET_KZ || rawKz > MAX_BET_KZ) {
+      setNewBet(null);
       setNewBetError(rangeLabel);
       return;
     }
@@ -489,17 +521,22 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
 
   const handleManualRoomBetBlur = () => {
     setIsEditingNewBet(false);
+    setIsEditingField(false);
     const normalized = newBetInput.replace(',', '.').trim();
+    if (!normalized) return;
     const parsed = Number(normalized);
     if (Number.isFinite(parsed) && parsed > 0) {
-      const clampedKz = clampBetKz(convertCurrencyToKz(parsed, currency, rates));
+      const rawKz = convertCurrencyToKz(parsed, currency, rates);
+      if (rawKz < MIN_BET_KZ || rawKz > MAX_BET_KZ) {
+        setNewBet(null);
+        setNewBetError(rangeLabel);
+        return;
+      }
+      const clampedKz = clampBetKz(rawKz);
       setNewBet(clampedKz);
       setNewBetInput(formatEditableRoomBet(clampedKz, currencyMeta.decimals, rateForCurrency));
       setNewBetError(null);
-      return;
     }
-    setNewBetInput(formatEditableRoomBet(newBet, currencyMeta.decimals, rateForCurrency));
-    setNewBetError(null);
   };
 
   const applyQuickRoomBetKz = (targetKz: number) => {
@@ -514,7 +551,10 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     e.preventDefault();
     const normalized = newBetInput.replace(',', '.').trim();
     const parsed = Number(normalized);
-    const parsedKz = Number.isFinite(parsed) && parsed > 0 ? convertCurrencyToKz(parsed, currency, rates) : NaN;
+    const parsedKz =
+      normalized && Number.isFinite(parsed) && parsed > 0
+        ? convertCurrencyToKz(parsed, currency, rates)
+        : newBet ?? NaN;
 
     if (!Number.isFinite(parsedKz) || parsedKz < MIN_BET_KZ || parsedKz > MAX_BET_KZ) {
       setNewBetError(rangeLabel);
@@ -526,7 +566,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
     setNewBet(validatedBet);
 
     const cleanTitle = newTitle.trim() || 'Arena do Hamilton';
-    const cleanHost = newHost.trim() || 'Hamilton O Zero';
+    const cleanHost = newHost.trim() || playerName || 'Hamilton O Zero';
     const cleanCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
 
     const newConfig: RoomConfig = {
@@ -613,8 +653,10 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
           <input
             type="text"
             value={localNameInput}
+            onFocus={() => setIsEditingField(true)}
             onChange={(e) => setLocalNameInput(e.target.value)}
             onBlur={() => {
+              setIsEditingField(false);
               const trimmed = localNameInput.trim();
               if (trimmed) onChangePlayerName(trimmed);
             }}
@@ -727,7 +769,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                   </span>
                 </div>
               </div>
-              {onToggleAccessMode ? (
+              {onToggleAccessMode && canControlRoom ? (
                 <button
                   type="button"
                   onClick={() => onToggleAccessMode()}
@@ -750,8 +792,13 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                   </span>
                 </button>
               ) : (
-                <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-500/50 shrink-0">
-                  {t.lobby.privateBadge}
+                <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-full bg-zinc-900/90 text-amber-300 border border-amber-500/40 shrink-0 flex items-center gap-1">
+                  {currentAccessMode === 'random' ? <Shuffle size={11} /> : <Lock size={11} />}
+                  <span>
+                    {currentAccessMode === 'random'
+                      ? t.app.accessRandomBtn
+                      : t.app.accessInviteBtn}
+                  </span>
                 </span>
               )}
             </div>
@@ -898,36 +945,42 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                 </span>
               </span>
 
-              <div className="flex items-center gap-2">
-                {onUpdateMaxPlayers && (
-                  <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg p-0.5 font-mono text-[10px]">
-                    {([2, 3, 4, 5] as const).map((cap) => (
-                      <button
-                        key={cap}
-                        type="button"
-                        onClick={() => onUpdateMaxPlayers(cap)}
-                        className={`px-2 py-0.5 rounded-md font-bold cursor-pointer transition-colors ${
-                          maxPlayers === cap
-                            ? 'bg-amber-500 text-zinc-950 font-black'
-                            : 'text-zinc-400 hover:text-white'
-                        }`}
-                        title={`${cap} ${t.lobby.playersSuffix}`}
-                      >
-                        {cap}P
-                      </button>
-                    ))}
-                  </div>
-                )}
+              {canControlRoom ? (
+                <div className="flex items-center gap-2">
+                  {onUpdateMaxPlayers && (
+                    <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-lg p-0.5 font-mono text-[10px]">
+                      {([2, 3, 4, 5] as const).map((cap) => (
+                        <button
+                          key={cap}
+                          type="button"
+                          onClick={() => onUpdateMaxPlayers(cap)}
+                          className={`px-2 py-0.5 rounded-md font-bold cursor-pointer transition-colors ${
+                            maxPlayers === cap
+                              ? 'bg-amber-500 text-zinc-950 font-black'
+                              : 'text-zinc-400 hover:text-white'
+                          }`}
+                          title={`${cap} ${t.lobby.playersSuffix}`}
+                        >
+                          {cap}P
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
-                <button
-                  type="button"
-                  onClick={onAddFriendSimulation}
-                  disabled={competitors.length >= maxPlayers}
-                  className="text-[11px] font-mono font-bold text-amber-400 hover:text-amber-300 underline cursor-pointer disabled:opacity-30 disabled:no-underline"
-                >
-                  {t.lobby.simulateFriend}
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={onAddFriendSimulation}
+                    disabled={competitors.length >= maxPlayers}
+                    className="text-[11px] font-mono font-bold text-amber-400 hover:text-amber-300 underline cursor-pointer disabled:opacity-30 disabled:no-underline"
+                  >
+                    {t.lobby.simulateFriend}
+                  </button>
+                </div>
+              ) : (
+                <span className="text-[10px] font-mono text-amber-300/85">
+                  👑 {mpStrings.onlyLeaderControlsRoom}
+                </span>
+              )}
             </div>
 
             {isVoiceActive && (
@@ -1095,7 +1148,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                         </div>
                       </div>
 
-                      {!comp.isPlayer && (
+                      {!comp.isPlayer && canControlRoom && (
                         <button
                           type="button"
                           onClick={() => {
@@ -1114,7 +1167,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                   );
                 }
 
-                return (
+                return canControlRoom ? (
                   <button
                     key={`empty-${idx}`}
                     type="button"
@@ -1124,6 +1177,14 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                     <span className="text-xl mb-1">👤</span>
                     <span className="text-[10px] font-mono font-bold">{t.lobby.inviteSlot}</span>
                   </button>
+                ) : (
+                  <div
+                    key={`empty-${idx}`}
+                    className="p-2.5 min-h-[104px] rounded-2xl border border-dashed border-zinc-800 game-subplate flex flex-col items-center justify-center text-center text-zinc-600 opacity-75"
+                  >
+                    <span className="text-xl mb-1">👤</span>
+                    <span className="text-[10px] font-mono font-bold">{t.lobby.inviteSlot}</span>
+                  </div>
                 );
               })}
             </div>
@@ -1139,31 +1200,79 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             <div className="p-3 game-subplate rounded-2xl border border-amber-500/30 flex flex-col gap-2">
               <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
                 <span className="font-bold text-amber-300 uppercase tracking-wider">
-                  💰 {mpStrings.roomBetInlineLabel}
+                  💰 {mpStrings.roomBetInlineLabel} ({currencyMeta.flag} {currency})
                 </span>
                 <span className="font-black text-emerald-300 text-sm tabular-nums">
                   {formatMoney(roomConfig.betAmount)}
                 </span>
               </div>
-              {isRoomHost || connectedHumansCount <= 1 ? (
-                <div className="grid grid-cols-5 gap-1">
-                  {[50, 250, 500, 1000, 5000].map((amt) => {
-                    const active = Math.round(roomConfig.betAmount) === amt;
-                    return (
-                      <button
-                        key={amt}
-                        type="button"
-                        onClick={() => onUpdateBet(amt)}
-                        className={`py-1.5 rounded-lg text-[10px] font-mono font-bold border cursor-pointer transition-colors ${
-                          active
-                            ? 'bg-amber-500 text-zinc-950 border-amber-300 font-black'
-                            : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:bg-zinc-800'
+              {canControlRoom ? (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <div className="relative flex-1">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-amber-400 font-black font-mono">
+                        {currencyMeta.symbol}
+                      </span>
+                      <input
+                        type="number"
+                        min={Number(minLocalBet.toFixed(currencyMeta.decimals))}
+                        max={Number(maxLocalBet.toFixed(currencyMeta.decimals))}
+                        step={currencyMeta.decimals === 0 ? 1 : 0.01}
+                        value={arenaBetInput}
+                        placeholder={`${mpStrings.manualBetPlaceholder} (${formatMoney(MIN_BET_KZ)} – ${formatMoney(MAX_BET_KZ)})`}
+                        onFocus={() => setIsEditingField(true)}
+                        onBlur={() => setIsEditingField(false)}
+                        onChange={(e) => handleArenaBetInputChange(e.target.value)}
+                        className={`w-full game-panel rounded-xl pl-12 pr-8 py-2 text-zinc-100 font-mono font-black text-xs focus:outline-none ${
+                          arenaBetError ? 'border border-rose-500' : 'border border-zinc-700 focus:border-amber-400'
                         }`}
-                      >
-                        {formatMoney(amt)}
-                      </button>
-                    );
-                  })}
+                      />
+                      {arenaBetInput !== '' && (
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setArenaBetInput('');
+                            setArenaBetError(null);
+                          }}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-mono text-zinc-400 hover:text-amber-300 cursor-pointer px-1"
+                          aria-label="Clear"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {arenaBetError && (
+                    <span className="text-[10px] font-mono font-bold text-rose-400">
+                      {arenaBetError}
+                    </span>
+                  )}
+                  <div className="grid grid-cols-4 sm:grid-cols-7 gap-1">
+                    {presetChips.map((chip) => {
+                      const active = Math.abs(roomConfig.betAmount - chip.kz) <= Math.max(2, chip.kz * 0.01);
+                      return (
+                        <button
+                          key={chip.label}
+                          type="button"
+                          onClick={() => {
+                            setArenaBetInput(
+                              formatEditableRoomBet(chip.kz, currencyMeta.decimals, rateForCurrency)
+                            );
+                            setArenaBetError(null);
+                            onUpdateBet(chip.kz);
+                          }}
+                          className={`py-1.5 px-0.5 rounded-lg text-[10px] font-mono font-bold border cursor-pointer transition-colors truncate ${
+                            active
+                              ? 'bg-amber-500 text-zinc-950 border-amber-300 font-black'
+                              : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:bg-zinc-800'
+                          }`}
+                        >
+                          {chip.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               ) : (
                 <span className="text-[10px] font-mono text-amber-300/90">
@@ -1204,11 +1313,11 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
 
           <button
             type="button"
-            disabled={competitors.length < 2 || (!isRoomHost && connectedHumansCount > 1)}
+            disabled={competitors.length < 2 || !canControlRoom || Boolean(arenaBetError)}
             onClick={onStartRace}
             className="w-full py-4 rounded-2xl game-btn-gold text-zinc-950 font-black text-base uppercase tracking-wider cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed active:scale-[0.99]"
           >
-            {!isRoomHost && connectedHumansCount > 1
+            {!canControlRoom
               ? mpStrings.waitingHostToStartBtn
               : `${t.lobby.startArenaBtn} (${competitors.length}/${maxPlayers})`}
           </button>
@@ -1264,14 +1373,34 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                   max={Number(maxLocalBet.toFixed(currencyMeta.decimals))}
                   step={currencyMeta.decimals === 0 ? 1 : 0.01}
                   value={newBetInput}
-                  onFocus={() => setIsEditingNewBet(true)}
+                  placeholder={`${mpStrings.manualBetPlaceholder} (${formatMoney(MIN_BET_KZ)} – ${formatMoney(MAX_BET_KZ)})`}
+                  onFocus={() => {
+                    setIsEditingNewBet(true);
+                    setIsEditingField(true);
+                  }}
                   onChange={(e) => handleManualRoomBetChange(e.target.value)}
                   onBlur={handleManualRoomBetBlur}
-                  className={`w-full game-subplate rounded-xl pl-12 pr-3 py-2.5 text-zinc-100 font-mono font-black text-sm focus:outline-none ${
+                  className={`w-full game-subplate rounded-xl pl-12 pr-8 py-2.5 text-zinc-100 font-mono font-black text-sm focus:outline-none ${
                     newBetError ? 'border-rose-500 focus:border-rose-400' : 'focus:border-amber-500'
                   }`}
                   required
                 />
+                {newBetInput !== '' && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setIsEditingNewBet(true);
+                      setNewBet(null);
+                      setNewBetInput('');
+                      setNewBetError(rangeLabel);
+                    }}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-mono text-zinc-400 hover:text-amber-300 cursor-pointer px-1"
+                    aria-label="Clear"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
               <button
                 type="button"
@@ -1282,14 +1411,14 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => applyQuickRoomBetKz(Math.floor(newBet / 2))}
+                onClick={() => applyQuickRoomBetKz(Math.floor((newBet ?? 500) / 2))}
                 className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer shrink-0"
               >
                 ½
               </button>
               <button
                 type="button"
-                onClick={() => applyQuickRoomBetKz(newBet * 2)}
+                onClick={() => applyQuickRoomBetKz((newBet ?? 500) * 2)}
                 className="px-2.5 py-2.5 game-btn-secondary text-zinc-200 font-bold text-xs rounded-xl cursor-pointer shrink-0"
               >
                 2X
@@ -1311,7 +1440,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
 
             <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
               {presetChips.map((chip) => {
-                const isSelected = !newBetError && Math.abs(newBet - chip.kz) <= Math.max(1, chip.kz * 0.01);
+                const isSelected = newBet !== null && !newBetError && Math.abs(newBet - chip.kz) <= Math.max(1, chip.kz * 0.01);
                 return (
                   <button
                     key={chip.label}
@@ -1328,6 +1457,20 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                 );
               })}
             </div>
+
+            {newBet !== null && (
+              <div className="grid grid-cols-4 gap-1 pt-0.5">
+                {getCrossBorderStakeParity(newBet, rates, ['AOA', 'USD', 'EUR', 'BRL']).map((p) => (
+                  <div
+                    key={p.currency}
+                    className="px-1.5 py-1 rounded bg-zinc-950/70 border border-zinc-800 text-[9px] font-mono text-zinc-300 flex items-center justify-between gap-1"
+                  >
+                    <span>{p.flag}</span>
+                    <span className="truncate tabular-nums">{p.formatted}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -1526,45 +1669,60 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-500 font-mono border-t border-zinc-800/80 pt-2.5">
         <span>{t.lobby.footerNote}</span>
         <div className="flex items-center gap-3">
-          {onDeleteRoom && (
-            confirmDeleteRoom ? (
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirmDeleteRoom(false);
-                    onDeleteRoom();
-                  }}
-                  className="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold cursor-pointer"
-                >
-                  {t.lobby.deleteRoomConfirm}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDeleteRoom(false)}
-                  className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold cursor-pointer"
-                >
-                  {t.lobby.deleteRoomCancel}
-                </button>
-              </div>
-            ) : (
+          {canControlRoom ? (
+            <>
+              {onDeleteRoom && (
+                confirmDeleteRoom ? (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmDeleteRoom(false);
+                        onDeleteRoom();
+                      }}
+                      className="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold cursor-pointer"
+                    >
+                      {t.lobby.deleteRoomConfirm}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteRoom(false)}
+                      className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold cursor-pointer"
+                    >
+                      {t.lobby.deleteRoomCancel}
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteRoom(true)}
+                    className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 text-rose-300 font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Trash2 size={11} />
+                    <span>{t.lobby.deleteRoomBtn}</span>
+                  </button>
+                )
+              )}
               <button
                 type="button"
-                onClick={() => setConfirmDeleteRoom(true)}
+                onClick={onRegenerateRoomCode}
+                className="text-amber-400/80 hover:text-amber-300 underline cursor-pointer"
+              >
+                {t.lobby.changeCode} ({roomConfig.code})
+              </button>
+            </>
+          ) : (
+            onLeaveRoom && (
+              <button
+                type="button"
+                onClick={onLeaveRoom}
                 className="px-2.5 py-1 rounded-lg bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 text-rose-300 font-bold flex items-center gap-1 cursor-pointer transition-colors"
               >
-                <Trash2 size={11} />
-                <span>{t.lobby.deleteRoomBtn}</span>
+                <LogIn size={11} className="rotate-180" />
+                <span>{mpStrings.leaveRoomBtn}</span>
               </button>
             )
           )}
-          <button
-            type="button"
-            onClick={onRegenerateRoomCode}
-            className="text-amber-400/80 hover:text-amber-300 underline cursor-pointer"
-          >
-            {t.lobby.changeCode} ({roomConfig.code})
-          </button>
         </div>
       </div>
 

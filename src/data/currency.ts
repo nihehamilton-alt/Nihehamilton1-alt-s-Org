@@ -1,7 +1,7 @@
 import { CurrencyCode, ThreeTorneirasSplit } from '../types/game';
 
 export const MIN_BET_KZ = 50;
-export const MAX_BET_KZ = 100_000;
+export const MAX_BET_KZ = 5_000_000;
 export const PASSE_DO_REI_MONTHLY_KZ = 5000;
 
 export function clampBetKz(amountKz: number): number {
@@ -262,7 +262,22 @@ export interface QuickBetChip {
   label: string;
 }
 
-const BASE_KZ_CHIPS = [50, 100, 250, 500, 1000, 5000, 10000];
+const BASE_KZ_CHIPS = [50, 250, 500, 2500, 10000, 100000, 5000000];
+
+function formatCompactChipValue(val: number, decimals: number): string {
+  if (val >= 1_000_000) {
+    const m = val / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (val >= 1000) {
+    const k = val / 1000;
+    return `${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+  }
+  if (val >= 10 || decimals === 0) {
+    return `${Math.round(val)}`;
+  }
+  return val.toFixed(1);
+}
 
 export function getQuickBetChipsKz(
   currency: CurrencyCode,
@@ -273,19 +288,13 @@ export function getQuickBetChipsKz(
     if (currency === 'AOA') {
       return {
         kz,
-        label: kz >= 1000 ? `${kz / 1000}k` : `${kz}`,
+        label: formatCompactChipValue(kz, 0),
       };
     }
     const localVal = convertKzToCurrency(kz, currency, rates);
-    const compact =
-      localVal >= 1000
-        ? `${Math.round(localVal / 1000)}k`
-        : localVal >= 10 || meta.decimals === 0
-        ? `${Math.round(localVal)}`
-        : localVal.toFixed(1);
     return {
       kz,
-      label: `${meta.symbol}${compact}`,
+      label: `${meta.symbol}${formatCompactChipValue(localVal, meta.decimals)}`,
     };
   });
 }
