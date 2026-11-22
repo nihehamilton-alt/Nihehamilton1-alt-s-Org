@@ -185,6 +185,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   // Power-Ups Status
   const [activePowerUpNotice, setActivePowerUpNotice] = useState<string | null>(null);
+  const powerUpNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (powerUpNoticeTimerRef.current) {
+        clearTimeout(powerUpNoticeTimerRef.current);
+        powerUpNoticeTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Snapshot leve (~8Hz durante corrida) dos 5 corredores: movimentos e apostas em tempo real
   const [liveHudRunners, setLiveHudRunners] = useState<Competitor[]>(competitors);
@@ -1602,7 +1612,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               // Haptics unavailable on host device
             }
 
-            s.floatingTexts.push({
+            pushFloatingText(s.floatingTexts, {
               id: Date.now() + Math.random(),
               text: tRef.current.canvas.hitSlowedAlert,
               x: s.player.laneX,
@@ -1710,7 +1720,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               setActivePowerUpNotice(tRef.current.canvas.gasosaNotice);
             }
 
-            setTimeout(() => setActivePowerUpNotice(null), 2500);
+            if (powerUpNoticeTimerRef.current) {
+              clearTimeout(powerUpNoticeTimerRef.current);
+            }
+            powerUpNoticeTimerRef.current = setTimeout(() => {
+              powerUpNoticeTimerRef.current = null;
+              setActivePowerUpNotice(null);
+            }, 2500);
 
             const localizedPu = getLocalizedPowerUp(pUp.type, langRef.current);
             pushFloatingText(s.floatingTexts, {

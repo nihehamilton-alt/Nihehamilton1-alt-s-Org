@@ -190,11 +190,53 @@ function pruneRoomParticipants(room: ServerRoom): void {
   });
 }
 
+const VALID_RACE_ACTIONS = new Set(['running', 'jumping', 'sliding', 'dashing', 'stumbling']);
+const VALID_RACE_STATUSES = new Set(['idle', 'starting', 'running', 'completed']);
+
+function sanitizeRoomCode(raw: unknown, fallbackPrefix = 'ARENA'): string {
+  const cleaned = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '')
+    .slice(0, 32);
+  return cleaned || `${fallbackPrefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
+function sanitizeText(raw: unknown, fallback: string, maxLen = 48): string {
+  const cleaned = typeof raw === 'string' ? raw.trim().slice(0, maxLen) : '';
+  return cleaned || fallback;
+}
+
+function pruneStaleRooms(db: ServerDatabase): number {
+  const now = Date.now();
+  const STALE_EMPTY_ROOM_MS = 24 * 60 * 60 * 1000;
+  let removed = 0;
+  for (const [code, room] of Object.entries(db.rooms)) {
+    if (code === 'HAMILTON-REI') continue;
+    pruneRoomParticipants(room);
+    if (room.participants.length === 0 && now - (room.updatedAt || room.createdAt || 0) > STALE_EMPTY_ROOM_MS) {
+      delete db.rooms[code];
+      removed++;
+    }
+  }
+  return removed;
+}
+
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'microphone=(self), camera=(self)');
+    next();
+  });
   app.use(express.json({ limit: '2mb' }));
 
   const db = ensureDb();
+  if (pruneStaleRooms(db) > 0) {
+    saveDb(db);
+  }
   const LANE_ORDER = [2, 1, 3, 0, 4];
 
   const roomSockets = new Map<string, Set<WebSocket>>();
@@ -844,20 +886,59 @@ async function startServer() {
         return;
       }
 
+      if (incoming.length > 200) {
+        res.status(400).json({ ok: false, error: 'Lote excede o limite máximo de 200 registos.' });
+        return;
+      }
+
       const existingIds = new Set(db.matches.map((m) => m.id));
       const syncedIds: string[] = [];
       const now = Date.now();
 
       for (const rec of incoming) {
-        if (!rec || !rec.id) continue;
-        syncedIds.push(rec.id);
-        if (!existingIds.has(rec.id)) {
-          db.matches.unshift({
-            ...rec,
-            synced: true,
+        if (!rec || typeof rec !== 'object' || typeof rec.id !== 'string') continue;
+        const cleanId = rec.id.trim().slice(0, 96);
+        if (!cleanId) continue;
+        syncedIds.push(cleanId);
+        if (!existingIds.has(cleanId)) {
+          const safeTs =
+            typeof rec.timestamp === 'number' && Number.isFinite(rec.timestamp)
+              ? Math.max(0, Math.min(now + 60_000, Math.round(rec.timestamp)))
+              : now;
+          const cleanMatch: MatchRecord = {
+            id: cleanId,
+            timestamp: safeTs,
             syncedAt: now,
-          });
-          existingIds.add(rec.id);
+            roomCode: sanitizeRoomCode(rec.roomCode, 'SOLO'),
+            roomTitle: sanitizeText(rec.roomTitle, 'Arena Rei Run', 64),
+            betAmount: clampRoomBet(rec.betAmount, 500),
+            playerRank:
+              typeof rec.playerRank === 'number' && Number.isFinite(rec.playerRank)
+                ? Math.max(1, Math.min(5, Math.round(rec.playerRank)))
+                : 5,
+            distanceMeters:
+              typeof rec.distanceMeters === 'number' && Number.isFinite(rec.distanceMeters)
+                ? Math.max(0, Math.min(100_000, Math.round(rec.distanceMeters)))
+                : 0,
+            coinsCollected:
+              typeof rec.coinsCollected === 'number' && Number.isFinite(rec.coinsCollected)
+                ? Math.max(0, Math.min(10_000, Math.round(rec.coinsCollected)))
+                : 0,
+            prizeKz:
+              typeof rec.prizeKz === 'number' && Number.isFinite(rec.prizeKz)
+                ? Math.max(0, Math.min(50_000_000, Math.round(rec.prizeKz)))
+                : 0,
+            streak:
+              typeof rec.streak === 'number' && Number.isFinite(rec.streak)
+                ? Math.max(0, Math.min(10_000, Math.round(rec.streak)))
+                : 0,
+            synced: true,
+            deviceId: typeof rec.deviceId === 'string' ? rec.deviceId.trim().slice(0, 64) : undefined,
+            deviceLabel:
+              typeof rec.deviceLabel === 'string' ? rec.deviceLabel.trim().slice(0, 48) : undefined,
+          };
+          db.matches.unshift(cleanMatch);
+          existingIds.add(cleanId);
         }
       }
 
@@ -932,19 +1013,17 @@ async function startServer() {
       player?: Partial<RoomParticipant>;
     };
 
-    const code = (body.code || `ARENA-${Math.floor(1000 + Math.random() * 9000)}`)
-      .trim()
-      .toUpperCase();
+    const code = sanitizeRoomCode(body.code, 'ARENA');
     const now = Date.now();
     const requestedMax = clampMaxPlayers(body.maxPlayers, 5);
-    const callerId = (body.creatorId || body.requesterId || body.player?.id || '').trim() || undefined;
+    const callerId = (body.creatorId || body.requesterId || body.player?.id || '').trim().slice(0, 64) || undefined;
 
     let room = db.rooms[code];
     if (!room) {
       room = {
         code,
-        title: (body.title || 'Arena do Hamilton').trim(),
-        hostName: (body.hostName || body.player?.name || 'Hamilton O Zero').trim(),
+        title: sanitizeText(body.title, 'Arena do Hamilton', 64),
+        hostName: sanitizeText(body.hostName || body.player?.name, 'Hamilton O Zero', 40),
         hostId: callerId,
         creatorId: callerId,
         maxPlayers: requestedMax,
@@ -970,8 +1049,8 @@ async function startServer() {
           room.creatorId = callerId;
           room.hostId = callerId;
         }
-        if (body.title) room.title = body.title.trim();
-        if (body.hostName) room.hostName = body.hostName.trim();
+        if (body.title) room.title = sanitizeText(body.title, room.title, 64);
+        if (body.hostName) room.hostName = sanitizeText(body.hostName, room.hostName, 40);
         if (typeof body.maxPlayers === 'number') {
           room.maxPlayers = clampMaxPlayers(body.maxPlayers, room.maxPlayers || 5);
         }
@@ -998,11 +1077,11 @@ async function startServer() {
         room.hostId = pid;
       }
       const participant: RoomParticipant = {
-        id: pid,
-        name: body.player.name || room.hostName,
-        avatar: body.player.avatar || '👑',
-        avatarId: body.player.avatarId || 'rei-zero',
-        color: body.player.color || '#f59e0b',
+        id: pid.slice(0, 64),
+        name: sanitizeText(body.player.name, room.hostName, 40),
+        avatar: sanitizeText(body.player.avatar, '👑', 8),
+        avatarId: sanitizeText(body.player.avatarId, 'rei-zero', 32),
+        color: sanitizeText(body.player.color, '#f59e0b', 24),
         isHost: (room.creatorId || room.hostId) === pid,
         joinedAt: idx >= 0 ? room.participants[idx].joinedAt : now,
         lastSeenAt: now,
@@ -1132,7 +1211,7 @@ async function startServer() {
   });
 
   app.post('/api/rooms/:code/join', (req: Request, res: Response) => {
-    const code = String(req.params.code || '').trim().toUpperCase();
+    const code = sanitizeRoomCode(req.params.code, 'ARENA');
     const body = req.body as {
       title?: string;
       hostName?: string;
@@ -1148,11 +1227,11 @@ async function startServer() {
 
     let room = db.rooms[code];
     if (!room) {
-      const firstId = body.player?.id?.trim();
+      const firstId = body.player?.id?.trim().slice(0, 64);
       room = {
         code,
-        title: (body.title || `Arena ${code}`).trim(),
-        hostName: (body.hostName || body.player?.name || 'Anfitrião').trim(),
+        title: sanitizeText(body.title, `Arena ${code}`, 64),
+        hostName: sanitizeText(body.hostName || body.player?.name, 'Anfitrião', 40),
         hostId: firstId,
         creatorId: body.viaInvite ? undefined : firstId,
         maxPlayers: clampMaxPlayers(body.maxPlayers, 5),
@@ -1360,20 +1439,27 @@ async function startServer() {
     };
 
     const now = Date.now();
-    if (body.playerId) {
-      const participant = room.participants.find((p) => p.id === body.playerId);
-      if (participant) {
-        if (typeof body.progressDistance === 'number') {
-          participant.progressDistance = body.progressDistance;
+    if (typeof body.playerId === 'string' && body.playerId.trim()) {
+      const pid = body.playerId.trim();
+      const participant = room.participants.find((p) => p.id === pid);
+      if (participant && !participant.isSpectating) {
+        if (typeof body.progressDistance === 'number' && Number.isFinite(body.progressDistance)) {
+          participant.progressDistance = Math.max(0, Math.min(100_000, body.progressDistance));
         }
-        if (typeof body.lane === 'number') participant.lane = body.lane;
-        if (typeof body.action === 'string') participant.action = body.action;
-        if (typeof body.jumpY === 'number') participant.jumpY = body.jumpY;
+        if (typeof body.lane === 'number' && Number.isFinite(body.lane)) {
+          participant.lane = Math.max(0, Math.min(4, Math.round(body.lane)));
+        }
+        if (typeof body.action === 'string' && VALID_RACE_ACTIONS.has(body.action)) {
+          participant.action = body.action;
+        }
+        if (typeof body.jumpY === 'number' && Number.isFinite(body.jumpY)) {
+          participant.jumpY = Math.max(0, Math.min(500, body.jumpY));
+        }
         participant.lastSeenAt = now;
       }
     }
 
-    if (body.raceStatus) {
+    if (typeof body.raceStatus === 'string' && VALID_RACE_STATUSES.has(body.raceStatus)) {
       room.raceStatus = body.raceStatus;
     }
     room.updatedAt = now;
@@ -1708,6 +1794,8 @@ async function startServer() {
 
   const wss = new WebSocketServer({ noServer: true });
   const roomWss = new WebSocketServer({ noServer: true });
+  const wsAliveMap = new WeakMap<WebSocket, boolean>();
+
   httpServer.on('upgrade', (req, socket, head) => {
     try {
       const pathname = new URL(req.url || '/', 'http://localhost').pathname;
@@ -1719,6 +1807,8 @@ async function startServer() {
         roomWss.handleUpgrade(req, socket, head, (ws) => {
           roomWss.emit('connection', ws, req);
         });
+      } else if (disableHmr || pathname !== '/') {
+        socket.destroy();
       }
     } catch {
       socket.destroy();
@@ -1760,6 +1850,10 @@ async function startServer() {
   };
 
   roomWss.on('connection', (ws: WebSocket) => {
+    wsAliveMap.set(ws, true);
+    ws.on('pong', () => {
+      wsAliveMap.set(ws, true);
+    });
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(String(raw)) as {
@@ -2190,16 +2284,24 @@ async function startServer() {
           if (room.raceStatus === 'starting') {
             room.raceStatus = 'running';
           }
-          if (typeof msg.progressDistance === 'number') {
-            participant.progressDistance = Math.max(0, msg.progressDistance);
+          if (typeof msg.progressDistance === 'number' && Number.isFinite(msg.progressDistance)) {
+            participant.progressDistance = Math.max(0, Math.min(100_000, msg.progressDistance));
           }
-          if (typeof msg.lane === 'number') participant.lane = Math.max(0, Math.min(4, Math.round(msg.lane)));
-          if (typeof msg.targetLane === 'number') {
+          if (typeof msg.lane === 'number' && Number.isFinite(msg.lane)) {
+            participant.lane = Math.max(0, Math.min(4, Math.round(msg.lane)));
+          }
+          if (typeof msg.targetLane === 'number' && Number.isFinite(msg.targetLane)) {
             participant.targetLane = Math.max(0, Math.min(4, Math.round(msg.targetLane)));
           }
-          if (typeof msg.laneX === 'number') participant.laneX = msg.laneX;
-          if (typeof msg.action === 'string') participant.action = msg.action;
-          if (typeof msg.jumpY === 'number') participant.jumpY = Math.max(0, msg.jumpY);
+          if (typeof msg.laneX === 'number' && Number.isFinite(msg.laneX)) {
+            participant.laneX = Math.max(-200, Math.min(2000, msg.laneX));
+          }
+          if (typeof msg.action === 'string' && VALID_RACE_ACTIONS.has(msg.action)) {
+            participant.action = msg.action;
+          }
+          if (typeof msg.jumpY === 'number' && Number.isFinite(msg.jumpY)) {
+            participant.jumpY = Math.max(0, Math.min(500, msg.jumpY));
+          }
           if (typeof msg.stumbling === 'boolean') participant.stumbling = msg.stumbling;
           if (typeof msg.finished === 'boolean') participant.finished = msg.finished;
           participant.lastSeenAt = Date.now();
@@ -2323,6 +2425,10 @@ async function startServer() {
   });
 
   wss.on('connection', (ws: WebSocket) => {
+    wsAliveMap.set(ws, true);
+    ws.on('pong', () => {
+      wsAliveMap.set(ws, true);
+    });
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(String(raw)) as {
@@ -2461,6 +2567,46 @@ async function startServer() {
       removeVoicePeer(ws);
     });
   });
+
+  const wsHeartbeatTimer = setInterval(() => {
+    const checkPool = (pool: WebSocketServer) => {
+      for (const client of pool.clients) {
+        if (wsAliveMap.get(client) === false) {
+          client.terminate();
+          continue;
+        }
+        wsAliveMap.set(client, false);
+        try {
+          client.ping();
+        } catch {
+          client.terminate();
+        }
+      }
+    };
+    checkPool(roomWss);
+    checkPool(wss);
+  }, 25_000);
+  wsHeartbeatTimer.unref();
+
+  const roomPruneTimer = setInterval(() => {
+    if (pruneStaleRooms(db) > 0) {
+      saveDb(db);
+    }
+  }, 10 * 60 * 1000);
+  roomPruneTimer.unref();
+
+  const shutdownGracefully = () => {
+    clearInterval(wsHeartbeatTimer);
+    clearInterval(roomPruneTimer);
+    for (const ctrl of roomFinishControl.values()) {
+      if (ctrl.timer) clearTimeout(ctrl.timer);
+    }
+    roomFinishControl.clear();
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.once('SIGINT', shutdownGracefully);
+  process.once('SIGTERM', shutdownGracefully);
 
   httpServer.listen(PORT, config.host, () => {
     console.log(

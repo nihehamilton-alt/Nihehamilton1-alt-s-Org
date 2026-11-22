@@ -479,7 +479,7 @@ class SoundEngine {
     osc.stop(now + 0.22);
   }
 
-  // Sirene de Entrada no Modo Rei Difícil (30s)
+  // Sirene de Entrada no Modo Rei Difícil (20s)
   playHardModeSiren() {
     if (!this.enabled || this.volume <= 0) return;
     this.initContext();

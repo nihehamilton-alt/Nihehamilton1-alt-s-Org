@@ -117,6 +117,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         activeSpeakersCount: 'Active speakers',
         muteAllBtn: 'Mute All',
         allMutedBadge: 'All Muted',
+        unmuteAllBtn: 'Unmute Audio',
         muteAllBanner: 'All incoming voice audio muted · Connected in lobby',
         muteAllTip: 'Instantly mute or unmute all incoming voice chat audio without leaving the lobby',
       };
@@ -165,6 +166,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         activeSpeakersCount: 'Hablando ahora',
         muteAllBtn: 'Silenciar Todos',
         allMutedBadge: 'Todos Silenciados',
+        unmuteAllBtn: 'Activar Audio',
         muteAllBanner: 'Todo el audio entrante silenciado · Sigues en la sala',
         muteAllTip: 'Silencia o activa todo el audio entrante del chat sin salir de la sala',
       };
@@ -213,6 +215,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
         activeSpeakersCount: 'Orateurs actifs',
         muteAllBtn: 'Couper Tous',
         allMutedBadge: 'Tous Coupés',
+        unmuteAllBtn: 'Réactiver Audio',
         muteAllBanner: 'Tout l’audio vocal entrant est coupé · Toujours dans le salon',
         muteAllTip: 'Couper ou réactiver tout l’audio vocal entrant sans quitter le salon',
       };
@@ -260,6 +263,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
       activeSpeakersCount: 'Oradores ativos',
       muteAllBtn: 'Silenciar Todos',
       allMutedBadge: 'Todos Silenciados',
+      unmuteAllBtn: 'Reativar Som',
       muteAllBanner: 'Áudio de voz de todos os jogadores silenciado · Permanece na sala',
       muteAllTip: 'Silenciar ou reativar todo o áudio de voz recebido sem sair da sala',
     };
@@ -637,7 +641,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
               onClick={toggleDeafen}
               className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-rose-500/30 hover:bg-rose-500/45 border border-rose-400/55 text-rose-100 shrink-0 cursor-pointer"
             >
-              {audioUiLabels.unmuteMicBtn}
+              {audioUiLabels.unmuteAllBtn}
             </button>
           </div>
         )}
@@ -1030,7 +1034,7 @@ export const VoiceChatPanel: React.FC<VoiceChatPanelProps> = ({ variant, roomCod
             onClick={toggleDeafen}
             className="px-2 py-0.5 rounded-md bg-rose-500/30 hover:bg-rose-500/45 border border-rose-400/55 text-[10px] uppercase tracking-wider text-rose-100 shrink-0 cursor-pointer"
           >
-            {audioUiLabels.unmuteMicBtn}
+            {audioUiLabels.unmuteAllBtn}
           </button>
         </div>
       )}

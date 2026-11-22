@@ -368,8 +368,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBackToGame }) => {
           : 100000;
       const realBal =
         typeof window !== 'undefined'
-          ? Math.floor(parseFloat(localStorage.getItem('rei_zero_real_balance') || '25000'))
-          : 25000;
+          ? Math.floor(parseFloat(localStorage.getItem('rei_zero_real_balance') || '0'))
+          : 0;
       const top3Streak =
         typeof window !== 'undefined'
           ? parseInt(localStorage.getItem('rei_zero_top3_streak') || '0', 10) || 0

@@ -7,7 +7,7 @@
 ## 1. CONCEITO GERAL E FILOSOFIA (100% HABILIDADE)
 - **Dinâmica Competitiva:** Um jogo Skill-Betting Runner Multiplayer em tempo real para 5 jogadores simultâneos.
 - **Regra de Ouro:** Zero sorte, zero pay-to-win e sem vidas ou eliminações por dano. Os avatares não morrem; a vitória é decidida estritamente pela habilidade pura, reflexos rápidos nos desvios e por quem cruzar a meta primeiro.
-- **Duração da Partida:** Exatamente 60 segundos por partida até o jogador alcançar o Trono Real na meta.
+- **Duração da Partida:** Exatamente 40 segundos por partida até o jogador alcançar o Trono Real na meta.
 - **Modos e Personalização:**
   - Alternância fluida nas configurações entre **Modo 2D** e **Modo 3D (Three.js)**.
   - Alternância entre **Modo Dia** (Marginal ensolarada) e **Modo Noite** (Neon urbano de Luanda).
@@ -28,8 +28,8 @@
   - Tecla `S` ou `↓` (Agachar).
   - Tecla `Shift` (Dash).
 - **Dificuldade Progressiva (Waves):**
-  - 0 a 30 segundos: Ritmo Inicial (Fácil).
-  - 30 a 60 segundos: Ritmo Urbano Intenso / **MODO REI DIFÍCIL**.
+  - 0 a 20 segundos: Ritmo Inicial (Fácil).
+  - 20 a 40 segundos: Ritmo Urbano Intenso / **MODO REI DIFÍCIL**.
 
 ---
 
@@ -84,7 +84,7 @@
   - **10% de Royalties para o CRIADOR REI ZERO**
 - **Loja e Passe do Rei:**
   - Venda de Skins (5% para o Criador)
-  - Passe do Rei (2.000 KZ/mês com 5% de royalties para o Criador).
+  - Passe do Rei (5.000 KZ/mês com 5% de royalties para o Criador).
 - **Financeiro Global:** Sistema de conversão automática de moedas (Kz, R$, EUR, USD).
 
 ---

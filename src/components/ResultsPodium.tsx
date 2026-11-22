@@ -562,7 +562,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           )}
           <button
             type="button"
-            onClick={onBackToLobby}
+            onClick={handleManualExitToLobby}
             className="p-2 px-2.5 rounded-xl game-btn-secondary text-zinc-300 hover:text-amber-300 cursor-pointer flex items-center gap-1 text-xs font-mono"
             title={t.podium.mainMenuBtn}
           >
@@ -1151,10 +1151,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
               type="button"
-              onClick={() => {
-                cancelAutoReturn();
-                onBackToLobby();
-              }}
+              onClick={handleManualExitToLobby}
               className="py-3 px-2 rounded-2xl game-btn-secondary text-zinc-100 font-bold text-xs uppercase tracking-wider cursor-pointer flex items-center justify-center gap-1.5"
             >
               <span>🏠</span>
@@ -1166,6 +1163,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
               type="button"
               onClick={() => {
                 cancelAutoReturn();
+                sounds.stopCelebrationAudio();
                 if (canPlayAgain) {
                   onPlayAgain();
                 } else {
