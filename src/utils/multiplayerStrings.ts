@@ -37,6 +37,14 @@ export interface MultiplayerStrings {
   actionDashing: string;
   actionStumbling: string;
   roomBetInlineLabel: string;
+  watchLiveRaceBtn: string;
+  raceInProgressBanner: string;
+  ghostObserverBadge: string;
+  followingRunnerPrefix: string;
+  autoLeaderLabel: string;
+  noBetSpectatorNote: string;
+  exitSpectatorBtn: string;
+  spectatorResultsBadge: string;
 }
 
 const PT_STRINGS: MultiplayerStrings = {
@@ -78,6 +86,14 @@ const PT_STRINGS: MultiplayerStrings = {
   actionDashing: 'Dash!',
   actionStumbling: 'Tropeçou',
   roomBetInlineLabel: 'Aposta da Sala:',
+  watchLiveRaceBtn: 'Assistir Corrida ao Vivo (Fantasma)',
+  raceInProgressBanner: 'Corrida ao vivo a decorrer! Observa como Fantasma sem apostar.',
+  ghostObserverBadge: 'OBSERVADOR FANTASMA',
+  followingRunnerPrefix: 'A seguir:',
+  autoLeaderLabel: 'Líder (Auto)',
+  noBetSpectatorNote: 'Sem aposta ativa',
+  exitSpectatorBtn: 'Sair do Fantasma',
+  spectatorResultsBadge: 'Modo Fantasma · Corrida observada sem aposta',
 };
 
 const EN_STRINGS: MultiplayerStrings = {
@@ -119,6 +135,14 @@ const EN_STRINGS: MultiplayerStrings = {
   actionDashing: 'Dash!',
   actionStumbling: 'Stumbled',
   roomBetInlineLabel: 'Room Bet:',
+  watchLiveRaceBtn: 'Watch Live Race (Ghost)',
+  raceInProgressBanner: 'Live race in progress! Observe as a Ghost with no bet.',
+  ghostObserverBadge: 'GHOST OBSERVER',
+  followingRunnerPrefix: 'Following:',
+  autoLeaderLabel: 'Leader (Auto)',
+  noBetSpectatorNote: 'No bet active',
+  exitSpectatorBtn: 'Exit Ghost',
+  spectatorResultsBadge: 'Ghost Mode · Observed race with no bet',
 };
 
 const ES_STRINGS: MultiplayerStrings = {
@@ -160,6 +184,14 @@ const ES_STRINGS: MultiplayerStrings = {
   actionDashing: '¡Dash!',
   actionStumbling: 'Tropezó',
   roomBetInlineLabel: 'Apuesta de Sala:',
+  watchLiveRaceBtn: 'Ver Carrera en Vivo (Fantasma)',
+  raceInProgressBanner: '¡Carrera en vivo en curso! Observa como Fantasma sin apostar.',
+  ghostObserverBadge: 'OBSERVADOR FANTASMA',
+  followingRunnerPrefix: 'Siguiendo a:',
+  autoLeaderLabel: 'Líder (Auto)',
+  noBetSpectatorNote: 'Sin apuesta activa',
+  exitSpectatorBtn: 'Salir de Fantasma',
+  spectatorResultsBadge: 'Modo Fantasma · Carrera observada sin apuesta',
 };
 
 const FR_STRINGS: MultiplayerStrings = {
@@ -201,6 +233,14 @@ const FR_STRINGS: MultiplayerStrings = {
   actionDashing: 'Dash !',
   actionStumbling: 'Trébuché',
   roomBetInlineLabel: 'Mise de la salle :',
+  watchLiveRaceBtn: 'Regarder la Course (Fantôme)',
+  raceInProgressBanner: 'Course en direct ! Observez en Fantôme sans miser.',
+  ghostObserverBadge: 'OBSERVATEUR FANTÔME',
+  followingRunnerPrefix: 'Suivi :',
+  autoLeaderLabel: 'Leader (Auto)',
+  noBetSpectatorNote: 'Aucune mise active',
+  exitSpectatorBtn: 'Quitter Fantôme',
+  spectatorResultsBadge: 'Mode Fantôme · Course observée sans mise',
 };
 
 export function getMultiplayerStrings(lang: SupportedLanguage): MultiplayerStrings {

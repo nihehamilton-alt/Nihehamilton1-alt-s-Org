@@ -36,6 +36,7 @@ interface ResultsPodiumProps {
   showPodium?: boolean;
   canPlayAgain?: boolean;
   returnTarget?: 'room' | 'lobby';
+  isSpectator?: boolean;
 }
 
 // ============================================================================
@@ -155,11 +156,13 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
   showPodium = true,
   canPlayAgain = true,
   returnTarget = 'lobby',
+  isSpectator = false,
 }) => {
   const { lang, t, formatMoney } = useI18n();
   const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
   const shouldReduceMotion = useReducedMotion();
   const [activeTab, setActiveTab] = useState<'ceremony' | 'podium' | 'both'>('ceremony');
+  const isCeremonyCalmMode = activeTab === 'ceremony';
   const [shareState, setShareState] = useState<'idle' | 'shared' | 'copied'>('idle');
   const [ceremonyFinished, setCeremonyFinished] = useState<boolean>(false);
   const [autoReturnSeconds, setAutoReturnSeconds] = useState<number | null>(null);
@@ -214,7 +217,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
     if (!podiumAudioPlayedRef.current) {
       podiumAudioPlayedRef.current = true;
       try {
-        if (userRank === 1) {
+        if (!isSpectator && userRank === 1) {
           sounds.playFirstPlaceVictoryCelebration();
         } else {
           sounds.playCelebratorySound(false);
@@ -222,6 +225,11 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
       } catch (e) {
         console.error('Erro ao acionar som comemorativo no Pódio:', e);
       }
+    }
+
+    // Mantém o ecrã 100% calmo e estático durante a cerimónia de coroação (sem rajadas a piscar por cima do palco 3D)
+    if (isCeremonyCalmMode || isSpectator) {
+      return;
     }
 
     try {
@@ -275,7 +283,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
       clearTimeout(secondBurst);
       clearTimeout(thirdBurst);
     };
-  }, [showPodium, userRank]);
+  }, [showPodium, userRank, isCeremonyCalmMode, isSpectator]);
 
   useEffect(() => {
     return () => {
@@ -283,18 +291,20 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
     };
   }, []);
 
-  // Inicia contagem regressiva de encerramento apenas após a cerimónia 3D de coroação concluir
+  // Inicia contagem regressiva de encerramento após a cerimónia 3D concluir (retorno rápido em modo cerimónia)
   useEffect(() => {
     if (!showPodium || !ceremonyFinished || autoReturnCancelledRef.current) return;
 
-    setAutoReturnSeconds(8);
+    const totalWaitSec = activeTab === 'ceremony' ? 2 : 8;
+    const totalWaitMs = activeTab === 'ceremony' ? 1800 : 8000;
+    setAutoReturnSeconds(totalWaitSec);
     autoReturnIntervalRef.current = setInterval(() => {
       setAutoReturnSeconds((prev) => (prev !== null && prev > 1 ? prev - 1 : prev));
     }, 1000);
 
     autoReturnRef.current = setTimeout(() => {
       onBackToLobbyRef.current();
-    }, 8000);
+    }, totalWaitMs);
 
     return () => {
       if (autoReturnRef.current) {
@@ -306,7 +316,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         autoReturnIntervalRef.current = null;
       }
     };
-  }, [showPodium, ceremonyFinished]);
+  }, [showPodium, ceremonyFinished, activeTab]);
 
   const sorted = useMemo(() => {
     if (authoritativeRankings && authoritativeRankings.length > 0) {
@@ -462,15 +472,19 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
       ? 'border-amber-600/65 shadow-[0_0_55px_rgba(217,119,6,0.26)]'
       : 'border-zinc-700/70 shadow-[0_0_40px_rgba(24,24,27,0.7)]';
 
+  const skipVerticalMotion = Boolean(shouldReduceMotion) || isCeremonyCalmMode;
+
   return (
     <motion.div
-      initial={shouldReduceMotion ? false : { opacity: 0 }}
+      initial={skipVerticalMotion ? false : { opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.28, ease: 'easeOut' }}
-      className={`fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-hidden podium-bg-base ${rankBackdropClass}`}
+      transition={{ duration: 0.22, ease: 'easeOut' }}
+      className={`fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-hidden podium-bg-base ${
+        isCeremonyCalmMode ? 'podium-ceremony-still' : rankBackdropClass
+      }`}
     >
-      {userRank === 1 && (
+      {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
         <>
           <div aria-hidden="true" className="podium-rank1-shimmer" />
           <div aria-hidden="true" className="podium-rank1-flare" />
@@ -480,50 +494,57 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         </>
       )}
 
-      <CelebrationExplosion key={explosionKey} playAudio={false} />
+      {!isCeremonyCalmMode && !isSpectator && (
+        <CelebrationExplosion key={explosionKey} playAudio={false} />
+      )}
 
-      {userRank === 1 && <FirstPlaceParticleExplosion burstKey={explosionKey} />}
+      {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
+        <FirstPlaceParticleExplosion burstKey={explosionKey} />
+      )}
 
-      {userRank <= 2 && <FramerConfettiOverlay />}
+      {!isCeremonyCalmMode && !isSpectator && userRank <= 2 && <FramerConfettiOverlay />}
 
       <motion.div
-        variants={shouldReduceMotion ? undefined : podiumContainerVariants}
-        initial={shouldReduceMotion ? false : 'hidden'}
-        animate="visible"
-        exit={shouldReduceMotion ? undefined : { opacity: 0, y: 40 }}
-        style={{ willChange: 'transform, opacity' }}
+        variants={skipVerticalMotion ? undefined : podiumContainerVariants}
+        initial={skipVerticalMotion ? { opacity: 1 } : 'hidden'}
+        animate={skipVerticalMotion ? { opacity: 1 } : 'visible'}
+        exit={skipVerticalMotion ? { opacity: 0 } : { opacity: 0, y: 40 }}
         className={`relative z-10 game-panel-gold rounded-3xl max-w-2xl w-full p-4 sm:p-6 flex flex-col gap-3.5 text-zinc-100 my-auto max-h-[92vh] overflow-y-auto overscroll-contain ${rankModalAccentClass}`}
       >
         <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-80 h-40 bg-amber-500/20 rounded-full blur-3xl pointer-events-none" />
         <div className="absolute -bottom-24 right-1/4 w-72 h-36 bg-yellow-500/15 rounded-full blur-3xl pointer-events-none" />
 
-        {userRank === 1 && <Top1GoldenBurst burstKey={explosionKey} variant="overlay" />}
+        {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
+          <Top1GoldenBurst burstKey={explosionKey} variant="overlay" />
+        )}
 
         {/* Botões de Ação no topo direito */}
         <div className="absolute top-4 right-4 z-30 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleShareResult}
-            className={`p-2 px-2.5 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono font-bold shadow ${
-              shareState !== 'idle'
-                ? 'bg-emerald-950/90 border border-emerald-400 text-emerald-300'
-                : 'game-btn-secondary text-amber-300 hover:text-amber-200'
-            }`}
-            title={t.podium.shareBtn}
-          >
-            {shareState !== 'idle' ? (
-              <Check size={14} className="text-emerald-400" />
-            ) : (
-              <Share2 size={14} />
-            )}
-            <span className="hidden sm:inline">
-              {shareState === 'shared'
-                ? t.podium.sharedBtn
-                : shareState === 'copied'
-                ? t.podium.copiedBtn
-                : t.podium.shareBtn}
-            </span>
-          </button>
+          {!isSpectator && (
+            <button
+              type="button"
+              onClick={handleShareResult}
+              className={`p-2 px-2.5 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 text-xs font-mono font-bold shadow ${
+                shareState !== 'idle'
+                  ? 'bg-emerald-950/90 border border-emerald-400 text-emerald-300'
+                  : 'game-btn-secondary text-amber-300 hover:text-amber-200'
+              }`}
+              title={t.podium.shareBtn}
+            >
+              {shareState !== 'idle' ? (
+                <Check size={14} className="text-emerald-400" />
+              ) : (
+                <Share2 size={14} />
+              )}
+              <span className="hidden sm:inline">
+                {shareState === 'shared'
+                  ? t.podium.sharedBtn
+                  : shareState === 'copied'
+                  ? t.podium.copiedBtn
+                  : t.podium.shareBtn}
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onBackToLobby}
@@ -535,7 +556,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           </button>
         </div>
 
-        {userRank === 1 && (
+        {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
           <div
             aria-hidden="true"
             className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[520px] h-[520px] bg-[radial-gradient(circle,rgba(245,158,11,0.08)_0%,transparent_65%)] pointer-events-none -z-10"
@@ -544,19 +565,19 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
 
         {/* 1. Header com Coroa Real */}
         <motion.div
-          variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
+          variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}
           className="flex flex-col items-center text-center relative z-10 pt-6 sm:pt-0"
         >
           <motion.div
-            initial={shouldReduceMotion ? false : { y: 26, scale: 0.55, opacity: 0, rotate: -18 }}
+            initial={skipVerticalMotion ? false : { y: 26, scale: 0.55, opacity: 0, rotate: -18 }}
             animate={{ y: 0, scale: 1, opacity: 1, rotate: 0 }}
             transition={{ type: 'spring', stiffness: 360, damping: 18, delay: 0.08 }}
             className="relative mb-1"
           >
             <span className="text-4xl sm:text-5xl filter drop-shadow-[0_0_20px_rgba(245,158,11,0.9)]">
-              👑
+              {isSpectator ? '👻' : '👑'}
             </span>
-            {userRank === 1 && (
+            {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
               <motion.span
                 animate={{ scale: [1, 1.3, 1], opacity: [0.7, 1, 0.7] }}
                 transition={{ repeat: Infinity, duration: 1.8, type: 'tween', ease: 'easeInOut' }}
@@ -568,12 +589,16 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           </motion.div>
 
           <motion.h2
-            initial={shouldReduceMotion ? false : { opacity: 0, y: 24 }}
+            initial={skipVerticalMotion ? false : { opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ ...PODIUM_ITEM_SPRING, delay: 0.12 }}
             className="text-xl sm:text-2xl md:text-3xl font-black uppercase tracking-wider text-amber-400 font-sans"
           >
-            {userRank === 1
+            {isSpectator
+              ? first
+                ? `🏆 ${first.name}`
+                : mpStrings.spectatorResultsBadge
+              : userRank === 1
               ? t.podium.rank1Title
               : userRank === 2
               ? t.podium.rank2Title
@@ -583,7 +608,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           </motion.h2>
 
           <motion.p
-            initial={shouldReduceMotion ? false : { opacity: 0, y: 16 }}
+            initial={skipVerticalMotion ? false : { opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ ...PODIUM_ITEM_SPRING, delay: 0.16 }}
             className="text-[11px] font-mono text-zinc-400 mt-0.5"
@@ -591,107 +616,114 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
             &quot;{t.officialPhrase}&quot;
           </motion.p>
 
-          {streak > 0 && (
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              transition={{ delay: 0.28, type: 'spring' }}
-              className={`my-1 px-3.5 py-1 rounded-full border flex items-center gap-1.5 font-mono text-xs font-bold ${
-                streak >= 3
-                  ? 'bg-gradient-to-r from-amber-500/25 via-orange-500/25 to-red-500/25 border-orange-400 text-orange-300 shadow-[0_0_15px_rgba(249,115,22,0.4)]'
-                  : 'game-subplate border-amber-500/40 text-amber-300'
-              }`}
-            >
-              <span className="text-sm">🔥</span>
-              <span>
-                {t.podium.streakLabel} <strong>{streak}x {t.podium.consecutiveSuffix}</strong>
+          {isSpectator ? (
+            <div className="my-2 px-4 py-1.5 rounded-xl bg-sky-950/75 border border-sky-400/55 text-sky-200 text-xs font-mono font-bold flex flex-col items-center gap-0.5">
+              <span>👻 {mpStrings.spectatorResultsBadge}</span>
+              <span className="text-[10px] text-sky-300/90 font-normal">
+                {mpStrings.noBetSpectatorNote}
               </span>
-              {streak >= 3 && (
-                <span className="text-[10px] bg-red-600 text-white px-1.5 py-0.5 rounded font-black">
-                  {t.podium.hotBadge}
-                </span>
-              )}
-            </motion.div>
-          )}
-
-          {userWonPayout > 0 ? (
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              transition={{ delay: 0.35, type: 'spring' }}
-              className="my-2 px-5 py-2 rounded-2xl bg-gradient-to-r from-emerald-950/90 via-emerald-900/60 to-emerald-950/90 border border-emerald-400/60 text-emerald-300 flex items-center gap-2.5 shadow-[0_0_25px_rgba(16,185,129,0.3)]"
-            >
-              <span className="text-xs font-bold uppercase tracking-wider">
-                {t.podium.prizeLabel} (#{userRank}):
-              </span>
-              <motion.span
-                animate={{ scale: [1, 1.08, 1] }}
-                transition={{ repeat: Infinity, duration: 1.8, type: 'tween', ease: 'easeInOut' }}
-                className="font-mono font-black text-xl sm:text-2xl text-emerald-400 drop-shadow-[0_0_10px_rgba(52,211,153,0.6)]"
-              >
-                +{formatMoney(userWonPayout)}
-              </motion.span>
-            </motion.div>
+            </div>
           ) : (
-            <div className="my-1.5 px-3 py-1 rounded-xl game-subplate text-xs text-zinc-400 font-mono">
-              {t.podium.finishedInSub} <strong className="text-amber-400 font-bold">#{userRank}</strong>
-            </div>
-          )}
+            <>
+              {streak > 0 && (
+                <motion.div
+                  initial={isCeremonyCalmMode ? false : { scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ delay: 0.28, type: 'spring' }}
+                  className={`my-1 px-3.5 py-1 rounded-full border flex items-center gap-1.5 font-mono text-xs font-bold ${
+                    streak >= 3
+                      ? 'bg-gradient-to-r from-amber-500/25 via-orange-500/25 to-red-500/25 border-orange-400 text-orange-300 shadow-[0_0_15px_rgba(249,115,22,0.4)]'
+                      : 'game-subplate border-amber-500/40 text-amber-300'
+                  }`}
+                >
+                  <span className="text-sm">🔥</span>
+                  <span>
+                    {t.podium.streakLabel} <strong>{streak}x {t.podium.consecutiveSuffix}</strong>
+                  </span>
+                  {streak >= 3 && (
+                    <span className="text-[10px] bg-red-600 text-white px-1.5 py-0.5 rounded font-black">
+                      {t.podium.hotBadge}
+                    </span>
+                  )}
+                </motion.div>
+              )}
 
-          {/* Resumo Financeiro da Tua Partida: Apostaste · Ganhaste · Saldo Líquido */}
-          <div className="w-full grid grid-cols-3 gap-2 my-1 font-mono">
-            <div className="p-2 rounded-xl game-subplate border border-zinc-700/70 flex flex-col items-center">
-              <span className="text-[9px] uppercase text-zinc-400 font-bold">
-                {mpStrings.youBetLabel}
-              </span>
-              <span className="text-xs sm:text-sm font-black text-zinc-100 tabular-nums">
-                {formatMoney(betAmountKz)}
-              </span>
-            </div>
-            <div
-              className={`p-2 rounded-xl border flex flex-col items-center ${
-                userWonPayout > 0
-                  ? 'bg-emerald-950/75 border-emerald-500/50'
-                  : 'game-subplate border-zinc-700/70'
-              }`}
-            >
-              <span className="text-[9px] uppercase text-zinc-400 font-bold">
-                {mpStrings.youWonLabel}
-              </span>
-              <span
-                className={`text-xs sm:text-sm font-black tabular-nums ${
-                  userWonPayout > 0 ? 'text-emerald-400' : 'text-zinc-400'
-                }`}
-              >
-                {userWonPayout > 0 ? `+${formatMoney(userWonPayout)}` : formatMoney(0)}
-              </span>
-            </div>
-            <div
-              className={`p-2 rounded-xl border flex flex-col items-center ${
-                netResultKz > 0
-                  ? 'bg-amber-500/15 border-amber-400/60'
-                  : netResultKz === 0
-                  ? 'game-subplate border-zinc-700/70'
-                  : 'bg-rose-950/50 border-rose-500/40'
-              }`}
-            >
-              <span className="text-[9px] uppercase text-zinc-400 font-bold">
-                {mpStrings.netResultLabel}
-              </span>
-              <span
-                className={`text-xs sm:text-sm font-black tabular-nums ${
-                  netResultKz > 0
-                    ? 'text-amber-300'
-                    : netResultKz === 0
-                    ? 'text-zinc-200'
-                    : 'text-rose-400'
-                }`}
-              >
-                {netResultKz > 0 ? '+' : ''}
-                {formatMoney(netResultKz)}
-              </span>
-            </div>
-          </div>
+              {userWonPayout > 0 ? (
+                <motion.div
+                  initial={isCeremonyCalmMode ? false : { scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ delay: 0.35, type: 'spring' }}
+                  className="my-2 px-5 py-2 rounded-2xl bg-gradient-to-r from-emerald-950/90 via-emerald-900/60 to-emerald-950/90 border border-emerald-400/60 text-emerald-300 flex items-center gap-2.5 shadow-[0_0_25px_rgba(16,185,129,0.3)]"
+                >
+                  <span className="text-xs font-bold uppercase tracking-wider">
+                    {t.podium.prizeLabel} (#{userRank}):
+                  </span>
+                  <span className="font-mono font-black text-xl sm:text-2xl text-emerald-400 drop-shadow-[0_0_10px_rgba(52,211,153,0.6)]">
+                    +{formatMoney(userWonPayout)}
+                  </span>
+                </motion.div>
+              ) : (
+                <div className="my-1.5 px-3 py-1 rounded-xl game-subplate text-xs text-zinc-400 font-mono">
+                  {t.podium.finishedInSub} <strong className="text-amber-400 font-bold">#{userRank}</strong>
+                </div>
+              )}
+
+              {/* Resumo Financeiro da Tua Partida: Apostaste · Ganhaste · Saldo Líquido */}
+              <div className="w-full grid grid-cols-3 gap-2 my-1 font-mono">
+                <div className="p-2 rounded-xl game-subplate border border-zinc-700/70 flex flex-col items-center">
+                  <span className="text-[9px] uppercase text-zinc-400 font-bold">
+                    {mpStrings.youBetLabel}
+                  </span>
+                  <span className="text-xs sm:text-sm font-black text-zinc-100 tabular-nums">
+                    {formatMoney(betAmountKz)}
+                  </span>
+                </div>
+                <div
+                  className={`p-2 rounded-xl border flex flex-col items-center ${
+                    userWonPayout > 0
+                      ? 'bg-emerald-950/75 border-emerald-500/50'
+                      : 'game-subplate border-zinc-700/70'
+                  }`}
+                >
+                  <span className="text-[9px] uppercase text-zinc-400 font-bold">
+                    {mpStrings.youWonLabel}
+                  </span>
+                  <span
+                    className={`text-xs sm:text-sm font-black tabular-nums ${
+                      userWonPayout > 0 ? 'text-emerald-400' : 'text-zinc-400'
+                    }`}
+                  >
+                    {userWonPayout > 0 ? `+${formatMoney(userWonPayout)}` : formatMoney(0)}
+                  </span>
+                </div>
+                <div
+                  className={`p-2 rounded-xl border flex flex-col items-center ${
+                    netResultKz > 0
+                      ? 'bg-amber-500/15 border-amber-400/60'
+                      : netResultKz === 0
+                      ? 'game-subplate border-zinc-700/70'
+                      : 'bg-rose-950/50 border-rose-500/40'
+                  }`}
+                >
+                  <span className="text-[9px] uppercase text-zinc-400 font-bold">
+                    {mpStrings.netResultLabel}
+                  </span>
+                  <span
+                    className={`text-xs sm:text-sm font-black tabular-nums ${
+                      netResultKz > 0
+                        ? 'text-amber-300'
+                        : netResultKz === 0
+                        ? 'text-zinc-200'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    {netResultKz > 0 ? '+' : ''}
+                    {formatMoney(netResultKz)}
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Seletor de visualização */}
           <div className="flex flex-wrap items-center justify-center gap-1.5 game-subplate p-1 rounded-xl border border-amber-500/35 text-xs font-mono mt-1">
@@ -737,19 +769,21 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
             >
               {t.podium.tabPodium}
             </button>
-            <button
-              onClick={handleTriggerExplosion}
-              type="button"
-              className="px-2.5 py-1 rounded-lg transition-all cursor-pointer font-bold bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-500/50 flex items-center gap-1 active:scale-95"
-            >
-              {t.podium.explodeBtn}
-            </button>
+            {!isCeremonyCalmMode && !isSpectator && (
+              <button
+                onClick={handleTriggerExplosion}
+                type="button"
+                className="px-2.5 py-1 rounded-lg transition-all cursor-pointer font-bold bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 border border-amber-500/50 flex items-center gap-1 active:scale-95"
+              >
+                {t.podium.explodeBtn}
+              </button>
+            )}
           </div>
         </motion.div>
 
         {(activeTab === 'ceremony' || activeTab === 'both') && first && (
           <motion.div
-            variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
+            variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}
             className="relative z-10"
           >
             <CoronationCeremony

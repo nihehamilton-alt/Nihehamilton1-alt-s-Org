@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import confetti from 'canvas-confetti';
 import { Competitor } from '../types/game';
 import { useI18n } from '../contexts/I18nContext';
 import { sounds } from '../audio/soundEffects';
@@ -255,15 +254,15 @@ function buildRoyalThrone3D(bag: DisposablesBag, maxAnisotropy: number): THREE.G
     })
   );
 
-  // Base em degrau (dais do trono, assentado em y = 0)
-  const dais = new THREE.Mesh(trackGeo(bag, new THREE.BoxGeometry(1.55, 0.12, 1.35)), darkMarbleMat);
-  dais.position.y = 0.06;
+  // Base em degrau (dais do trono, assentado acima do tapete em y = 0.03)
+  const dais = new THREE.Mesh(trackGeo(bag, new THREE.BoxGeometry(1.55, 0.1, 1.35)), darkMarbleMat);
+  dais.position.y = 0.08;
   dais.receiveShadow = true;
   dais.castShadow = true;
   throne.add(dais);
 
-  const daisTrim = new THREE.Mesh(trackGeo(bag, new THREE.BoxGeometry(1.6, 0.04, 1.4)), goldMat);
-  daisTrim.position.y = 0.12;
+  const daisTrim = new THREE.Mesh(trackGeo(bag, new THREE.BoxGeometry(1.6, 0.036, 1.4)), goldMat);
+  daisTrim.position.y = 0.148;
   throne.add(daisTrim);
 
   // Estrutura do assento e pernas esculpidas
@@ -275,7 +274,7 @@ function buildRoyalThrone3D(bag: DisposablesBag, maxAnisotropy: number): THREE.G
   ];
   legPositions.forEach(([lx, lz]) => {
     const leg = new THREE.Mesh(trackGeo(bag, new THREE.CylinderGeometry(0.06, 0.045, 0.44, 12)), bronzeGoldMat);
-    leg.position.set(lx, 0.34, lz);
+    leg.position.set(lx, 0.36, lz);
     leg.castShadow = true;
     throne.add(leg);
   });
@@ -740,20 +739,20 @@ function buildChampionPedestal3D(bag: DisposablesBag, maxAnisotropy: number): TH
   );
 
   const baseTier = new THREE.Mesh(trackGeo(bag, new THREE.CylinderGeometry(0.76, 0.84, 0.16, 24)), emeraldMat);
-  baseTier.position.y = 0.08;
+  baseTier.position.y = 0.11;
   baseTier.receiveShadow = true;
   baseTier.castShadow = true;
   pedestal.add(baseTier);
 
   const upperTier = new THREE.Mesh(trackGeo(bag, new THREE.CylinderGeometry(0.62, 0.68, 0.2, 24)), emeraldMat);
-  upperTier.position.y = 0.26;
+  upperTier.position.y = 0.29;
   upperTier.receiveShadow = true;
   upperTier.castShadow = true;
   pedestal.add(upperTier);
 
   const topTrim = new THREE.Mesh(trackGeo(bag, new THREE.TorusGeometry(0.62, 0.022, 10, 32)), goldMat);
   topTrim.rotation.x = Math.PI / 2;
-  topTrim.position.y = 0.36;
+  topTrim.position.y = 0.392;
   pedestal.add(topTrim);
 
   const badgeTex = createBadgeTexture('#1', '#022c22', '#34d399', '#fde047', maxAnisotropy, bag);
@@ -761,7 +760,7 @@ function buildChampionPedestal3D(bag: DisposablesBag, maxAnisotropy: number): TH
     trackGeo(bag, new THREE.PlaneGeometry(0.46, 0.22)),
     trackMat(bag, new THREE.MeshStandardMaterial({ map: badgeTex, roughness: 0.32, metalness: 0.3 }))
   );
-  badge.position.set(0, 0.24, 0.65);
+  badge.position.set(0, 0.27, 0.66);
   pedestal.add(badge);
 
   return pedestal;
@@ -803,16 +802,6 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
         sounds.playCoronationFanfare();
       } catch {
         // ignore audio failure
-      }
-      try {
-        confetti({
-          particleCount: 45,
-          spread: 65,
-          origin: { y: 0.45, x: 0.66 },
-          colors: ['#facc15', '#eab308', '#dc2626', '#16a34a'],
-        });
-      } catch {
-        // ignore confetti error
       }
     } else if (nextStage === 4) {
       try {
@@ -879,9 +868,8 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
     const maxAnisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
 
     const camera = new THREE.PerspectiveCamera(36, width / height, 0.1, 45);
-    camera.position.set(0.0, 2.25, 6.2);
-    let camLookX = 0.05;
-    camera.lookAt(camLookX, 1.15, 0);
+    camera.position.set(0.0, 2.22, 6.15);
+    camera.lookAt(0.0, 1.12, 0);
 
     // Iluminação 3 pontos quente/fria equilibrada
     const hemiLight = new THREE.HemisphereLight(0xfde68a, 0x1e1b2e, 0.72);
@@ -941,7 +929,7 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
       scene.add(trim);
     });
 
-    // Sombras de contacto macias sob o Trono, Rei 00 e Pedestal do Vencedor
+    // Sombras de contacto macias sob o Trono, Rei 00 e Pedestal do Vencedor (polygonOffset evita Z-fighting)
     const contactTex = createContactShadowTexture(bag);
     const makeContactShadow = (radius: number) => {
       const m = new THREE.Mesh(
@@ -952,12 +940,15 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
             map: contactTex,
             transparent: true,
             depthWrite: false,
-            opacity: 0.55,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1,
+            opacity: 0.52,
           })
         )
       );
       m.rotation.x = -Math.PI / 2;
-      m.position.y = 0.032;
+      m.position.y = 0.029;
       return m;
     };
 
@@ -970,20 +961,20 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
     scene.add(throneGroup);
 
     const throneShadow = makeContactShadow(2.2);
-    throneShadow.position.set(throneX, 0.032, throneZ);
+    throneShadow.position.set(throneX, 0.028, throneZ);
     scene.add(throneShadow);
 
     // 2. PEDESTAL DO VENCEDOR À DIREITA
     const pedestalX = 1.66;
     const pedestalZ = 0.06;
-    const pedestalTopY = 0.36;
+    const pedestalTopY = 0.39;
     const pedestalGroup = buildChampionPedestal3D(bag, maxAnisotropy);
     pedestalGroup.position.set(pedestalX, 0, pedestalZ);
     pedestalGroup.rotation.y = -0.25;
     scene.add(pedestalGroup);
 
     const pedestalShadow = makeContactShadow(1.8);
-    pedestalShadow.position.set(pedestalX, 0.032, pedestalZ);
+    pedestalShadow.position.set(pedestalX, 0.028, pedestalZ);
     scene.add(pedestalShadow);
 
     // 3. REI 00 (HAMILTON — O PRIMEIRO REI)
@@ -1002,7 +993,7 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
     });
     scene.add(reiRig.root);
 
-    const reiShadow = makeContactShadow(1.0);
+    const reiShadow = makeContactShadow(0.95);
     scene.add(reiShadow);
 
     // 4. VENCEDOR DA PARTIDA NO PEDESTAL (look fiel ao perfil, sem chapéu para receber a coroa)
@@ -1025,42 +1016,22 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
     winnerRig.root.rotation.y = -0.52;
     scene.add(winnerRig.root);
 
-    // 5. COROA REAL EM 3D + PARTÍCULAS DOURADAS ORBITAIS ZERO-GC
+    // 5. COROA REAL EM 3D
     const crownGroup = buildRoyalCrown3D(bag);
     scene.add(crownGroup);
-
-    const sparkleGeo = trackGeo(bag, new THREE.OctahedronGeometry(0.024, 0));
-    const sparkleMat = trackMat(
-      bag,
-      new THREE.MeshBasicMaterial({
-        color: 0xfef08a,
-        transparent: true,
-        opacity: 0.85,
-      })
-    );
-    const sparkles = Array.from({ length: 14 }, (_, idx) => {
-      const sp = new THREE.Mesh(sparkleGeo, sparkleMat);
-      sp.visible = false;
-      scene.add(sp);
-      return {
-        mesh: sp,
-        phase: (idx / 14) * Math.PI * 2,
-        speed: 1.4 + (idx % 4) * 0.35,
-        radius: 0.36 + (idx % 3) * 0.22,
-        heightOffset: (idx % 5) * 0.16,
-      };
-    });
 
     // Pré-aquece shaders apenas em GPUs reais
     if (!isSoftwareGl) {
       renderer.compile(scene, camera);
     }
 
-    // Estado da coreografia (timeline determinística com damping exponencial suave)
-    let animElapsed = prefersReducedMotion ? 4.35 : 0;
-    let crownOwner: 'reiHead' | 'reiHand' | 'flying' | 'winnerHead' = prefersReducedMotion
-      ? 'winnerHead'
-      : 'reiHead';
+    const smoothstep = (e0: number, e1: number, x: number): number => {
+      const u = THREE.MathUtils.clamp((x - e0) / Math.max(0.0001, e1 - e0), 0, 1);
+      return u * u * (3 - 2 * u);
+    };
+
+    // Estado da coreografia (timeline determinística ultra-suave sem saltos ou trepidações)
+    let animElapsed = prefersReducedMotion ? 4.4 : 0;
     let finishCalled = Boolean(prefersReducedMotion);
     let lastStageEmitted = prefersReducedMotion ? 4 : 0;
 
@@ -1070,27 +1041,270 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
       onFinishRef.current?.();
     }
 
-    const applyPoseImmediate = (tSec: number) => {
-      // Estado do Rei 00 sentado no trono vs de pé
-      if (tSec < 0.45) {
-        reiRig.root.position.set(throneX + 0.08, 0, throneZ + 0.08);
-        reiRig.root.rotation.y = 0.34;
-        reiRig.pelvis.position.y = 0.64;
-        reiRig.torso.rotation.x = 0.04;
-        reiRig.leftHip.rotation.x = -1.32;
-        reiRig.rightHip.rotation.x = -1.32;
-        reiRig.leftKnee.rotation.x = 1.32;
-        reiRig.rightKnee.rotation.x = 1.32;
+    const applyPoseAtElapsed = (tSec: number) => {
+      let reiX = throneX + 0.08;
+      let reiZ = throneZ + 0.08;
+      let reiRotY = 0.34;
+      let pelvisY = 0.68;
+      let torsoX = 0.03;
+      let reiHeadX = 0.02;
+      let reiHeadY = 0.14;
+      let leftHipX = -1.28;
+      let rightHipX = -1.28;
+      let leftKneeX = 1.28;
+      let rightKneeX = 1.28;
+      let lShoulderX = -0.4;
+      let lShoulderZ = -0.14;
+      let lElbowX = -0.7;
+      let rShoulderX = -0.4;
+      let rShoulderZ = 0.14;
+      let rElbowX = -0.7;
+      let capeRot = 0.14;
+
+      if (tSec < 0.5) {
+        // Fase 0: Rei 00 sentado imóvel no trono dourado observando o vencedor
+        reiHeadY = 0.16;
+      } else if (tSec < 0.9) {
+        // Fase 1A: Levanta-se suavemente do trono
+        const ease = smoothstep(0.5, 0.9, tSec);
+        reiX = THREE.MathUtils.lerp(throneX + 0.08, throneX + 0.28, ease);
+        reiZ = THREE.MathUtils.lerp(throneZ + 0.08, 0.04, ease);
+        reiRotY = THREE.MathUtils.lerp(0.34, Math.PI * 0.42, ease);
+        pelvisY = THREE.MathUtils.lerp(0.68, 0.84, ease);
+        torsoX = 0.16 * Math.sin(ease * Math.PI) + 0.03;
+        leftHipX = THREE.MathUtils.lerp(-1.28, 0, ease);
+        rightHipX = THREE.MathUtils.lerp(-1.28, 0, ease);
+        leftKneeX = THREE.MathUtils.lerp(1.28, 0, ease);
+        rightKneeX = THREE.MathUtils.lerp(1.28, 0, ease);
+        lShoulderX = THREE.MathUtils.lerp(-0.4, -0.2, ease);
+        rShoulderX = THREE.MathUtils.lerp(-0.4, -0.2, ease);
+        lElbowX = THREE.MathUtils.lerp(-0.7, -0.35, ease);
+        rElbowX = THREE.MathUtils.lerp(-0.7, -0.35, ease);
+        reiHeadY = THREE.MathUtils.lerp(0.16, 0.08, ease);
+        capeRot = 0.14 + 0.06 * ease;
+      } else if (tSec < 1.7) {
+        // Fase 1B: Caminha com passos suaves e firmes pelo tapete vermelho
+        const uWalk = smoothstep(0.9, 1.7, tSec);
+        const envelope = Math.sin(uWalk * Math.PI);
+        const stride = Math.sin(uWalk * Math.PI * 3.0) * 0.46 * envelope;
+        reiX = THREE.MathUtils.lerp(throneX + 0.28, 0.56, uWalk);
+        reiZ = THREE.MathUtils.lerp(0.04, 0.06, uWalk);
+        reiRotY = THREE.MathUtils.lerp(Math.PI * 0.42, Math.PI * 0.48, uWalk);
+        pelvisY = 0.84 + (0.5 - 0.5 * Math.cos(uWalk * Math.PI * 6.0)) * 0.02 * envelope;
+        torsoX = 0.08 * envelope;
+        leftHipX = stride;
+        rightHipX = -stride;
+        leftKneeX = Math.max(0, -stride * 0.75);
+        rightKneeX = Math.max(0, stride * 0.75);
+        lShoulderX = -0.2 - stride * 0.5;
+        rShoulderX = -0.2 + stride * 0.5;
+        lElbowX = -0.35;
+        rElbowX = -0.35;
+        reiHeadX = -0.02 * envelope;
+        reiHeadY = THREE.MathUtils.lerp(0.08, 0.02, uWalk);
+        capeRot = 0.2 + 0.08 * envelope;
+      } else if (tSec < 2.12) {
+        // Fase 2A: Para diante do vencedor e ergue os braços até à coroa na própria cabeça
+        const uReach = smoothstep(1.7, 2.12, tSec);
+        reiX = 0.56;
+        reiZ = 0.06;
+        reiRotY = Math.PI * 0.48;
+        pelvisY = 0.84;
+        torsoX = 0.02;
+        leftHipX = 0;
+        rightHipX = 0;
+        leftKneeX = 0;
+        rightKneeX = 0;
+        reiHeadX = THREE.MathUtils.lerp(0, -0.08, uReach);
+        reiHeadY = 0.02;
+        lShoulderX = THREE.MathUtils.lerp(-0.2, -2.52, uReach);
+        rShoulderX = THREE.MathUtils.lerp(-0.2, -2.52, uReach);
+        lShoulderZ = THREE.MathUtils.lerp(-0.14, -0.18, uReach);
+        rShoulderZ = THREE.MathUtils.lerp(0.14, 0.18, uReach);
+        lElbowX = THREE.MathUtils.lerp(-0.35, -1.04, uReach);
+        rElbowX = THREE.MathUtils.lerp(-0.35, -1.04, uReach);
+        capeRot = 0.16;
+      } else if (tSec < 2.52) {
+        // Fase 2B: Retira suavemente a coroa da cabeça para as mãos diante do peito
+        const uLift = smoothstep(2.12, 2.52, tSec);
+        reiX = 0.56;
+        reiZ = 0.06;
+        reiRotY = Math.PI * 0.48;
+        pelvisY = 0.84;
+        torsoX = THREE.MathUtils.lerp(0.02, 0.06, uLift);
+        leftHipX = 0;
+        rightHipX = 0;
+        leftKneeX = 0;
+        rightKneeX = 0;
+        reiHeadX = THREE.MathUtils.lerp(-0.08, 0.04, uLift);
+        reiHeadY = 0.02;
+        lShoulderX = THREE.MathUtils.lerp(-2.52, -1.58, uLift);
+        rShoulderX = THREE.MathUtils.lerp(-2.52, -1.58, uLift);
+        lShoulderZ = THREE.MathUtils.lerp(-0.18, -0.11, uLift);
+        rShoulderZ = THREE.MathUtils.lerp(0.18, 0.11, uLift);
+        lElbowX = THREE.MathUtils.lerp(-1.04, -0.42, uLift);
+        rElbowX = THREE.MathUtils.lerp(-1.04, -0.42, uLift);
+        capeRot = 0.16;
+      } else if (tSec < 3.15) {
+        // Fase 2C: Avança um passo curto e estende os braços para pousar a coroa no campeão
+        const uOffer = smoothstep(2.52, 3.15, tSec);
+        reiX = THREE.MathUtils.lerp(0.56, 0.72, uOffer);
+        reiZ = 0.06;
+        reiRotY = Math.PI * 0.48;
+        pelvisY = 0.84;
+        torsoX = THREE.MathUtils.lerp(0.06, 0.12, uOffer);
+        leftHipX = 0.06 * uOffer;
+        rightHipX = -0.06 * uOffer;
+        leftKneeX = 0;
+        rightKneeX = 0;
+        reiHeadX = THREE.MathUtils.lerp(0.04, -0.04, uOffer);
+        reiHeadY = 0.02;
+        lShoulderX = THREE.MathUtils.lerp(-1.58, -1.32, uOffer);
+        rShoulderX = THREE.MathUtils.lerp(-1.58, -1.32, uOffer);
+        lShoulderZ = -0.11;
+        rShoulderZ = 0.11;
+        lElbowX = THREE.MathUtils.lerp(-0.42, -0.16, uOffer);
+        rElbowX = THREE.MathUtils.lerp(-0.42, -0.16, uOffer);
+        capeRot = 0.16;
+      } else {
+        // Fase 3 & 4: Recua com elegância e ergue os braços em saudação imóvel ao novo Rei
+        const uRetreat = smoothstep(3.15, 3.78, tSec);
+        reiX = THREE.MathUtils.lerp(0.72, 0.24, uRetreat);
+        reiZ = THREE.MathUtils.lerp(0.06, 0.08, uRetreat);
+        reiRotY = THREE.MathUtils.lerp(Math.PI * 0.48, 0.88, uRetreat);
+        pelvisY = 0.84;
+        torsoX = THREE.MathUtils.lerp(0.12, -0.02, uRetreat);
+        leftHipX = THREE.MathUtils.lerp(0.06, 0, uRetreat);
+        rightHipX = THREE.MathUtils.lerp(-0.06, 0, uRetreat);
+        leftKneeX = 0;
+        rightKneeX = 0;
+        reiHeadX = THREE.MathUtils.lerp(-0.04, -0.05, uRetreat);
+        reiHeadY = THREE.MathUtils.lerp(0.02, 0.24, uRetreat);
+        lShoulderX = THREE.MathUtils.lerp(-1.32, -2.28, uRetreat);
+        rShoulderX = THREE.MathUtils.lerp(-1.32, -2.28, uRetreat);
+        lShoulderZ = THREE.MathUtils.lerp(-0.11, -0.34, uRetreat);
+        rShoulderZ = THREE.MathUtils.lerp(0.11, 0.34, uRetreat);
+        lElbowX = THREE.MathUtils.lerp(-0.16, -0.28, uRetreat);
+        rElbowX = THREE.MathUtils.lerp(-0.16, -0.28, uRetreat);
+        capeRot = 0.14;
       }
+
+      reiRig.root.position.set(reiX, 0, reiZ);
+      reiRig.root.rotation.y = reiRotY;
+      reiRig.pelvis.position.y = pelvisY;
+      reiRig.torso.rotation.x = torsoX;
+      reiRig.head.rotation.x = reiHeadX;
+      reiRig.head.rotation.y = reiHeadY;
+      reiRig.leftHip.rotation.x = leftHipX;
+      reiRig.rightHip.rotation.x = rightHipX;
+      reiRig.leftKnee.rotation.x = leftKneeX;
+      reiRig.rightKnee.rotation.x = rightKneeX;
+      reiRig.leftShoulder.rotation.set(lShoulderX, 0, lShoulderZ);
+      reiRig.leftElbow.rotation.x = lElbowX;
+      reiRig.rightShoulder.rotation.set(rShoulderX, 0, rShoulderZ);
+      reiRig.rightElbow.rotation.x = rElbowX;
+      if (reiRig.cape) {
+        reiRig.cape.rotation.x = capeRot;
+        if (reiRig.capeLower) {
+          reiRig.capeLower.rotation.x = capeRot * 0.55;
+        }
+      }
+      reiShadow.position.set(reiX, 0.028, reiZ);
+
+      // Cinemática limpa do Vencedor no Pedestal (imóvel -> vénia suave -> único salto triunfal -> firme no trono)
+      let winnerJumpY = 0;
+      let winnerTorsoX = 0;
+      let winnerHeadX = 0;
+      let winnerHeadY = -0.22;
+      let winnerArmX = -0.15;
+      let winnerArmZ = 0.08;
+      let winnerElbowX = -0.25;
+      let winnerLegTuck = 0;
+
+      if (tSec >= 2.4 && tSec < 3.18) {
+        const bow = Math.sin(smoothstep(2.4, 3.18, tSec) * Math.PI);
+        winnerTorsoX = bow * 0.1;
+        winnerHeadX = bow * 0.22;
+        winnerHeadY = -0.18;
+        winnerArmX = -0.22;
+        winnerElbowX = -0.4;
+      } else if (tSec >= 3.18 && tSec < 3.92) {
+        const uJump = smoothstep(3.18, 3.92, tSec);
+        const arc = Math.sin(uJump * Math.PI);
+        const uRaise = smoothstep(3.18, 3.55, tSec);
+        winnerJumpY = arc * 0.42;
+        winnerTorsoX = -arc * 0.06;
+        winnerHeadX = -0.08 * uRaise;
+        winnerHeadY = THREE.MathUtils.lerp(-0.18, 0.12, uRaise);
+        winnerArmX = THREE.MathUtils.lerp(-0.22, -2.45, uRaise);
+        winnerArmZ = THREE.MathUtils.lerp(0.08, 0.34, uRaise);
+        winnerElbowX = THREE.MathUtils.lerp(-0.4, -0.32, uRaise);
+        winnerLegTuck = arc * 0.32;
+      } else if (tSec >= 3.92) {
+        winnerJumpY = 0;
+        winnerTorsoX = -0.02;
+        winnerHeadX = -0.05;
+        winnerHeadY = 0.12;
+        winnerArmX = -2.45;
+        winnerArmZ = 0.34;
+        winnerElbowX = -0.32;
+        winnerLegTuck = 0;
+      }
+
+      winnerRig.root.position.set(pedestalX, pedestalTopY + winnerJumpY, pedestalZ);
+      winnerRig.torso.rotation.x = winnerTorsoX;
+      winnerRig.head.rotation.x = winnerHeadX;
+      winnerRig.head.rotation.y = winnerHeadY;
+      winnerRig.leftShoulder.rotation.set(winnerArmX, 0, -winnerArmZ);
+      winnerRig.leftElbow.rotation.x = winnerElbowX;
+      winnerRig.rightShoulder.rotation.set(winnerArmX, 0, winnerArmZ);
+      winnerRig.rightElbow.rotation.x = winnerElbowX;
+      winnerRig.leftHip.rotation.x = -winnerLegTuck;
+      winnerRig.rightHip.rotation.x = -winnerLegTuck;
+      winnerRig.leftKnee.rotation.x = winnerLegTuck * 1.35;
+      winnerRig.rightKnee.rotation.x = winnerLegTuck * 1.35;
+      if (winnerRig.cape) {
+        winnerRig.cape.rotation.x = 0.14 + (winnerJumpY > 0.02 ? 0.22 : 0);
+        if (winnerRig.capeLower) {
+          winnerRig.capeLower.rotation.x = winnerRig.cape.rotation.x * 0.65;
+        }
+      }
+      if (winnerRig.ponytail) {
+        winnerRig.ponytail.rotation.x = 0.35 + winnerJumpY * 0.45;
+      }
+
+      // Atualiza matrizes e interpola a Coroa Real 3D de forma contínua (zero saltos ou teletransporte)
       reiRig.root.updateMatrixWorld(true);
       winnerRig.root.updateMatrixWorld(true);
 
-      if (crownOwner === 'reiHead') {
+      if (tSec < 2.12) {
         reiRig.headCrownAnchor.getWorldPosition(_tmpVecA);
         reiRig.headCrownAnchor.getWorldQuaternion(_tmpQuatA);
         crownGroup.position.copy(_tmpVecA);
         crownGroup.quaternion.copy(_tmpQuatA);
-      } else if (crownOwner === 'winnerHead') {
+      } else if (tSec < 2.52) {
+        const blend = smoothstep(2.12, 2.52, tSec);
+        reiRig.headCrownAnchor.getWorldPosition(_tmpVecA);
+        reiRig.handCrownAnchor.getWorldPosition(_tmpVecB);
+        _tmpVecC.lerpVectors(_tmpVecA, _tmpVecB, blend);
+        _tmpVecC.y += Math.sin(blend * Math.PI) * 0.06;
+        crownGroup.position.copy(_tmpVecC);
+
+        reiRig.headCrownAnchor.getWorldQuaternion(_tmpQuatA);
+        reiRig.handCrownAnchor.getWorldQuaternion(_tmpQuatB);
+        crownGroup.quaternion.slerpQuaternions(_tmpQuatA, _tmpQuatB, blend);
+      } else if (tSec < 3.15) {
+        const blend = smoothstep(2.52, 3.15, tSec);
+        reiRig.handCrownAnchor.getWorldPosition(_tmpVecA);
+        winnerRig.headCrownAnchor.getWorldPosition(_tmpVecB);
+        _tmpVecC.lerpVectors(_tmpVecA, _tmpVecB, blend);
+        _tmpVecC.y += Math.sin(blend * Math.PI) * 0.22;
+        crownGroup.position.copy(_tmpVecC);
+
+        reiRig.handCrownAnchor.getWorldQuaternion(_tmpQuatA);
+        winnerRig.headCrownAnchor.getWorldQuaternion(_tmpQuatB);
+        crownGroup.quaternion.slerpQuaternions(_tmpQuatA, _tmpQuatB, blend);
+      } else {
         winnerRig.headCrownAnchor.getWorldPosition(_tmpVecA);
         winnerRig.headCrownAnchor.getWorldQuaternion(_tmpQuatA);
         crownGroup.position.copy(_tmpVecA);
@@ -1099,30 +1313,12 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
     };
 
     const setCrownToWinnerFinal = () => {
-      animElapsed = 4.35;
-      crownOwner = 'winnerHead';
+      animElapsed = 4.4;
       lastStageEmitted = 4;
       stageRef.current = 4;
       setStage(4);
       setIsSkipped(true);
-
-      reiRig.root.position.set(0.22, 0, 0.08);
-      reiRig.root.rotation.y = 0.88;
-      reiRig.pelvis.position.y = 0.84;
-      reiRig.torso.rotation.x = 0;
-      reiRig.leftHip.rotation.x = 0;
-      reiRig.rightHip.rotation.x = 0;
-      reiRig.leftKnee.rotation.x = 0;
-      reiRig.rightKnee.rotation.x = 0;
-      reiRig.leftShoulder.rotation.set(-2.35, 0, -0.35);
-      reiRig.rightShoulder.rotation.set(-2.35, 0, 0.35);
-      reiRig.leftElbow.rotation.x = -0.3;
-      reiRig.rightElbow.rotation.x = -0.3;
-
-      winnerRig.root.position.set(pedestalX, pedestalTopY, pedestalZ);
-      winnerRig.leftShoulder.rotation.set(-2.6, 0, -0.4);
-      winnerRig.rightShoulder.rotation.set(-2.6, 0, 0.4);
-      applyPoseImmediate(4.35);
+      applyPoseAtElapsed(4.4);
 
       if (!finishCalled) {
         finishCalled = true;
@@ -1134,13 +1330,12 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
       replay: () => {
         onReplayRequestRef.current?.();
         animElapsed = 0;
-        crownOwner = 'reiHead';
         finishCalled = false;
         lastStageEmitted = 0;
         stageRef.current = 0;
         setIsSkipped(false);
         setStage(0);
-        applyPoseImmediate(0);
+        applyPoseAtElapsed(0);
       },
       skip: () => {
         setCrownToWinnerFinal();
@@ -1150,7 +1345,7 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
     if (prefersReducedMotion) {
       setCrownToWinnerFinal();
     } else {
-      applyPoseImmediate(0);
+      applyPoseAtElapsed(0);
     }
 
     const timer = new THREE.Timer();
@@ -1184,17 +1379,17 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
       if (isDisposed || !renderer) return;
 
       timer.update();
-      const dt = Math.min(timer.getDelta(), 0.05);
+      const dt = Math.min(timer.getDelta(), 0.12);
       if (!prefersReducedMotion) {
-        animElapsed += dt;
+        animElapsed = Math.min(4.45, animElapsed + dt);
       }
 
       // Dispara estágios sincronizados (0 -> 1 -> 2 -> 3 -> 4)
       let currentStage = 0;
       if (animElapsed >= 4.25) currentStage = 4;
-      else if (animElapsed >= 2.85) currentStage = 3;
-      else if (animElapsed >= 2.05) currentStage = 2;
-      else if (animElapsed >= 0.45) currentStage = 1;
+      else if (animElapsed >= 3.15) currentStage = 3;
+      else if (animElapsed >= 2.12) currentStage = 2;
+      else if (animElapsed >= 0.5) currentStage = 1;
 
       if (currentStage !== lastStageEmitted) {
         lastStageEmitted = currentStage;
@@ -1207,323 +1402,7 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
         }
       }
 
-      // =========================================================================
-      // CINEMÁTICA DO REI 00 (SENTA -> LEVANTA RÁPIDO -> TIRA COROA -> COROA O VENCEDOR)
-      // =========================================================================
-      let targetReiX = throneX + 0.08;
-      let targetReiZ = throneZ + 0.08;
-      let targetReiRotY = 0.34;
-      let targetPelvisY = 0.64;
-      let targetTorsoX = 0.04;
-      let targetReiHeadX = 0.02;
-      let targetReiHeadY = 0.14;
-      let targetLeftHipX = -1.32;
-      let targetRightHipX = -1.32;
-      let targetLeftKneeX = 1.32;
-      let targetRightKneeX = 1.32;
-      let targetLShoulderX = -0.45;
-      let targetLShoulderZ = -0.15;
-      let targetLElbowX = -0.75;
-      let targetRShoulderX = -0.45;
-      let targetRShoulderZ = 0.15;
-      let targetRElbowX = -0.75;
-      let capeFlutter = Math.sin(animElapsed * 3.0) * 0.035 + Math.cos(animElapsed * 6.4) * 0.015;
-
-      if (animElapsed < 0.45) {
-        // Fase 0: Rei 00 sentado no trono dourado observando o vencedor
-        crownOwner = 'reiHead';
-        targetReiHeadX = 0.04;
-        targetReiHeadY = 0.18;
-      } else if (animElapsed < 0.7) {
-        // Fase 1A-0: Impulso orgânico para se levantar do trono
-        const up = THREE.MathUtils.clamp((animElapsed - 0.45) / 0.25, 0, 1);
-        const ease = up * up * (3 - 2 * up);
-        targetReiX = THREE.MathUtils.lerp(throneX + 0.08, throneX + 0.24, ease);
-        targetReiZ = THREE.MathUtils.lerp(throneZ + 0.08, 0.02, ease);
-        targetReiRotY = THREE.MathUtils.lerp(0.34, Math.PI * 0.42, ease);
-        targetPelvisY = THREE.MathUtils.lerp(0.64, 0.84, ease);
-        targetTorsoX = 0.28 * Math.sin(up * Math.PI) + 0.08;
-        targetLeftHipX = THREE.MathUtils.lerp(-1.32, 0.18, ease);
-        targetRightHipX = THREE.MathUtils.lerp(-1.32, -0.18, ease);
-        targetLeftKneeX = THREE.MathUtils.lerp(1.32, 0.15, ease);
-        targetRightKneeX = THREE.MathUtils.lerp(1.32, 0.15, ease);
-        targetLShoulderX = -0.25;
-        targetRShoulderX = -0.25;
-        targetLElbowX = -0.45;
-        targetRElbowX = -0.45;
-        targetReiHeadY = 0.1;
-        crownOwner = 'reiHead';
-      } else if (animElapsed < 1.25) {
-        // Fase 1A: Camina com vigor pelo tapete vermelho até diante do vencedor
-        const u = THREE.MathUtils.clamp((animElapsed - 0.7) / 0.55, 0, 1);
-        const smoothU = u * u * (3 - 2 * u);
-        targetReiX = THREE.MathUtils.lerp(throneX + 0.24, 0.4, smoothU);
-        targetReiZ = THREE.MathUtils.lerp(0.02, 0.08, smoothU);
-        targetReiRotY = THREE.MathUtils.lerp(Math.PI * 0.42, Math.PI * 0.48, smoothU);
-        targetPelvisY = 0.84 + Math.abs(Math.sin(u * Math.PI * 3)) * 0.045;
-        targetTorsoX = 0.11;
-        const stride = Math.sin(u * Math.PI * 3.0) * 0.58 * (1 - u * 0.45);
-        targetLeftHipX = stride;
-        targetRightHipX = -stride;
-        targetLeftKneeX = Math.max(0, -stride * 0.9);
-        targetRightKneeX = Math.max(0, stride * 0.9);
-        targetLShoulderX = -stride * 0.6;
-        targetRShoulderX = stride * 0.6;
-        targetLElbowX = -0.4;
-        targetRElbowX = -0.4;
-        targetReiHeadX = -0.04;
-        targetReiHeadY = 0.05;
-        capeFlutter = 0.28 + Math.sin(u * 12) * 0.12 + Math.cos(u * 21) * 0.04;
-        crownOwner = 'reiHead';
-      } else if (animElapsed < 2.05) {
-        // Fase 1B/2A: Rei 00 para diante do vencedor, ergue os braços e retira a coroa da própria cabeça!
-        const u = THREE.MathUtils.clamp((animElapsed - 1.25) / 0.8, 0, 1);
-        targetReiX = 0.52;
-        targetReiZ = 0.08;
-        targetReiRotY = Math.PI * 0.48;
-        targetPelvisY = 0.84;
-        targetTorsoX = 0.02;
-        targetLeftHipX = 0;
-        targetRightHipX = 0;
-        targetLeftKneeX = 0;
-        targetRightKneeX = 0;
-        targetReiHeadX = u < 0.48 ? -0.1 : 0.06;
-        targetReiHeadY = 0.02;
-
-        if (u < 0.48) {
-          crownOwner = 'reiHead';
-          targetLShoulderX = -2.55;
-          targetRShoulderX = -2.55;
-          targetLShoulderZ = -0.18;
-          targetRShoulderZ = 0.18;
-          targetLElbowX = -1.05;
-          targetRElbowX = -1.05;
-        } else {
-          crownOwner = 'reiHand';
-          targetLShoulderX = -1.65;
-          targetRShoulderX = -1.65;
-          targetLShoulderZ = -0.1;
-          targetRShoulderZ = 0.1;
-          targetLElbowX = -0.45;
-          targetRElbowX = -0.45;
-        }
-      } else if (animElapsed < 2.85) {
-        // Fase 2B: Estende os braços em direção ao vencedor e pousa a coroa sobre sua cabeça
-        const u = THREE.MathUtils.clamp((animElapsed - 2.05) / 0.8, 0, 1);
-        targetReiX = THREE.MathUtils.lerp(0.52, 0.72, u);
-        targetReiZ = 0.08;
-        targetReiRotY = Math.PI * 0.48;
-        targetPelvisY = 0.84;
-        targetTorsoX = 0.12;
-        targetLeftHipX = 0.08;
-        targetRightHipX = -0.08;
-        targetLeftKneeX = 0;
-        targetRightKneeX = 0;
-        targetLShoulderX = THREE.MathUtils.lerp(-1.65, -1.35, u);
-        targetRShoulderX = THREE.MathUtils.lerp(-1.65, -1.35, u);
-        targetLShoulderZ = -0.12;
-        targetRShoulderZ = 0.12;
-        targetLElbowX = -0.15;
-        targetRElbowX = -0.15;
-        targetReiHeadX = -0.08;
-        targetReiHeadY = 0.04;
-        crownOwner = u < 0.88 ? 'flying' : 'winnerHead';
-      } else {
-        // Fase 3 e 4: Rei 00 recua ligeiramente e ergue os braços em consagração ao novo Rei!
-        crownOwner = 'winnerHead';
-        const cheerWave = Math.sin((animElapsed - 2.85) * 4.5) * 0.14;
-        targetReiX = 0.24;
-        targetReiZ = 0.08;
-        targetReiRotY = 0.88;
-        targetPelvisY = 0.84;
-        targetTorsoX = -0.03;
-        targetLeftHipX = 0;
-        targetRightHipX = 0;
-        targetLeftKneeX = 0;
-        targetRightKneeX = 0;
-        targetLShoulderX = -2.35 + cheerWave;
-        targetRShoulderX = -2.35 - cheerWave;
-        targetLShoulderZ = -0.35;
-        targetRShoulderZ = 0.35;
-        targetLElbowX = -0.32 - Math.abs(cheerWave) * 0.5;
-        targetRElbowX = -0.32 - Math.abs(cheerWave) * 0.5;
-        targetReiHeadX = -0.06;
-        targetReiHeadY = 0.28;
-      }
-
-      // Damping exponencial suave no Rei 00
-      const k = 12;
-      reiRig.root.position.x = THREE.MathUtils.damp(reiRig.root.position.x, targetReiX, k, dt);
-      reiRig.root.position.z = THREE.MathUtils.damp(reiRig.root.position.z, targetReiZ, k, dt);
-      reiRig.root.rotation.y = THREE.MathUtils.damp(reiRig.root.rotation.y, targetReiRotY, k, dt);
-      reiRig.pelvis.position.y = THREE.MathUtils.damp(reiRig.pelvis.position.y, targetPelvisY, k, dt);
-      reiRig.torso.rotation.x = THREE.MathUtils.damp(reiRig.torso.rotation.x, targetTorsoX, k, dt);
-      reiRig.head.rotation.x = THREE.MathUtils.damp(reiRig.head.rotation.x, targetReiHeadX, k, dt);
-      reiRig.head.rotation.y = THREE.MathUtils.damp(reiRig.head.rotation.y, targetReiHeadY, k, dt);
-      reiRig.leftHip.rotation.x = THREE.MathUtils.damp(reiRig.leftHip.rotation.x, targetLeftHipX, k, dt);
-      reiRig.rightHip.rotation.x = THREE.MathUtils.damp(reiRig.rightHip.rotation.x, targetRightHipX, k, dt);
-      reiRig.leftKnee.rotation.x = THREE.MathUtils.damp(reiRig.leftKnee.rotation.x, targetLeftKneeX, k, dt);
-      reiRig.rightKnee.rotation.x = THREE.MathUtils.damp(reiRig.rightKnee.rotation.x, targetRightKneeX, k, dt);
-      reiRig.leftShoulder.rotation.x = THREE.MathUtils.damp(reiRig.leftShoulder.rotation.x, targetLShoulderX, k, dt);
-      reiRig.leftShoulder.rotation.z = THREE.MathUtils.damp(reiRig.leftShoulder.rotation.z, targetLShoulderZ, k, dt);
-      reiRig.leftElbow.rotation.x = THREE.MathUtils.damp(reiRig.leftElbow.rotation.x, targetLElbowX, k, dt);
-      reiRig.rightShoulder.rotation.x = THREE.MathUtils.damp(reiRig.rightShoulder.rotation.x, targetRShoulderX, k, dt);
-      reiRig.rightShoulder.rotation.z = THREE.MathUtils.damp(reiRig.rightShoulder.rotation.z, targetRShoulderZ, k, dt);
-      reiRig.rightElbow.rotation.x = THREE.MathUtils.damp(reiRig.rightElbow.rotation.x, targetRElbowX, k, dt);
-      if (reiRig.cape) {
-        reiRig.cape.rotation.x = THREE.MathUtils.damp(reiRig.cape.rotation.x, 0.16 + capeFlutter, 8, dt);
-        if (reiRig.capeLower) {
-          reiRig.capeLower.rotation.x = THREE.MathUtils.damp(
-            reiRig.capeLower.rotation.x,
-            0.08 + capeFlutter * 1.45,
-            7,
-            dt
-          );
-        }
-      }
-
-      reiShadow.position.x = reiRig.root.position.x;
-      reiShadow.position.z = reiRig.root.position.z;
-
-      // =========================================================================
-      // CINEMÁTICA DO VENCEDOR NO PEDESTAL (ESPERA -> VÉNIA REAL -> SALTO TRIUNFAL)
-      // =========================================================================
-      let winnerJumpY = 0;
-      let winnerTorsoX = 0;
-      let winnerHeadX = 0;
-      let winnerHeadY = -0.22;
-      let winnerArmX = -0.15;
-      let winnerArmZ = 0.08;
-      let winnerElbowX = -0.25;
-      let winnerLegTuck = 0;
-
-      if (animElapsed >= 2.05 && animElapsed < 2.85 && !prefersReducedMotion) {
-        // Inclina respeitosamente a cabeça para receber a Coroa Real
-        const bowU = Math.sin(THREE.MathUtils.clamp((animElapsed - 2.05) / 0.8, 0, 1) * Math.PI);
-        winnerTorsoX = bowU * 0.12;
-        winnerHeadX = bowU * 0.26;
-        winnerHeadY = -0.18;
-        winnerArmX = -0.25;
-        winnerElbowX = -0.45;
-      } else if (animElapsed >= 2.85 && animElapsed < 4.05 && !prefersReducedMotion) {
-        const ju = (animElapsed - 2.85) / 1.2;
-        const arc = Math.sin(ju * Math.PI);
-        winnerJumpY = arc * 0.58;
-        winnerTorsoX = -arc * 0.08;
-        winnerHeadX = -0.12;
-        winnerHeadY = 0.15;
-        winnerArmX = -2.65;
-        winnerArmZ = 0.35;
-        winnerElbowX = -0.42;
-        winnerLegTuck = arc * 0.44;
-      } else if (animElapsed >= 4.05) {
-        const idleBounce = prefersReducedMotion ? 0 : Math.abs(Math.sin((animElapsed - 4.05) * 2.6)) * 0.06;
-        const cheer = Math.sin(animElapsed * 4.5);
-        winnerJumpY = idleBounce;
-        winnerTorsoX = -0.03;
-        winnerHeadX = -0.05;
-        winnerHeadY = 0.12 + cheer * 0.06;
-        winnerArmX = -2.35 + cheer * 0.15;
-        winnerArmZ = 0.35;
-        winnerElbowX = -0.35 - Math.abs(cheer) * 0.25;
-      }
-
-      winnerRig.root.position.y = THREE.MathUtils.damp(
-        winnerRig.root.position.y,
-        pedestalTopY + winnerJumpY,
-        14,
-        dt
-      );
-      winnerRig.torso.rotation.x = THREE.MathUtils.damp(winnerRig.torso.rotation.x, winnerTorsoX, 12, dt);
-      winnerRig.head.rotation.x = THREE.MathUtils.damp(winnerRig.head.rotation.x, winnerHeadX, 12, dt);
-      winnerRig.head.rotation.y = THREE.MathUtils.damp(winnerRig.head.rotation.y, winnerHeadY, 12, dt);
-      winnerRig.leftShoulder.rotation.x = THREE.MathUtils.damp(winnerRig.leftShoulder.rotation.x, winnerArmX, 12, dt);
-      winnerRig.leftShoulder.rotation.z = THREE.MathUtils.damp(winnerRig.leftShoulder.rotation.z, -winnerArmZ, 12, dt);
-      winnerRig.leftElbow.rotation.x = THREE.MathUtils.damp(winnerRig.leftElbow.rotation.x, winnerElbowX, 12, dt);
-      winnerRig.rightShoulder.rotation.x = THREE.MathUtils.damp(winnerRig.rightShoulder.rotation.x, winnerArmX, 12, dt);
-      winnerRig.rightShoulder.rotation.z = THREE.MathUtils.damp(winnerRig.rightShoulder.rotation.z, winnerArmZ, 12, dt);
-      winnerRig.rightElbow.rotation.x = THREE.MathUtils.damp(winnerRig.rightElbow.rotation.x, winnerElbowX, 12, dt);
-      winnerRig.leftHip.rotation.x = THREE.MathUtils.damp(winnerRig.leftHip.rotation.x, -winnerLegTuck, 12, dt);
-      winnerRig.rightHip.rotation.x = THREE.MathUtils.damp(winnerRig.rightHip.rotation.x, -winnerLegTuck, 12, dt);
-      winnerRig.leftKnee.rotation.x = THREE.MathUtils.damp(winnerRig.leftKnee.rotation.x, winnerLegTuck * 1.4, 12, dt);
-      winnerRig.rightKnee.rotation.x = THREE.MathUtils.damp(winnerRig.rightKnee.rotation.x, winnerLegTuck * 1.4, 12, dt);
-      if (winnerRig.cape) {
-        const wFlutter = 0.14 + (winnerJumpY > 0.08 ? 0.35 : 0.05) + Math.sin(animElapsed * 4.2) * 0.08;
-        winnerRig.cape.rotation.x = THREE.MathUtils.damp(winnerRig.cape.rotation.x, wFlutter, 10, dt);
-        if (winnerRig.capeLower) {
-          winnerRig.capeLower.rotation.x = THREE.MathUtils.damp(winnerRig.capeLower.rotation.x, wFlutter * 0.85, 9, dt);
-        }
-      }
-      if (winnerRig.ponytail) {
-        winnerRig.ponytail.rotation.x = THREE.MathUtils.damp(
-          winnerRig.ponytail.rotation.x,
-          0.35 + winnerJumpY * 0.75 + Math.sin(animElapsed * 4) * 0.08,
-          10,
-          dt
-        );
-      }
-
-      // Atualiza matrizes do esqueleto antes de posicionar a Coroa Real 3D
-      reiRig.root.updateMatrixWorld(true);
-      winnerRig.root.updateMatrixWorld(true);
-
-      if (crownOwner === 'reiHead') {
-        reiRig.headCrownAnchor.getWorldPosition(_tmpVecA);
-        reiRig.headCrownAnchor.getWorldQuaternion(_tmpQuatA);
-        crownGroup.position.copy(_tmpVecA);
-        crownGroup.quaternion.copy(_tmpQuatA);
-      } else if (crownOwner === 'reiHand') {
-        reiRig.handCrownAnchor.getWorldPosition(_tmpVecA);
-        reiRig.handCrownAnchor.getWorldQuaternion(_tmpQuatA);
-        crownGroup.position.copy(_tmpVecA);
-        crownGroup.quaternion.copy(_tmpQuatA);
-      } else if (crownOwner === 'flying') {
-        const flyU = THREE.MathUtils.clamp((animElapsed - 2.05) / 0.72, 0, 1);
-        const easedFly = flyU * flyU * (3 - 2 * flyU);
-        reiRig.handCrownAnchor.getWorldPosition(_tmpVecA);
-        winnerRig.headCrownAnchor.getWorldPosition(_tmpVecB);
-        _tmpVecC.lerpVectors(_tmpVecA, _tmpVecB, easedFly);
-        _tmpVecC.y += Math.sin(easedFly * Math.PI) * 0.32;
-        crownGroup.position.copy(_tmpVecC);
-
-        reiRig.handCrownAnchor.getWorldQuaternion(_tmpQuatA);
-        winnerRig.headCrownAnchor.getWorldQuaternion(_tmpQuatB);
-        crownGroup.quaternion.slerpQuaternions(_tmpQuatA, _tmpQuatB, easedFly);
-      } else {
-        winnerRig.headCrownAnchor.getWorldPosition(_tmpVecA);
-        winnerRig.headCrownAnchor.getWorldQuaternion(_tmpQuatA);
-        crownGroup.position.copy(_tmpVecA);
-        crownGroup.quaternion.copy(_tmpQuatA);
-      }
-
-      // Partículas douradas orbitais ao redor da coroa e do campeão (Zero-GC)
-      const sparklesActive = animElapsed >= 2.05;
-      for (let si = 0; si < sparkles.length; si++) {
-        const sp = sparkles[si];
-        sp.mesh.visible = sparklesActive;
-        if (sparklesActive) {
-          const ang = sp.phase + animElapsed * sp.speed;
-          const cx = crownOwner === 'flying' ? crownGroup.position.x : pedestalX;
-          const cz = crownOwner === 'flying' ? crownGroup.position.z : pedestalZ;
-          const baseY = crownOwner === 'flying' ? crownGroup.position.y - 0.15 : pedestalTopY + 1.15;
-          sp.mesh.position.set(
-            cx + Math.cos(ang) * sp.radius,
-            baseY + sp.heightOffset + Math.sin(animElapsed * 2.5 + sp.phase) * 0.16,
-            cz + Math.sin(ang) * sp.radius
-          );
-          sp.mesh.rotation.y = ang * 1.5;
-          const s = 0.7 + 0.45 * Math.sin(animElapsed * 4.5 + sp.phase);
-          sp.mesh.scale.setScalar(s);
-        }
-      }
-
-      // Movimento sutil e cinematográfico da câmara acompanhando a entrega da coroa (sem saltos bruscos no lookAt)
-      const targetCamX = animElapsed < 1.25 ? -0.1 : animElapsed < 2.85 ? 0.28 : 0.18;
-      const targetCamZ = animElapsed < 1.25 ? 6.2 : animElapsed < 2.85 ? 5.75 : 5.95;
-      camera.position.x = THREE.MathUtils.damp(camera.position.x, targetCamX, 3.6, dt);
-      camera.position.z = THREE.MathUtils.damp(camera.position.z, targetCamZ, 3.6, dt);
-      camLookX = THREE.MathUtils.damp(camLookX, targetCamX * 0.65, 3.6, dt);
-      camera.lookAt(camLookX, 1.15, 0);
+      applyPoseAtElapsed(animElapsed);
 
       renderer.render(scene, camera);
 
@@ -1550,7 +1429,6 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h, false);
-      renderer.render(scene, camera);
     };
 
     const resizeObserver =
@@ -1671,9 +1549,10 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
             {stage === 1 && (
               <motion.div
                 key="rei3d-b1"
-                initial={{ opacity: 0, scale: 0.7, y: 6 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22 }}
                 className="bg-amber-400 text-zinc-950 text-[10px] font-black px-2.5 py-1 rounded-xl shadow-lg border border-amber-200 whitespace-nowrap"
               >
                 {t.coronation.bubble1}
@@ -1682,9 +1561,10 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
             {stage === 2 && (
               <motion.div
                 key="rei3d-b2"
-                initial={{ opacity: 0, scale: 0.7, y: 6 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22 }}
                 className="bg-yellow-400 text-zinc-950 text-[10px] font-black px-2.5 py-1 rounded-xl shadow-lg border border-white whitespace-nowrap"
               >
                 {t.coronation.bubble2}
@@ -1693,8 +1573,10 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
             {stage >= 3 && (
               <motion.div
                 key="rei3d-b3"
-                initial={{ opacity: 0, scale: 0.7, y: 6 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22 }}
                 className="bg-zinc-900 text-amber-300 text-[10px] font-bold px-2.5 py-1 rounded-lg border border-amber-500/60 shadow whitespace-nowrap"
               >
                 {t.coronation.bubble3}
@@ -1709,9 +1591,10 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
             {stage === 3 && (
               <motion.div
                 key="win3d-jump"
-                initial={{ opacity: 0, scale: 0.65, y: 8 }}
-                animate={{ opacity: 1, scale: 1.05, y: 0 }}
-                exit={{ opacity: 0, scale: 0.85 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22 }}
                 className="bg-emerald-500 text-zinc-950 font-black text-[10px] sm:text-[11px] px-2.5 py-1 rounded-xl shadow-lg border border-white flex items-center gap-1 whitespace-nowrap"
               >
                 <span>🎉</span>
@@ -1722,8 +1605,10 @@ export const CoronationCeremony: React.FC<CoronationCeremonyProps> = ({
             {stage >= 4 && (
               <motion.div
                 key="win3d-crowned"
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22 }}
                 className="bg-emerald-950 text-emerald-300 font-bold text-[9px] px-2.5 py-1 rounded-lg border border-emerald-500/60 shadow whitespace-nowrap"
               >
                 👑 {t.coronation.crownedBadge}

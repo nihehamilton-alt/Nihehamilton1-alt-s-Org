@@ -195,6 +195,12 @@
   contain: layout style;
 }
 
+.podium-bg-base.podium-ceremony-still::before,
+.podium-bg-base.podium-ceremony-still::after {
+  animation: none !important;
+  transform: none !important;
+}
+
 .podium-bg-base::before,
 .podium-bg-base::after {
   content: '';

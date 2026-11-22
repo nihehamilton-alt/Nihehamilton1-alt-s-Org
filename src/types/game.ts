@@ -142,6 +142,7 @@ export interface Competitor {
   profileReady?: boolean;
   isHost?: boolean;
   isRemoteHuman?: boolean;
+  isSpectating?: boolean;
   betAmount?: number;
   sessionStatus?: CompetitorSessionStatus;
 }
@@ -183,6 +184,8 @@ export interface RoomStandingEntry {
   betAmount: number;
   payoutKz: number;
 }
+
+export type ServerRaceStatus = 'idle' | 'starting' | 'running' | 'completed';
 
 export type GameStatus = 'idle' | 'lobby' | 'starting' | 'running' | 'completed';
 
