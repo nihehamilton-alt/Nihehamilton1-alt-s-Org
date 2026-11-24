@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { Lane, Competitor, Obstacle, PowerUpItem, Coin, Player, TimeMode, GameStatus } from '../types/game';
+import { Lane, Competitor, Obstacle, PowerUpItem, Coin, Player, TimeMode, GameStatus, WeatherState } from '../types/game';
 import {
   LANE_CENTERS,
   LANE_WIDTH,
@@ -24,6 +24,7 @@ export interface ThreeLiveState {
   obstacles: Obstacle[];
   powerUps: PowerUpItem[];
   coins: Coin[];
+  weather?: WeatherState;
   isSpectating?: boolean;
   followedRunnerId?: string | null;
 }
@@ -509,6 +510,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
     // Palmeiras de copa múltipla & Postes da Marginal de Luanda (Scrolláveis sincronizados à velocidade real)
     const sceneryGroup = new THREE.Group();
     const sceneryItems: THREE.Group[] = [];
+    const palmItems: THREE.Group[] = [];
     const trunkLowerGeo = new THREE.CylinderGeometry(0.18, 0.28, 3.0, 7);
     const trunkUpperGeo = new THREE.CylinderGeometry(0.12, 0.19, 2.8, 7);
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.88 });
@@ -567,6 +569,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
       palm.position.set(6.45, 0, pz);
       sceneryGroup.add(palm);
       sceneryItems.push(palm);
+      palmItems.push(palm);
 
       const lamp = new THREE.Group();
       const pole = new THREE.Mesh(poleGeo, poleMat);
@@ -742,6 +745,66 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
       slot.g = _trailTmpColor.g;
       slot.b = _trailTmpColor.b;
     };
+
+    // ========================================================================
+    // CLIMA DINÂMICO 3D (CHUVA LEVE & RAJADAS DE VENTO - ZERO-GC INSTANCED POOL)
+    // ========================================================================
+    const WEATHER_STREAK_COUNT = 120;
+    const weatherStreakGeo = new THREE.BoxGeometry(0.032, 0.9, 0.032);
+    const weatherStreakMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.52,
+      depthWrite: false,
+    });
+    const weatherStreakMesh = new THREE.InstancedMesh(
+      weatherStreakGeo,
+      weatherStreakMat,
+      WEATHER_STREAK_COUNT
+    );
+    weatherStreakMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    weatherStreakMesh.instanceColor = new THREE.InstancedBufferAttribute(
+      new Float32Array(WEATHER_STREAK_COUNT * 3),
+      3
+    );
+    weatherStreakMesh.frustumCulled = false;
+    weatherStreakMesh.renderOrder = 3;
+    scene.add(weatherStreakMesh);
+
+    const _weatherPos = new THREE.Vector3();
+    const _weatherQuat = new THREE.Quaternion();
+    const _weatherScale = new THREE.Vector3();
+    const _weatherMat4 = new THREE.Matrix4();
+    const _weatherZeroMat = new THREE.Matrix4().makeScale(0, 0, 0);
+    const _weatherEuler = new THREE.Euler();
+    const _weatherRainColor = new THREE.Color(0xbae6fd);
+    const _weatherWindColor = new THREE.Color(0xe2e8f0);
+
+    interface WeatherStreakSlot {
+      x: number;
+      y: number;
+      z: number;
+      speedFactor: number;
+      lenScale: number;
+    }
+
+    const weatherSlots: WeatherStreakSlot[] = Array.from(
+      { length: WEATHER_STREAK_COUNT },
+      (_, idx) => {
+        weatherStreakMesh.setMatrixAt(idx, _weatherZeroMat);
+        weatherStreakMesh.setColorAt(idx, _weatherRainColor);
+        return {
+          x: (((idx * 73) % 220) / 220 - 0.5) * 22,
+          y: (((idx * 41) % 100) / 100) * 10.5,
+          z: -30 + (((idx * 97) % 100) / 100) * 40,
+          speedFactor: 0.78 + ((idx * 29) % 45) / 100,
+          lenScale: 0.75 + ((idx * 17) % 60) / 100,
+        };
+      }
+    );
+    weatherStreakMesh.instanceMatrix.needsUpdate = true;
+    if (weatherStreakMesh.instanceColor) weatherStreakMesh.instanceColor.needsUpdate = true;
+    let weatherMeshVisible = false;
 
     // Geometrias & materiais partilhados para zero alocação/vazamento de GPU em 60 FPS
     const sharedGeos = {
@@ -1640,6 +1703,33 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
       }
 
       const worldSpeed = isRunning ? liveSpeed * 3.1 : 0;
+      const weather = isRunning ? live?.weather : undefined;
+      const weatherIntensity = weather?.intensity ?? 0;
+      const isRainWeather = weather?.kind === 'light-rain' && weatherIntensity > 0.02;
+      const isWindWeather = weather?.kind === 'wind-gust' && weatherIntensity > 0.02;
+
+      // Resposta atmosférica ao clima (neblina costeira, iluminação e reflexo de asfalto húmido)
+      if (scene.fog) {
+        const targetFogDensity = isRainWeather
+          ? 0.011 + 0.005 * weatherIntensity
+          : isWindWeather
+          ? 0.011 + 0.0022 * weatherIntensity
+          : 0.011;
+        const fogExp = scene.fog as THREE.FogExp2;
+        fogExp.density = THREE.MathUtils.damp(fogExp.density, targetFogDensity, 4.5, dt);
+      }
+      const baseSunIntensity = currentIsNight ? 0.95 : 1.35;
+      const targetSunIntensity = isRainWeather
+        ? baseSunIntensity * (1 - 0.24 * weatherIntensity)
+        : baseSunIntensity;
+      sunMoonLight.intensity = THREE.MathUtils.damp(
+        sunMoonLight.intensity,
+        targetSunIntensity,
+        5,
+        dt
+      );
+      const targetRoadRoughness = isRainWeather ? 0.82 - 0.42 * weatherIntensity : 0.82;
+      roadMat.roughness = THREE.MathUtils.damp(roadMat.roughness, targetRoadRoughness, 5, dt);
 
       // Rolagem real da pista, texturas & palmeiras sincronizada à velocidade real
       if (isRunning) {
@@ -1661,25 +1751,62 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
           if (item.position.z > 20) item.position.z -= 216;
         }
 
-        // Câmera com amortecimento exponencial independente do framerate (Y estável para salto vertical nítido)
+        const timeSec = now * 0.001;
+        const palmWindBase = isWindWeather
+          ? (weather!.windDirection || 1) * (0.045 + 0.055 * (weather!.gustPulse || 0)) * weatherIntensity
+          : isRainWeather
+          ? (weather!.windDirection || 1) * 0.025 * weatherIntensity
+          : 0;
+        for (let i = 0; i < palmItems.length; i++) {
+          const palm = palmItems[i];
+          const palmSway =
+            palmWindBase !== 0
+              ? palmWindBase + Math.sin(timeSec * 3.8 + i * 0.9) * 0.022 * weatherIntensity
+              : 0;
+          palm.rotation.z = THREE.MathUtils.damp(palm.rotation.z, palmSway, 7, dt);
+        }
+
+        // Câmera com amortecimento exponencial + micro-vibração reativa ao clima e impacto
         const strideAmp = isPlayerStumbling ? 0.035 : 0.075;
         const strideBob = Math.sin(runStridePhase) * strideAmp;
-        const clampedPlayerWorldX = toWorldX(playerLaneX, playerLane);
-        const targetCamX = clampedPlayerWorldX * 0.28;
-        const targetCamY = 6.4 + strideBob;
-        camera.position.x = THREE.MathUtils.damp(camera.position.x, targetCamX, 11, dt);
-        camera.position.y = THREE.MathUtils.damp(camera.position.y, targetCamY, 12, dt);
+        const weatherShake = weather?.shakeIntensity ?? 0;
+        const stumbleShake = isPlayerStumbling ? 0.35 : 0;
+        const totalShake = Math.min(1.0, weatherShake + stumbleShake);
+        const shakeX =
+          totalShake > 0.01
+            ? (Math.sin(timeSec * 31.0) * 0.65 + Math.cos(timeSec * 47.0) * 0.35) *
+              0.16 *
+              totalShake
+            : 0;
+        const shakeY =
+          totalShake > 0.01
+            ? (Math.cos(timeSec * 37.0) * 0.6 + Math.sin(timeSec * 53.0) * 0.4) *
+              0.11 *
+              totalShake
+            : 0;
 
-        const targetFov = isPlayerStumbling ? 56 : 60;
+        const clampedPlayerWorldX = toWorldX(playerLaneX, playerLane);
+        const targetCamX = clampedPlayerWorldX * 0.28 + shakeX;
+        const targetCamY = 6.4 + strideBob + shakeY;
+        camera.position.x = THREE.MathUtils.damp(camera.position.x, targetCamX, 14, dt);
+        camera.position.y = THREE.MathUtils.damp(camera.position.y, targetCamY, 15, dt);
+
+        const targetFov = isPlayerStumbling ? 56 : isWindWeather ? 60 + 1.2 * (weather!.gustPulse || 0) : 60;
         if (Math.abs(camera.fov - targetFov) > 0.05) {
           camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 9, dt);
           camera.updateProjectionMatrix();
         }
         camera.lookAt(camera.position.x * 0.4, 1.0, -14);
-        const targetRoll = live ? -(live.playerLeanAngle || 0) * 0.05 : 0;
+        const windRoll = isWindWeather
+          ? (weather!.windDirection || 1) * 0.02 * weatherIntensity * (0.4 + 0.6 * (weather!.gustPulse || 0))
+          : 0;
+        const targetRoll = (live ? -(live.playerLeanAngle || 0) * 0.05 : 0) + windRoll;
         camRoll = THREE.MathUtils.damp(camRoll, targetRoll, 12, dt);
         camera.rotation.z = camRoll;
       } else {
+        for (let i = 0; i < palmItems.length; i++) {
+          palmItems[i].rotation.z = THREE.MathUtils.damp(palmItems[i].rotation.z, 0, 7, dt);
+        }
         const targetCamX = (lanePositionsX[playerLane] ?? 0) * 0.28;
         camera.position.x = THREE.MathUtils.damp(camera.position.x, targetCamX, 10, dt);
         camera.position.y = THREE.MathUtils.damp(camera.position.y, 6.4, 10, dt);
@@ -1690,6 +1817,60 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
         camera.lookAt(camera.position.x * 0.4, 1.0, -14);
         camRoll = THREE.MathUtils.damp(camRoll, 0, 12, dt);
         camera.rotation.z = camRoll;
+      }
+
+      // Partículas climáticas 3D (gotas de chuva inclinadas ou rajadas de vento na Baía)
+      if (isRunning && (isRainWeather || isWindWeather)) {
+        weatherMeshVisible = true;
+        const windDir = weather?.windDirection ?? 1;
+        const streakColor = isRainWeather ? _weatherRainColor : _weatherWindColor;
+        weatherStreakMat.opacity = isRainWeather
+          ? 0.28 + 0.34 * weatherIntensity
+          : 0.16 + 0.28 * weatherIntensity;
+
+        const tiltZ = isRainWeather ? -windDir * 0.22 : -windDir * 1.32;
+        const tiltX = isRainWeather ? 0.14 : 0.05;
+        _weatherEuler.set(tiltX, 0, tiltZ);
+        _weatherQuat.setFromEuler(_weatherEuler);
+
+        for (let i = 0; i < WEATHER_STREAK_COUNT; i++) {
+          const slot = weatherSlots[i];
+          if (isRainWeather) {
+            slot.y -= (24 + liveSpeed * 0.65) * slot.speedFactor * dt;
+            slot.x += windDir * 4.5 * slot.speedFactor * dt;
+            slot.z += worldSpeed * 0.45 * dt;
+            if (slot.y < 0.05) {
+              slot.y = 9.5 + (i % 3);
+              slot.x = (((i * 73 + Math.floor(now * 0.03)) % 220) / 220 - 0.5) * 22;
+              slot.z = -30 + (((i * 97) % 100) / 100) * 40;
+            }
+            if (slot.z > 10) slot.z -= 40;
+            _weatherScale.set(0.8, slot.lenScale * (0.75 + 0.35 * weatherIntensity), 0.8);
+          } else {
+            const gustBoost = 1 + 0.85 * (weather?.gustPulse ?? 0.5);
+            slot.x += windDir * 24 * gustBoost * slot.speedFactor * dt;
+            slot.z += worldSpeed * 0.55 * dt;
+            slot.y -= 1.2 * slot.speedFactor * dt;
+            if (slot.x > 12) slot.x = -12;
+            else if (slot.x < -12) slot.x = 12;
+            if (slot.y < 0.25) slot.y = 7.8;
+            if (slot.z > 10) slot.z -= 40;
+            _weatherScale.set(0.65, slot.lenScale * (1.2 + 0.9 * weatherIntensity), 0.65);
+          }
+
+          _weatherPos.set(slot.x, slot.y, slot.z);
+          _weatherMat4.compose(_weatherPos, _weatherQuat, _weatherScale);
+          weatherStreakMesh.setMatrixAt(i, _weatherMat4);
+          weatherStreakMesh.setColorAt(i, streakColor);
+        }
+        weatherStreakMesh.instanceMatrix.needsUpdate = true;
+        if (weatherStreakMesh.instanceColor) weatherStreakMesh.instanceColor.needsUpdate = true;
+      } else if (weatherMeshVisible) {
+        weatherMeshVisible = false;
+        for (let i = 0; i < WEATHER_STREAK_COUNT; i++) {
+          weatherStreakMesh.setMatrixAt(i, _weatherZeroMat);
+        }
+        weatherStreakMesh.instanceMatrix.needsUpdate = true;
       }
 
       // Trono aproxima-se nos últimos 5.5 segundos na mesma cadência da pista até à meta aos 40s
@@ -2319,6 +2500,9 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = (props) => {
       baseTrailGeo.dispose();
       baseTrailMat.dispose();
       baseTrailMesh.dispose();
+      weatherStreakGeo.dispose();
+      weatherStreakMat.dispose();
+      weatherStreakMesh.dispose();
       runnerBodyMats.forEach((mat) => mat.dispose());
       runnerRigMap.clear();
       obsMeshMap.clear();

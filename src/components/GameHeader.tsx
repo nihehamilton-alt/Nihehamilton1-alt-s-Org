@@ -24,6 +24,11 @@ interface GameHeaderProps {
   onToggleViewMode: () => void;
   timeMode: TimeMode;
   onToggleTimeMode: () => void;
+  rttMs?: number | null;
+  serverConnected?: boolean;
+  canSpectate?: boolean;
+  isSpectating?: boolean;
+  onSpectate?: () => void;
 }
 
 export const GameHeader: React.FC<GameHeaderProps> = ({
@@ -47,12 +52,146 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
   onToggleViewMode,
   timeMode,
   onToggleTimeMode,
+  rttMs = null,
+  serverConnected = false,
+  canSpectate = false,
+  isSpectating = false,
+  onSpectate,
 }) => {
   const [showVolumeSlider, setShowVolumeSlider] = React.useState<boolean>(false);
   const volumePopoverRef = React.useRef<HTMLDivElement | null>(null);
-  const { t, langMeta, currencyMeta, geoInfo, openModal } = useI18n();
+  const { t, lang, langMeta, currencyMeta, geoInfo, openModal } = useI18n();
   const remaining = Math.max(0, TOTAL_GAME_TIME_SECONDS - Math.floor(elapsedSeconds));
   const isHardMode = elapsedSeconds >= HARD_MODE_START_SECONDS;
+  const langCode = (lang || 'pt').slice(0, 2);
+  const spectateLabel =
+    langCode === 'pt'
+      ? 'Assistir'
+      : langCode === 'es'
+      ? 'Espectador'
+      : langCode === 'fr'
+      ? 'Regarder'
+      : 'Spectate';
+  const spectatingActiveLabel =
+    langCode === 'pt'
+      ? 'A Assistir'
+      : langCode === 'es'
+      ? 'Observando'
+      : langCode === 'fr'
+      ? 'Spectateur'
+      : 'Spectating';
+  const spectateTooltip =
+    langCode === 'pt'
+      ? 'Assistir aos corredores ao vivo (Modo Fantasma)'
+      : langCode === 'es'
+      ? 'Ver corredores en vivo (Modo Espectador)'
+      : langCode === 'fr'
+      ? 'Regarder les coureurs en direct (Mode Spectateur)'
+      : 'Watch live runners (Spectator Mode)';
+  const isSfxActive = soundEnabled && volume > 0;
+  const sfxOnLabel =
+    langCode === 'pt' ? 'Som On' : langCode === 'es' ? 'Sonido' : langCode === 'fr' ? 'Son On' : 'SFX On';
+  const sfxMutedLabel =
+    langCode === 'pt' ? 'Mudo' : langCode === 'es' ? 'Silencio' : langCode === 'fr' ? 'Muet' : 'Muted';
+  const sfxToggleTooltip = isSfxActive
+    ? langCode === 'pt'
+      ? 'Efeitos sonoros ativos — clique para silenciar'
+      : langCode === 'es'
+      ? 'Efectos de sonido activos — clic para silenciar'
+      : langCode === 'fr'
+      ? 'Effets sonores actifs — cliquer pour couper'
+      : 'Race sound effects active — click to mute'
+    : langCode === 'pt'
+    ? 'Efeitos sonoros silenciados — clique para ativar'
+    : langCode === 'es'
+    ? 'Efectos de sonido silenciados — clic para activar'
+    : langCode === 'fr'
+    ? 'Effets sonores coupés — cliquer pour activer'
+    : 'Race sound effects muted — click to unmute';
+
+  const rttDisplay = React.useMemo(() => {
+    const langCode = (lang || 'pt').slice(0, 2);
+    const hasValue = serverConnected && typeof rttMs === 'number' && Number.isFinite(rttMs);
+    if (!serverConnected) {
+      return {
+        dotClass: 'bg-zinc-500',
+        textClass: 'text-zinc-400',
+        borderClass: 'border-white/10',
+        valueText: '-- ms',
+        label:
+          langCode === 'en'
+            ? 'Server connection offline'
+            : langCode === 'es'
+            ? 'Conexión sin servidor'
+            : langCode === 'fr'
+            ? 'Connexion hors ligne'
+            : 'Ligação local (sem servidor)',
+      };
+    }
+    if (!hasValue) {
+      return {
+        dotClass: 'bg-amber-400 animate-pulse',
+        textClass: 'text-amber-300',
+        borderClass: 'border-amber-500/30',
+        valueText: '... ms',
+        label:
+          langCode === 'en'
+            ? 'Measuring latency (RTT)'
+            : langCode === 'es'
+            ? 'Midiendo latencia (RTT)'
+            : langCode === 'fr'
+            ? 'Mesure de la latence (RTT)'
+            : 'A medir latência (RTT)',
+      };
+    }
+    const ms = Math.max(0, Math.round(rttMs));
+    if (ms <= 70) {
+      return {
+        dotClass: 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]',
+        textClass: 'text-emerald-300',
+        borderClass: 'border-emerald-500/35',
+        valueText: `${ms}ms`,
+        label:
+          langCode === 'en'
+            ? `Connection quality: Excellent (${ms}ms RTT)`
+            : langCode === 'es'
+            ? `Calidad de conexión: Excelente (${ms}ms RTT)`
+            : langCode === 'fr'
+            ? `Qualité de connexion : Excellente (${ms}ms RTT)`
+            : `Qualidade da ligação: Excelente (${ms}ms RTT)`,
+      };
+    }
+    if (ms <= 150) {
+      return {
+        dotClass: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]',
+        textClass: 'text-amber-300',
+        borderClass: 'border-amber-500/35',
+        valueText: `${ms}ms`,
+        label:
+          langCode === 'en'
+            ? `Connection quality: Fair (${ms}ms RTT)`
+            : langCode === 'es'
+            ? `Calidad de conexión: Media (${ms}ms RTT)`
+            : langCode === 'fr'
+            ? `Qualité de connexion : Moyenne (${ms}ms RTT)`
+            : `Qualidade da ligação: Moderada (${ms}ms RTT)`,
+      };
+    }
+    return {
+      dotClass: 'bg-rose-400 shadow-[0_0_6px_rgba(251,113,133,0.7)]',
+      textClass: 'text-rose-300',
+      borderClass: 'border-rose-500/40',
+      valueText: `${ms}ms`,
+      label:
+        langCode === 'en'
+          ? `Connection quality: High latency (${ms}ms RTT)`
+          : langCode === 'es'
+          ? `Calidad de conexión: Latencia alta (${ms}ms RTT)`
+          : langCode === 'fr'
+          ? `Qualité de connexion : Latence élevée (${ms}ms RTT)`
+          : `Qualidade da ligação: Latência alta (${ms}ms RTT)`,
+    };
+  }, [lang, rttMs, serverConnected]);
 
   React.useEffect(() => {
     if (!showVolumeSlider) return;
@@ -74,12 +213,23 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
 
   return (
     <header className="w-full game-panel border-x-0 border-t-0 border-b border-amber-500/25 px-3 py-2.5 flex flex-col gap-2.5 backdrop-blur-md">
-      {/* Top Banner: Assinatura e Frase Oficial */}
-      <div className="max-w-6xl mx-auto w-full flex flex-wrap items-center justify-between text-[11px] border-b border-white/10 pb-1.5 text-zinc-400 font-mono">
+      {/* Top Banner: Assinatura, Frase Oficial e Latência RTT */}
+      <div className="max-w-6xl mx-auto w-full flex flex-wrap items-center justify-between gap-2 text-[11px] border-b border-white/10 pb-1.5 text-zinc-400 font-mono">
         <div className="flex items-center gap-2">
           <span className="text-amber-400 font-bold tracking-wide">👑 {t.officialPhrase}</span>
         </div>
         <div className="flex items-center gap-2">
+          <div
+            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-zinc-900/80 border ${rttDisplay.borderClass} text-[10px] font-mono`}
+            title={rttDisplay.label}
+            aria-label={rttDisplay.label}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${rttDisplay.dotClass}`} />
+            <span className="text-zinc-500 uppercase tracking-wider">RTT</span>
+            <span className={`font-bold tabular-nums ${rttDisplay.textClass}`}>
+              {rttDisplay.valueText}
+            </span>
+          </div>
           <span className="text-zinc-600 hidden sm:inline">|</span>
           <span className="text-amber-300 font-semibold">{t.creatorSignature}</span>
         </div>
@@ -245,6 +395,29 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
             </span>
           </button>
 
+          {canSpectate && onSpectate && (
+            <button
+              type="button"
+              onClick={onSpectate}
+              className="px-2.5 h-8 rounded-xl bg-gradient-to-r from-sky-500/30 to-cyan-500/25 hover:from-sky-500/45 hover:to-cyan-500/40 border border-sky-400/75 text-sky-100 text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-[0_0_14px_rgba(56,189,248,0.28)] transition-all"
+              title={spectateTooltip}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse shrink-0" />
+              <span>👻</span>
+              <span>{spectateLabel}</span>
+            </button>
+          )}
+
+          {isSpectating && !canSpectate && (
+            <span
+              className="px-2.5 h-8 rounded-xl bg-cyan-950/85 border border-cyan-400/60 text-cyan-200 text-xs font-black flex items-center gap-1.5"
+              title={spectateTooltip}
+            >
+              <span>👻</span>
+              <span className="hidden sm:inline">{spectatingActiveLabel}</span>
+            </span>
+          )}
+
           <button
             type="button"
             disabled={status === 'running' || status === 'starting'}
@@ -287,17 +460,56 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
             <span className="hidden lg:inline">/admin-rei-zero</span>
           </button>
 
-          <div className="relative" ref={volumePopoverRef}>
+          <div
+            className="relative flex items-center game-subplate rounded-xl p-0.5 border border-white/10"
+            ref={volumePopoverRef}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (!soundEnabled) {
+                  onToggleSound();
+                  if (volume <= 0) onVolumeChange(0.7);
+                } else if (volume <= 0) {
+                  onVolumeChange(0.7);
+                } else {
+                  onToggleSound();
+                }
+              }}
+              aria-pressed={isSfxActive}
+              aria-label={sfxToggleTooltip}
+              title={sfxToggleTooltip}
+              className={`px-2 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+                isSfxActive
+                  ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-400/50'
+                  : 'bg-rose-950/75 hover:bg-rose-900/80 text-rose-300 border border-rose-500/45'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                  isSfxActive
+                    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]'
+                    : 'bg-rose-400'
+                }`}
+              />
+              <span>{isSfxActive ? (volume > 0.5 ? '🔊' : '🔉') : '🔇'}</span>
+              <span className="font-mono uppercase tracking-tight text-[10px]">
+                {isSfxActive ? sfxOnLabel : sfxMutedLabel}
+              </span>
+            </button>
+
             <button
               type="button"
               onClick={() => setShowVolumeSlider((prev) => !prev)}
-              className="px-2.5 h-8 rounded-xl game-btn-secondary text-zinc-200 flex items-center gap-1.5 text-xs font-bold cursor-pointer"
+              className="px-1.5 h-7 rounded-lg text-[10px] text-amber-400 font-mono font-bold hover:bg-white/5 flex items-center gap-0.5 cursor-pointer transition-colors"
               title={t.header.volumeTitle}
+              aria-label={t.header.volumeTitle}
+              aria-expanded={showVolumeSlider}
             >
-              <span>{soundEnabled && volume > 0 ? (volume > 0.5 ? '🔊' : '🔉') : '🔇'}</span>
-              <span className="text-[10px] text-amber-400 font-mono">
-                {soundEnabled ? `${Math.round(volume * 100)}%` : '0%'}
+              <span className="tabular-nums">
+                {isSfxActive ? `${Math.round(volume * 100)}%` : '0%'}
               </span>
+              <span className="text-[9px] text-zinc-400">▾</span>
             </button>
 
             {showVolumeSlider && (

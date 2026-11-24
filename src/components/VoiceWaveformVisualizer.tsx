@@ -151,6 +151,7 @@ export const VoiceWaveformVisualizer: React.FC<VoiceWaveformVisualizerProps> = (
 
     const smoothedLevels = new Map<string, number>();
     let timeBuffer: Float32Array<ArrayBuffer> = new Float32Array(256);
+    let freqBuffer: Uint8Array<ArrayBuffer> = new Uint8Array(128);
     let rafId = 0;
     let lastDomUpdate = 0;
 
@@ -216,7 +217,7 @@ export const VoiceWaveformVisualizer: React.FC<VoiceWaveformVisualizerProps> = (
         resolvedSpeakers.push({ spec, level: cleanLevel, analyser, isActive });
       }
 
-      // Draw waveform traces for each active speaker (or flat baseline when idle)
+      // Draw dynamic frequency spectrum + waveform traces for each active speaker (or flat baseline when idle)
       const activeTraces = resolvedSpeakers.filter((item) => item.isActive || item.level > 0.02);
 
       if (!joined || activeTraces.length === 0) {
@@ -228,23 +229,51 @@ export const VoiceWaveformVisualizer: React.FC<VoiceWaveformVisualizerProps> = (
         ctx.stroke();
       } else {
         const samplePoints = compact ? 44 : 68;
+        const freqBars = compact ? 20 : 28;
         const maxAmplitude = Math.max(8, height * 0.42);
         const phase = now * (prefersReducedMotion ? 0.001 : 0.0075);
 
         activeTraces.forEach((trace, traceIdx) => {
           const analyser = trace.analyser;
           let hasTimeSamples = false;
+          let hasFreqSamples = false;
           if (analyser) {
             if (timeBuffer.length !== analyser.fftSize) {
               timeBuffer = new Float32Array(analyser.fftSize);
             }
+            if (freqBuffer.length !== analyser.frequencyBinCount) {
+              freqBuffer = new Uint8Array(analyser.frequencyBinCount);
+            }
             analyser.getFloatTimeDomainData(timeBuffer);
+            analyser.getByteFrequencyData(freqBuffer);
             for (let k = 0; k < timeBuffer.length; k += 8) {
               if (Math.abs(timeBuffer[k]) > 0.0015) {
                 hasTimeSamples = true;
                 break;
               }
             }
+            for (let f = 1; f < Math.min(28, freqBuffer.length); f++) {
+              if (freqBuffer[f] > 8) {
+                hasFreqSamples = true;
+                break;
+              }
+            }
+          }
+
+          if (traceIdx === 0 && hasFreqSamples && !prefersReducedMotion) {
+            const barGap = 2;
+            const barW = Math.max(2, (width - barGap * (freqBars - 1)) / freqBars);
+            ctx.save();
+            ctx.fillStyle = trace.spec.color;
+            for (let b = 0; b < freqBars; b++) {
+              const binIdx = Math.min(freqBuffer.length - 1, b + 1);
+              const mag = freqBuffer[binIdx] / 255;
+              const halfBar = Math.max(1.5, mag * (height * 0.36));
+              ctx.globalAlpha = 0.12 + mag * 0.22;
+              const bx = b * (barW + barGap);
+              ctx.fillRect(bx, midY - halfBar, barW, halfBar * 2);
+            }
+            ctx.restore();
           }
 
           ctx.save();
@@ -266,10 +295,15 @@ export const VoiceWaveformVisualizer: React.FC<VoiceWaveformVisualizerProps> = (
                 timeBuffer.length - 1,
                 Math.floor(normX * (timeBuffer.length - 1))
               );
+              const freqIdx = Math.min(
+                freqBuffer.length - 1,
+                1 + Math.floor(normX * Math.min(22, freqBuffer.length - 2))
+              );
               const rawSample = timeBuffer[sampleIdx];
+              const freqEnergy = hasFreqSamples ? (freqBuffer[freqIdx] / 255) * 0.45 : 0;
               const boosted = Math.max(-1, Math.min(1, rawSample * 3.6));
               const synthCarrier =
-                Math.sin(normX * 14 + phase + traceIdx * 1.4) * trace.level * 0.32;
+                Math.sin(normX * 14 + phase + traceIdx * 1.4) * Math.max(trace.level * 0.32, freqEnergy * 0.55);
               displacement = (boosted * 0.8 + synthCarrier) * edgeEnvelope * maxAmplitude;
             } else {
               const envelope = prefersReducedMotion ? 0.55 : 1;

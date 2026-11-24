@@ -13,6 +13,8 @@ import {
   RacePerformanceMetrics,
   RemoteRunnerSnapshot,
   LocalRunnerTelemetry,
+  WeatherKind,
+  WeatherState,
 } from '../types/game';
 import {
   CANV_WIDTH,
@@ -51,6 +53,12 @@ import { getLocalizedPowerUp } from '../data/translations';
 import { drawVolumetricObstacle25D } from './canvasObstacles25D';
 import { drawCanvasRunnerAvatar } from './canvasRunnerAvatar';
 import { getMultiplayerStrings } from '../utils/multiplayerStrings';
+import {
+  createDefaultWeatherState,
+  evaluateRaceWeather,
+  getWeatherUiBadge,
+} from '../game/weather';
+import { CanvasMotionParticles, MotionParticleBurst } from './CanvasMotionParticles';
 
 interface GameCanvasProps {
   status: GameStatus;
@@ -156,6 +164,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const remotePlayersRefStable = useRef(remotePlayersRef);
   const syncedRaceStartAtRef = useRef<number | null>(syncedRaceStartAt);
   const raceSeedRef = useRef<number | null>(raceSeed);
+  const roundNonceRef = useRef<number>(roundNonce);
   const waveRngRef = useRef<() => number>(Math.random);
   const telemetryEmitRef = useRef({
     lastAt: 0,
@@ -176,6 +185,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   remotePlayersRefStable.current = remotePlayersRef;
   syncedRaceStartAtRef.current = syncedRaceStartAt;
   raceSeedRef.current = raceSeed;
+  roundNonceRef.current = roundNonce;
 
   useEffect(() => {
     if (status === 'starting' || status === 'idle') {
@@ -187,12 +197,59 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const [activePowerUpNotice, setActivePowerUpNotice] = useState<string | null>(null);
   const powerUpNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Sistema de Partículas Framer Motion (Jump & Coin Pickup)
+  const [motionBursts, setMotionBursts] = useState<MotionParticleBurst[]>([]);
+  const motionBurstIdRef = useRef<number>(1);
+  const motionBurstTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const viewModeRef = useRef<ViewMode>(viewMode);
+  viewModeRef.current = viewMode;
+  const rivalJumpCooldownRef = useRef<Map<string, number>>(new Map());
+
+  const emitMotionBurst = useCallback(
+    (
+      kind: 'jump' | 'coin',
+      canvasX: number,
+      canvasY: number,
+      options?: { color?: string; value?: number }
+    ) => {
+      const clampedX = Math.max(24, Math.min(CANV_WIDTH - 24, canvasX));
+      const clampedY = Math.max(48, Math.min(CANV_HEIGHT - 24, canvasY));
+      const xPct =
+        viewModeRef.current === '3d'
+          ? Math.max(14, Math.min(86, 50 + ((clampedX - LANE_CENTERS[2]) / TRACK_WIDTH) * 62))
+          : (clampedX / CANV_WIDTH) * 100;
+      const yPct =
+        viewModeRef.current === '3d'
+          ? Math.max(26, Math.min(84, 74 - ((PLAYER_BASE_Y - clampedY) / CANV_HEIGHT) * 44))
+          : (clampedY / CANV_HEIGHT) * 100;
+
+      const burstId = motionBurstIdRef.current++;
+      const burst: MotionParticleBurst = {
+        id: burstId,
+        kind,
+        xPct,
+        yPct,
+        color: options?.color,
+        value: options?.value,
+      };
+      setMotionBursts((prev) => [...prev.slice(-9), burst]);
+      const timer = setTimeout(() => {
+        motionBurstTimersRef.current.delete(timer);
+        setMotionBursts((prev) => prev.filter((item) => item.id !== burstId));
+      }, 600);
+      motionBurstTimersRef.current.add(timer);
+    },
+    []
+  );
+
   useEffect(() => {
     return () => {
       if (powerUpNoticeTimerRef.current) {
         clearTimeout(powerUpNoticeTimerRef.current);
         powerUpNoticeTimerRef.current = null;
       }
+      motionBurstTimersRef.current.forEach((timer) => clearTimeout(timer));
+      motionBurstTimersRef.current.clear();
     };
   }, []);
 
@@ -216,8 +273,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   // Posição em Tempo Real (1º ao 5º Lugar) + Quantos corredores está à frente
   const [liveRank, setLiveRank] = useState<number>(1);
   const [aheadOfCount, setAheadOfCount] = useState<number>(0);
+  const [weatherKindUi, setWeatherKindUi] = useState<WeatherKind>('clear');
   const lastRankRef = useRef<number>(1);
   const lastBehindRef = useRef<number>(0);
+  const lastWeatherKindRef = useRef<WeatherKind>('clear');
   const lastTimeEmitRef = useRef<number>(-1);
   const raceFinishedRef = useRef<boolean>(false);
   const prevRoundNonceRef = useRef<number>(roundNonce);
@@ -341,6 +400,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       compTrailAcc: number;
       sprintAudioAcc: number;
       sprintStepIndex: number;
+      weather: WeatherState;
     }
   >({
     status,
@@ -370,6 +430,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     compTrailAcc: 0,
     sprintAudioAcc: 0,
     sprintStepIndex: 0,
+    weather: createDefaultWeatherState(),
     isSpectating: Boolean(isSpectating),
     followedRunnerId: spectatedRunnerId ?? null,
     competitorsList: competitors.map((c) => ({ ...c })),
@@ -464,10 +525,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       stateRef.current.compTrailAcc = 0;
       stateRef.current.sprintAudioAcc = 0;
       stateRef.current.sprintStepIndex = 0;
+      stateRef.current.weather = createDefaultWeatherState();
       setLiveRank(1);
       setAheadOfCount(0);
       lastRankRef.current = 1;
       lastBehindRef.current = 0;
+      if (lastWeatherKindRef.current !== 'clear') {
+        lastWeatherKindRef.current = 'clear';
+        setWeatherKindUi('clear');
+      }
+      motionBurstTimersRef.current.forEach((timer) => clearTimeout(timer));
+      motionBurstTimersRef.current.clear();
+      rivalJumpCooldownRef.current.clear();
+      setMotionBursts([]);
       lastTimeEmitRef.current = -1;
       lastDashUiEmitRef.current = -1;
       syncDashUi(0);
@@ -671,8 +741,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       s.player.jumpVelocity = JUMP_INITIAL_VELOCITY;
       s.player.action = 'jumping';
       sounds.playJump();
+      emitMotionBurst('jump', s.player.laneX, PLAYER_BASE_Y + PLAYER_HEIGHT * 0.38, {
+        color: '#38bdf8',
+      });
     }
-  }, [recordObstacleReaction]);
+  }, [emitMotionBurst, recordObstacleReaction]);
 
   const triggerSlide = useCallback(() => {
     const s = stateRef.current;
@@ -958,10 +1031,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         }
         const currentWave = isHard ? WAVES[1] : WAVES[0];
         const baseWaveSpeed = currentWave.speed;
+        const activeWeatherSeed = raceSeedRef.current ?? (roundNonceRef.current || 1337);
+        const nextWeather = evaluateRaceWeather(activeWeatherSeed, s.elapsedSeconds);
+        s.weather = nextWeather;
+        if (nextWeather.kind !== lastWeatherKindRef.current) {
+          lastWeatherKindRef.current = nextWeather.kind;
+          setWeatherKindUi(nextWeather.kind);
+          if (nextWeather.kind !== 'clear') {
+            const wBadge = getWeatherUiBadge(nextWeather.kind, langRef.current);
+            pushFloatingText(s.floatingTexts, {
+              id: Date.now() + Math.random(),
+              text: `${wBadge.icon} ${wBadge.label}`,
+              x: CANV_WIDTH / 2,
+              y: 122,
+              color: nextWeather.kind === 'light-rain' ? '#7dd3fc' : '#e2e8f0',
+              alpha: 1.0,
+              life: 0,
+            });
+          }
+        }
 
         if (!spectatingNow) {
-          // Velocidade base idêntica para todos os corredores + Dash (420ms, recarga 4s) + Nitro
-          let activeSpeed = baseWaveSpeed;
+          // Velocidade base idêntica para todos os corredores + clima + Dash + Nitro
+          let activeSpeed = baseWaveSpeed * nextWeather.speedMultiplier;
           if (s.player.nitroTimer > 0) {
             s.player.nitroTimer = Math.max(0, s.player.nitroTimer - dt);
             activeSpeed *= 1.35;
@@ -1159,11 +1251,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             const snap = remoteMap.get(comp.id);
             if (snap) {
               const ageSec = Math.min(0.12, Math.max(0, (Date.now() - (snap.updatedAt || Date.now())) / 1000));
-              const expectedPace = snap.stumbling
-                ? baseWaveSpeed * 0.65 * 1.5
-                : snap.action === 'dashing'
-                ? baseWaveSpeed * 1.55 * 1.5
-                : baseWaveSpeed * 1.5;
+              const expectedPace =
+                (snap.stumbling
+                  ? baseWaveSpeed * 0.65 * 1.5
+                  : snap.action === 'dashing'
+                  ? baseWaveSpeed * 1.55 * 1.5
+                  : baseWaveSpeed * 1.5) * nextWeather.speedMultiplier;
               const projectedDist = snap.finished
                 ? snap.progressDistance
                 : snap.progressDistance + ageSec * expectedPace;
@@ -1188,10 +1281,26 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               comp.laneX = currX + (snapTargetX - currX) * xLerp;
               const jumpLerp = 1 - Math.exp(-26 * dt);
               comp.jumpY = Math.max(0, (comp.jumpY || 0) + (snap.jumpY - (comp.jumpY || 0)) * jumpLerp);
+              const prevCompAction = comp.action;
               comp.action = snap.action;
               comp.stumbling = Boolean(snap.stumbling);
               comp.finished = Boolean(snap.finished);
               enforceCompetitorLaneBoundary(comp);
+
+              if (snap.action === 'jumping' && prevCompAction !== 'jumping') {
+                const remoteScreenY = computeCompetitorScreenY(
+                  comp.progressDistance - s.playerDistance
+                );
+                if (remoteScreenY >= 70 && remoteScreenY <= CANV_HEIGHT - 20) {
+                  const lastBurstAt = rivalJumpCooldownRef.current.get(comp.id) || 0;
+                  if (nowPerf - lastBurstAt >= 450) {
+                    rivalJumpCooldownRef.current.set(comp.id, nowPerf);
+                    emitMotionBurst('jump', comp.laneX, remoteScreenY + PLAYER_HEIGHT * 0.36, {
+                      color: comp.color || '#38bdf8',
+                    });
+                  }
+                }
+              }
             }
           } else {
             let bot = botRuntimeRef.current.get(comp.id);
@@ -1242,6 +1351,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                     bot.jumpVelocity = JUMP_INITIAL_VELOCITY;
                     comp.jumpY = 0.01;
                     comp.action = 'jumping';
+                    if (compScreenY >= 70 && compScreenY <= CANV_HEIGHT - 20) {
+                      const lastBurstAt = rivalJumpCooldownRef.current.get(comp.id) || 0;
+                      if (nowPerf - lastBurstAt >= 450) {
+                        rivalJumpCooldownRef.current.set(comp.id, nowPerf);
+                        emitMotionBurst('jump', comp.laneX, compScreenY + PLAYER_HEIGHT * 0.36, {
+                          color: comp.color || '#f59e0b',
+                        });
+                      }
+                    }
                   } else if (bot.laneChangeCooldown <= 0) {
                     const adjOptions: Lane[] = [];
                     if (comp.targetLane > 0) adjOptions.push((comp.targetLane - 1) as Lane);
@@ -1336,8 +1454,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               }
             }
 
-            // Velocidade base idêntica para todos: apenas quem bate num obstáculo abranda
-            let botSpeed = baseWaveSpeed * 1.5;
+            // Velocidade base idêntica para todos: clima simétrico + apenas quem bate num obstáculo abranda
+            let botSpeed = baseWaveSpeed * 1.5 * nextWeather.speedMultiplier;
 
             if (bot.stumbleTimer > 0) {
               bot.stumbleTimer = Math.max(0, bot.stumbleTimer - dt);
@@ -1676,6 +1794,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             coin.collected = true;
             onCoinCollectedRef.current(coin.value);
             sounds.playCoin();
+            emitMotionBurst('coin', LANE_CENTERS[coin.lane], coin.y, {
+              value: coin.value,
+            });
 
             for (let cp = 0; cp < 4; cp++) {
               pushParticle(s.particles, {
@@ -1803,10 +1924,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           }
 
           ctx.save();
+          const activeWeather = s.status === 'running' ? s.weather : createDefaultWeatherState();
+          const totalCamShake =
+            s.status === 'running'
+              ? Math.min(1.0, activeWeather.shakeIntensity + (s.player.stumbleTimer > 0 ? 0.35 : 0))
+              : 0;
+          if (totalCamShake > 0.01) {
+            const shakeSec = currentTime * 0.001;
+            const shakeX =
+              (Math.sin(shakeSec * 34.0) * 0.65 + Math.cos(shakeSec * 51.0) * 0.35) *
+              3.4 *
+              totalCamShake;
+            const shakeY =
+              (Math.cos(shakeSec * 41.0) * 0.6 + Math.sin(shakeSec * 57.0) * 0.4) *
+              2.6 *
+              totalCamShake;
+            ctx.translate(shakeX, shakeY);
+          }
 
-          // 1. Céu & Baía de Luanda no Horizonte
+          // 1. Céu & Baía de Luanda no Horizonte (margem extra para suportar vibração da câmera sem bordas)
           ctx.fillStyle = (isNight ? cachedNightSkyGrad : cachedDaySkyGrad)!;
-          ctx.fillRect(0, 0, CANV_WIDTH, CANV_HEIGHT);
+          ctx.fillRect(-10, -10, CANV_WIDTH + 20, CANV_HEIGHT + 20);
 
           // Sol Dourado / Lua Cheia com Halo Atmosférico
           const orbX = isNight ? CANV_WIDTH - 68 : 74;
@@ -1901,7 +2039,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ctx.stroke();
           }
 
-          // Palmeiras Realistas da Marginal com Troncos Curvos & 6 Frondas Arqueadas + Postes Iluminados
+          // Palmeiras Realistas da Marginal com Troncos Curvos & 6 Frondas Arqueadas + Balanço ao Vento
+          const palmSwayPx =
+            activeWeather.kind === 'wind-gust'
+              ? activeWeather.windDirection *
+                (3.2 + 4.4 * activeWeather.gustPulse) *
+                activeWeather.intensity
+              : activeWeather.kind === 'light-rain'
+              ? activeWeather.windDirection * 1.6 * activeWeather.intensity
+              : 0;
           const drawMarginalPalm = (px: number, py: number, flip: number) => {
             // Sombra no passeio
             ctx.fillStyle = 'rgba(0,0,0,0.34)';
@@ -1915,11 +2061,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ctx.lineCap = 'round';
             ctx.beginPath();
             ctx.moveTo(px, py + 22);
-            ctx.quadraticCurveTo(px + flip * 3, py + 9, px + flip * 2, py - 5);
+            ctx.quadraticCurveTo(
+              px + flip * 3 + palmSwayPx * 0.45,
+              py + 9,
+              px + flip * 2 + palmSwayPx,
+              py - 5
+            );
             ctx.stroke();
 
             // Copa com 6 frondas arqueadas
-            const crownX = px + flip * 2;
+            const crownX = px + flip * 2 + palmSwayPx;
             const crownY = py - 5;
             const frondColor = isNight ? '#065f46' : '#15803d';
             const frondHighlight = isNight ? '#10b981' : '#22c55e';
@@ -1989,6 +2140,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           }
           ctx.fillStyle = roadGrad;
           ctx.fillRect(TRACK_LEFT, 0, TRACK_WIDTH, CANV_HEIGHT);
+          if (activeWeather.kind === 'light-rain' && activeWeather.intensity > 0.03) {
+            ctx.fillStyle = `rgba(125, 211, 252, ${(0.085 * activeWeather.intensity).toFixed(3)})`;
+            ctx.fillRect(TRACK_LEFT, 0, TRACK_WIDTH, CANV_HEIGHT);
+          }
 
           // Sulcos sutis de desgaste dos pneus em cada uma das 5 faixas + destaque da faixa do jogador
           for (let li = 0; li < 5; li++) {
@@ -2441,6 +2596,42 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ctx.restore();
           }
 
+          // 7b. Efeito Climático 2D (Gotas de Chuva Leve / Rajadas de Vento na Marginal)
+          if (s.status === 'running' && activeWeather.intensity > 0.03 && activeWeather.kind !== 'clear') {
+            ctx.save();
+            const weatherT = currentTime * 0.001;
+            const wInt = activeWeather.intensity;
+            const windDir = activeWeather.windDirection;
+            if (activeWeather.kind === 'light-rain') {
+              ctx.strokeStyle = `rgba(186, 230, 253, ${(0.42 * wInt).toFixed(2)})`;
+              ctx.lineWidth = 1.25;
+              ctx.lineCap = 'round';
+              ctx.beginPath();
+              for (let ri = 0; ri < 46; ri++) {
+                const rxBase = ((ri * 89 + weatherT * windDir * 190) % (CANV_WIDTH + 60) + (CANV_WIDTH + 60)) % (CANV_WIDTH + 60) - 30;
+                const ryBase = ((ri * 137 + weatherT * 760) % (CANV_HEIGHT + 40)) - 20;
+                ctx.moveTo(rxBase, ryBase);
+                ctx.lineTo(rxBase + windDir * 5.5, ryBase + 16);
+              }
+              ctx.stroke();
+            } else {
+              ctx.strokeStyle = `rgba(226, 232, 240, ${((0.18 + 0.22 * activeWeather.gustPulse) * wInt).toFixed(2)})`;
+              ctx.lineWidth = 1.4;
+              ctx.lineCap = 'round';
+              ctx.beginPath();
+              const windVx = windDir * (540 + 260 * activeWeather.gustPulse);
+              for (let wi = 0; wi < 20; wi++) {
+                const wxBase = ((wi * 127 + weatherT * windVx) % (CANV_WIDTH + 120) + (CANV_WIDTH + 120)) % (CANV_WIDTH + 120) - 60;
+                const wyBase = ((wi * 193 + weatherT * 110) % (CANV_HEIGHT - 80)) + 72;
+                const streakLen = 26 + (wi % 4) * 9;
+                ctx.moveTo(wxBase, wyBase);
+                ctx.lineTo(wxBase + windDir * streakLen, wyBase + 4);
+              }
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+
           ctx.restore();
 
           // ==========================================
@@ -2567,6 +2758,22 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           >
             {elapsedSeconds >= HARD_MODE_START_SECONDS ? '🔥 REI' : 'Marginal'}
           </span>
+          {status === 'running' && weatherKindUi !== 'clear' && (() => {
+            const badge = getWeatherUiBadge(weatherKindUi, lang);
+            return (
+              <span
+                title={badge.effectHint}
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-black tracking-tight ${
+                  weatherKindUi === 'light-rain'
+                    ? 'bg-sky-500/20 border-sky-400/60 text-sky-200'
+                    : 'bg-slate-400/20 border-slate-300/60 text-slate-100'
+                }`}
+              >
+                <span>{badge.icon}</span>
+                <span className="hidden md:inline">{badge.label}</span>
+              </span>
+            );
+          })()}
         </div>
 
         {/* Posição em Tempo Real (1º ao 5º Lugar) ou Modo Espectador Fantasma */}
@@ -2792,6 +2999,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           />
         )}
 
+        {/* Partículas Framer Motion ao Saltar ou Coletar Moedas */}
+        <CanvasMotionParticles bursts={motionBursts} />
+
         {/* HUD Telemetria em Tempo Real no Modo 3D (sem backdrop-blur para não pesar na GPU WebGL) */}
         {status === 'running' && viewMode === '3d' && (
           <div className="absolute top-2.5 inset-x-2.5 flex items-center justify-between gap-1.5 pointer-events-none z-20 font-mono">
@@ -2867,6 +3077,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               <span className="text-[8px] font-bold text-slate-300 tabular-nums">
                 {t.canvas.distLabel}: {Math.round(stateRef.current.playerDistance)}m
               </span>
+              {weatherKindUi !== 'clear' && (() => {
+                const badge = getWeatherUiBadge(weatherKindUi, lang);
+                return (
+                  <span
+                    className={`mt-0.5 text-[8px] font-black uppercase ${
+                      weatherKindUi === 'light-rain' ? 'text-sky-300' : 'text-slate-200'
+                    }`}
+                  >
+                    {badge.icon} {badge.label}
+                  </span>
+                );
+              })()}
             </div>
           </div>
         )}

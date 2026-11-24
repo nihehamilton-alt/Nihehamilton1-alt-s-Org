@@ -269,3 +269,13 @@ export interface RacePerformanceMetrics {
   actionableTipKey: 'fast-reflex' | 'jump-early' | 'lane-switch' | 'clean-master' | 'keep-focus';
 }
 
+export type WeatherKind = 'clear' | 'light-rain' | 'wind-gust';
+
+export interface WeatherState {
+  kind: WeatherKind;
+  intensity: number;
+  speedMultiplier: number;
+  shakeIntensity: number;
+  windDirection: -1 | 1;
+  gustPulse: number;
+}

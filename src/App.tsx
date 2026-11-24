@@ -15,6 +15,7 @@ import {
   RoomStandingEntry,
   TelemetryInvestigationEntry,
   ServerRaceStatus,
+  PlayerAction,
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
 import { ClientTelemetryValidator } from './utils/telemetryValidator';
@@ -45,6 +46,7 @@ import { DailyMissionsWidget } from './components/DailyMissionsWidget';
 import { MatchHistoryCard } from './components/MatchHistoryCard';
 import { VoiceChatProvider } from './contexts/VoiceChatContext';
 import { VoiceChatPanel } from './components/VoiceChatPanel';
+import { VoiceSpeakerOverlay } from './components/VoiceSpeakerOverlay';
 import {
   DAILY_MISSIONS,
   DailyMissionsState,
@@ -403,12 +405,14 @@ export default function App() {
   const roomWsRef = useRef<WebSocket | null>(null);
   const serverClockOffsetRef = useRef<number>(0);
   const bestRttRef = useRef<number>(Number.POSITIVE_INFINITY);
+  const [roomRttMs, setRoomRttMs] = useState<number | null>(null);
   const hasCalibratedClockRef = useRef<boolean>(false);
   const forceSynchronizedRunRef = useRef<(() => void) | null>(null);
+  const startRequestLockUntilRef = useRef<number>(0);
   const activeRaceRoundRef = useRef<number>(0);
   const [activeRaceRound, setActiveRaceRound] = useState<number>(0);
-  const startedRoundSetRef = useRef<Set<number>>(new Set());
-  const finalizedRoundSetRef = useRef<Set<number>>(new Set());
+  const startedRoundSetRef = useRef<Set<string>>(new Set());
+  const finalizedRoundSetRef = useRef<Set<string>>(new Set());
   const activeBetForRoundRef = useRef<number>(betAmount);
   const finishFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLocalBetChangeAtRef = useRef<number>(0);
@@ -434,7 +438,7 @@ export default function App() {
   const previousPublicBotIdsRef = useRef<string[]>([]);
   const publicRoundCompletedRef = useRef<boolean>(false);
   const rotatePublicBotsInCompetitorsRef = useRef<
-    ((targetBetKz: number, forceReplaceBots?: boolean) => void) | null
+    ((targetBetKz: number, forceReplaceBots?: boolean, deterministicSeed?: number) => void) | null
   >(null);
   const latestServerRoomRef = useRef<{
     code: string;
@@ -993,9 +997,9 @@ export default function App() {
     setCompetitors((prev) => assignDistinctLanes(prev, true));
   }, [assignDistinctLanes]);
 
-  // Rotaciona os competidores bots em partidas públicas garantindo aposta igual
+  // Rotaciona os competidores bots em partidas públicas/globais garantindo aposta igual e determinismo opcional
   const rotatePublicBotsInCompetitors = useCallback(
-    (targetBetKz: number, forceReplaceBots = true) => {
+    (targetBetKz: number, forceReplaceBots = true, deterministicSeed?: number) => {
       const safeBet = clampBetKz(targetBetKz);
       setCompetitors((prev) => {
         const playerEntry = prev.find((c) => c.isPlayer);
@@ -1024,7 +1028,8 @@ export default function App() {
         const pickedBots = pickRotatedPublicBots(
           neededBots,
           excludeForRotation,
-          baseList.map((c) => c.id)
+          baseList.map((c) => c.id),
+          deterministicSeed
         );
         previousPublicBotIdsRef.current = pickedBots.map((b) => b.id);
         const botCompetitors: Competitor[] = pickedBots.map((b, idx) => {
@@ -1090,19 +1095,17 @@ export default function App() {
     trackEl.scrollIntoView({ behavior, block: 'start' });
   }, []);
 
-  // Retorno limpo ao lobby ou sala após o fim da corrida
+  // Retorno limpo ao lobby ou sala após o fim da corrida (mantendo todos os participantes unidos na mesma sala)
   const handleReturnToLobby = useCallback(() => {
     const returningFromSpectator = isSpectatingRef.current || wasSpectatorOutcome;
     const isPublicMatch = isAutoMatchRef.current || roomConfig.accessMode === 'random';
-    const shouldRotatePublicLobby = isPublicMatch && publicRoundCompletedRef.current;
+    const shouldRotateBotsInRoom = isPublicMatch && publicRoundCompletedRef.current;
     clearCountdownTimers();
     if (finishFallbackTimerRef.current) {
       clearTimeout(finishFallbackTimerRef.current);
       finishFallbackTimerRef.current = null;
     }
     remotePlayersRef.current.clear();
-    startedRoundSetRef.current.clear();
-    finalizedRoundSetRef.current.clear();
     isSpectatingRef.current = false;
     setIsSpectating(false);
     setSpectatedRunnerId(null);
@@ -1119,9 +1122,12 @@ export default function App() {
     setStatus('idle');
     setElapsedSeconds(0);
     setCoinsCollected(0);
-    if (shouldRotatePublicLobby) {
+    if (shouldRotateBotsInRoom) {
       publicRoundCompletedRef.current = false;
-      rotatePublicBotsInCompetitors(clampBetKz(roomConfig.betAmount || betAmount), true);
+      const nextSeed =
+        Array.from(roomConfig.code).reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) >>> 0, 7) +
+        (serverRaceRoundRef.current || activeRaceRoundRef.current || 1) * 7919;
+      rotatePublicBotsInCompetitors(clampBetKz(roomConfig.betAmount || betAmount), true, nextSeed);
     } else {
       resetCompetitors();
     }
@@ -1137,32 +1143,12 @@ export default function App() {
             isSpectating: false,
           })
         );
-      } else if (shouldRotatePublicLobby) {
-        const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
-        ws.send(
-          JSON.stringify({
-            type: 'room:find-next-public',
-            betAmount: clampBetKz(roomConfig.betAmount || betAmount),
-            isDemo,
-            excludeRoomCode: roomConfig.code,
-            autoStart: false,
-            player: {
-              id: getSessionPlayerId(),
-              name: playerName,
-              avatar: myAvatar.avatar,
-              avatarId: myAvatar.id,
-              color: myAvatar.color,
-              profileReady: true,
-              selectingProfile: false,
-            },
-          })
-        );
       } else {
         ws.send(JSON.stringify({ type: 'room:return-lobby', roomCode: roomConfig.code }));
       }
     }
 
-    if (applyServerRoomStateRef.current && !shouldRotatePublicLobby) {
+    if (applyServerRoomStateRef.current) {
       applyServerRoomStateRef.current(true);
     }
 
@@ -1179,14 +1165,11 @@ export default function App() {
   }, [
     betAmount,
     clearCountdownTimers,
-    isDemo,
-    playerName,
     resetCompetitors,
     roomConfig.accessMode,
     roomConfig.betAmount,
     roomConfig.code,
     rotatePublicBotsInCompetitors,
-    selectedAvatarId,
     wasSpectatorOutcome,
   ]);
 
@@ -1199,8 +1182,9 @@ export default function App() {
       serverRankings?: RoomStandingEntry[] | null,
       spectated?: boolean
     ) => {
-      const roundKey = activeRaceRoundRef.current;
-      if (roundKey > 0) {
+      const roundNum = activeRaceRoundRef.current;
+      const roundKey = `${(roomConfigRef.current.code || 'ARENA').toUpperCase()}:${roundNum}`;
+      if (roundNum > 0) {
         if (finalizedRoundSetRef.current.has(roundKey)) return;
         finalizedRoundSetRef.current.add(roundKey);
       }
@@ -1581,6 +1565,7 @@ export default function App() {
     if (isSpectatingRef.current) return;
     const effectiveBet = clampBetKz(fromRoom ? roomConfig.betAmount : betAmount);
     if (balance < effectiveBet || status === 'running' || status === 'starting') return;
+    if (Date.now() < startRequestLockUntilRef.current) return;
 
     sounds.unlockAudio();
 
@@ -1596,40 +1581,12 @@ export default function App() {
     const isPublicMatch = isAutoMatchRef.current || roomConfig.accessMode === 'random';
 
     if (inServerRoomSession) {
-      if (serverRaceStatusRef.current === 'running' || serverRaceStatusRef.current === 'starting') {
+      if (
+        statusRef.current === 'idle' &&
+        (serverRaceStatusRef.current === 'running' || serverRaceStatusRef.current === 'starting')
+      ) {
         handleEnterSpectatorMode();
         return;
-      }
-      if (
-        isPublicMatch &&
-        (publicRoundCompletedRef.current || serverRaceStatusRef.current === 'completed')
-      ) {
-        publicRoundCompletedRef.current = false;
-        rotatePublicBotsInCompetitors(effectiveBet, true);
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          startedFromRoomRef.current = fromRoom || lobbyOpen;
-          setRoomNotice(null);
-          const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
-          ws.send(
-            JSON.stringify({
-              type: 'room:find-next-public',
-              betAmount: effectiveBet,
-              isDemo,
-              excludeRoomCode: roomConfig.code,
-              autoStart: true,
-              player: {
-                id: getSessionPlayerId(),
-                name: playerName,
-                avatar: myAvatar.avatar,
-                avatarId: myAvatar.id,
-                color: myAvatar.color,
-                profileReady: !needsInviteOnboarding,
-                selectingProfile: needsInviteOnboarding,
-              },
-            })
-          );
-          return;
-        }
       }
       if (!isLocalRoomHost) {
         setRoomNotice(mpStrings.onlyHostCanStart);
@@ -1638,6 +1595,7 @@ export default function App() {
       if (isPublicMatch) {
         publicRoundCompletedRef.current = false;
       }
+      startRequestLockUntilRef.current = Date.now() + 1200;
       startedFromRoomRef.current = fromRoom || lobbyOpen;
       setRoomNotice(null);
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1839,20 +1797,23 @@ export default function App() {
       void telemetryValidatorRef.current.flushBatch();
 
       const usedBet = activeBetForRoundRef.current || betAmount;
-      const roundKey = activeRaceRoundRef.current;
+      const roundNum = activeRaceRoundRef.current;
+      const roundTrackKey = `${(roomConfig.code || 'ARENA').toUpperCase()}:${roundNum}`;
       const ws = roomWsRef.current;
-      const isMultiplayerRound =
-        roundKey > 0 &&
-        (connectedHumansCount > 1 || serverHumansCountRef.current > 1 || spectatingNow) &&
+      const inServerRoom =
+        roundNum > 0 &&
+        !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
         ws &&
         ws.readyState === WebSocket.OPEN;
+      const hasMultiHumans =
+        connectedHumansCount > 1 || serverHumansCountRef.current > 1 || spectatingNow;
 
       if (spectatingNow) {
-        if (isMultiplayerRound) {
+        if (inServerRoom) {
           setPendingSyncPodium(true);
           if (finishFallbackTimerRef.current) clearTimeout(finishFallbackTimerRef.current);
           finishFallbackTimerRef.current = setTimeout(() => {
-            if (!finalizedRoundSetRef.current.has(roundKey)) {
+            if (!finalizedRoundSetRef.current.has(roundTrackKey)) {
               applyCompletedRaceOutcome(finalCompetitors, usedBet, null, null, true);
             }
           }, 1800);
@@ -1862,14 +1823,14 @@ export default function App() {
         return;
       }
 
-      if (isMultiplayerRound && ws) {
+      if (inServerRoom && ws) {
         const playerComp = finalCompetitors.find((c) => c.isPlayer);
         setPendingSyncPodium(true);
         ws.send(
           JSON.stringify({
             type: 'room:race-finish',
             roomCode: roomConfig.code,
-            raceRound: roundKey,
+            raceRound: roundNum,
             progressDistance: playerComp?.progressDistance || 0,
             bots: finalCompetitors
               .filter((c) => c.isBot || c.id.startsWith('friend-'))
@@ -1887,16 +1848,16 @@ export default function App() {
 
         if (finishFallbackTimerRef.current) clearTimeout(finishFallbackTimerRef.current);
         finishFallbackTimerRef.current = setTimeout(() => {
-          if (!finalizedRoundSetRef.current.has(roundKey)) {
+          if (!finalizedRoundSetRef.current.has(roundTrackKey)) {
             applyCompletedRaceOutcome(finalCompetitors, usedBet, performance, null);
           }
-        }, 1800);
+        }, hasMultiHumans ? 1800 : 850);
         return;
       }
 
       applyCompletedRaceOutcome(finalCompetitors, usedBet, performance, null);
     },
-    [applyCompletedRaceOutcome, betAmount, connectedHumansCount, roomConfig.code]
+    [applyCompletedRaceOutcome, betAmount, connectedHumansCount, roomConfig.code, wsRoomSessionKey]
   );
 
   const handleCoinCollected = useCallback((_points?: number) => {
@@ -2255,7 +2216,6 @@ export default function App() {
     }
     const current: RoomAccessMode = roomConfig.accessMode || 'invite-only';
     const nextMode: RoomAccessMode = explicitMode ?? (current === 'random' ? 'invite-only' : 'random');
-    isAutoMatchRef.current = nextMode === 'random';
     setRoomConfig((prev) => ({
       ...prev,
       accessMode: nextMode,
@@ -2720,10 +2680,12 @@ export default function App() {
     if (typeof window === 'undefined') return;
     if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) {
       setServerRoomConnected(false);
+      setRoomRttMs(null);
       return;
     }
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       setServerRoomConnected(false);
+      setRoomRttMs(null);
       return;
     }
 
@@ -2733,6 +2695,7 @@ export default function App() {
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     const burstTimers: Array<ReturnType<typeof setTimeout>> = [];
     bestRttRef.current = Number.POSITIVE_INFINITY;
+    setRoomRttMs(null);
     hasCalibratedClockRef.current = false;
 
     type ServerRoomParticipantPayload = {
@@ -2903,7 +2866,33 @@ export default function App() {
             : 2;
 
         setCompetitors((prev) => {
-          const playerEntry = prev.find((c) => c.isPlayer) || prev[0];
+          const foundPlayer = prev.find((c) => c.isPlayer);
+          const myAvatar = getLocalizedAvatar(selectedAvatarIdRef.current, lang);
+          const cleanMyName =
+            meOnServer?.name?.trim() ||
+            (playerNameRef.current && playerNameRef.current !== 'REI ZERO'
+              ? playerNameRef.current
+              : myAvatar.name);
+          const playerEntry: Competitor = foundPlayer || {
+            id: myId,
+            name: `${cleanMyName} ${t.youTag}`,
+            avatar: meOnServer?.avatar || myAvatar.avatar,
+            avatarId: meOnServer?.avatarId || myAvatar.id,
+            color: meOnServer?.color || myAvatar.color,
+            lane: myServerLane,
+            targetLane: myServerLane,
+            laneX: LANE_CENTERS[myServerLane],
+            yOffset: 0,
+            progressDistance: 0,
+            action: 'running',
+            jumpY: 0,
+            isBot: false,
+            isPlayer: true,
+            isHost: localIsHost,
+            stumbling: false,
+            finished: false,
+            betAmount: shouldAdoptServerBet ? serverBet : betAmountRef.current,
+          };
           const localSimFriends = prev.filter(
             (c) => !c.isPlayer && !c.isBot && c.id.startsWith('friend-')
           );
@@ -2943,19 +2932,18 @@ export default function App() {
           });
 
           const combined: Competitor[] = [];
-          if (playerEntry) {
-            combined.push({
-              ...playerEntry,
-              lane: myServerLane,
-              targetLane: myServerLane,
-              laneX: LANE_CENTERS[myServerLane],
-              isHost: localIsHost,
-              isRemoteHuman: false,
-              profileReady: !needsInviteOnboardingRef.current,
-              betAmount: shouldAdoptServerBet ? serverBet : betAmountRef.current,
-              isSpectating: Boolean(meOnServer?.isSpectating),
-            });
-          }
+          combined.push({
+            ...playerEntry,
+            lane: myServerLane,
+            targetLane: myServerLane,
+            laneX: LANE_CENTERS[myServerLane],
+            isPlayer: true,
+            isHost: localIsHost,
+            isRemoteHuman: false,
+            profileReady: !needsInviteOnboardingRef.current,
+            betAmount: shouldAdoptServerBet ? serverBet : betAmountRef.current,
+            isSpectating: Boolean(meOnServer?.isSpectating),
+          });
           for (const remoteFriend of humanCompetitors) {
             if (combined.length >= serverMax) break;
             combined.push(remoteFriend);
@@ -2970,21 +2958,35 @@ export default function App() {
           const shouldIncludeBots =
             room.fillWithBots ?? (cfg.fillWithBots || (serverAccess || cfg.accessMode) === 'random');
           if (shouldIncludeBots) {
-            for (const bot of existingBots) {
-              if (combined.length >= serverMax) break;
-              if (!combined.some((c) => c.id === bot.id)) {
-                combined.push({
-                  ...bot,
-                  betAmount: serverBet,
-                });
+            const codeHash = Array.from(serverCode).reduce(
+              (acc, ch) => (acc * 31 + ch.charCodeAt(0)) >>> 0,
+              17
+            );
+            const roomBotSeed =
+              ((typeof room.raceSeed === 'number' ? room.raceSeed : 0) +
+                (room.raceRound || 1) * 7919 +
+                codeHash) >>>
+              0;
+            const shouldRefreshDeterministicBots =
+              forceCompetitorSync || existingBots.length === 0;
+            if (!shouldRefreshDeterministicBots) {
+              for (const bot of existingBots) {
+                if (combined.length >= serverMax) break;
+                if (!combined.some((c) => c.id === bot.id)) {
+                  combined.push({
+                    ...bot,
+                    betAmount: serverBet,
+                  });
+                }
               }
             }
             const missingSlots = Math.max(0, serverMax - combined.length);
             if (missingSlots > 0) {
               const extraBots = pickRotatedPublicBots(
                 missingSlots,
-                previousPublicBotIdsRef.current,
-                combined.map((c) => c.id)
+                [],
+                combined.map((c) => c.id),
+                roomBotSeed
               );
               for (const b of extraBots) {
                 if (combined.length >= serverMax) break;
@@ -3031,8 +3033,11 @@ export default function App() {
       betAmount: number;
       serverTime?: number;
     }) => {
-      if (startedRoundSetRef.current.has(payload.raceRound)) return;
-      startedRoundSetRef.current.add(payload.raceRound);
+      const roundRoomCode = (payload.room.code || roomConfigRef.current.code || 'ARENA').toUpperCase();
+      const roundTrackKey = `${roundRoomCode}:${payload.raceRound}`;
+      if (startedRoundSetRef.current.has(roundTrackKey)) return;
+      startedRoundSetRef.current.add(roundTrackKey);
+      publicRoundCompletedRef.current = false;
 
       if (typeof payload.serverTime === 'number' && !hasCalibratedClockRef.current) {
         serverClockOffsetRef.current = payload.serverTime - Date.now();
@@ -3281,7 +3286,7 @@ export default function App() {
           lane?: number;
           targetLane?: number;
           laneX?: number;
-          action?: 'running' | 'jumping' | 'sliding' | 'dashing';
+          action?: PlayerAction;
           jumpY?: number;
           stumbling?: boolean;
           finished?: boolean;
@@ -3299,6 +3304,10 @@ export default function App() {
             serverClockOffsetRef.current = msg.serverTime - (sentAt + rtt * 0.5);
             hasCalibratedClockRef.current = true;
           }
+          const nextRttMs = Number.isFinite(bestRttRef.current)
+            ? Math.round(bestRttRef.current)
+            : Math.round(rtt);
+          setRoomRttMs((prev) => (prev === nextRttMs ? prev : nextRttMs));
           return;
         }
 
@@ -3331,6 +3340,7 @@ export default function App() {
           applyRoomStateFromServer(msg.room, false);
           const meInState = msg.room.participants.find((p) => p.id === myId);
           const catchUpStartAt = msg.room.syncedRaceStartAt ?? msg.room.raceStartAt;
+          const stateRoundKey = `${(msg.room.code || roomConfigRef.current.code || 'ARENA').toUpperCase()}:${msg.room.raceRound}`;
           if (
             (msg.room.raceStatus === 'starting' ||
               (msg.room.raceStatus === 'running' &&
@@ -3339,9 +3349,9 @@ export default function App() {
             typeof catchUpStartAt === 'number' &&
             typeof msg.room.raceRound === 'number' &&
             typeof msg.room.raceSeed === 'number' &&
-            statusRef.current === 'idle' &&
+            (statusRef.current === 'idle' || statusRef.current === 'completed') &&
             !isSpectatingRef.current &&
-            !startedRoundSetRef.current.has(msg.room.raceRound)
+            !startedRoundSetRef.current.has(stateRoundKey)
           ) {
             beginSynchronizedCountdown({
               room: msg.room,
@@ -3382,13 +3392,14 @@ export default function App() {
         }
 
         if (msg.type === 'room:race-go' && typeof msg.raceRound === 'number') {
+          const goRoundKey = `${(msg.room?.code || roomConfigRef.current.code || 'ARENA').toUpperCase()}:${msg.raceRound}`;
           if (statusRef.current === 'starting' && activeRaceRoundRef.current === msg.raceRound) {
             forceSynchronizedRunRef.current?.();
           } else if (
-            statusRef.current === 'idle' &&
+            (statusRef.current === 'idle' || statusRef.current === 'completed') &&
             !isSpectatingRef.current &&
             msg.room &&
-            !startedRoundSetRef.current.has(msg.raceRound) &&
+            !startedRoundSetRef.current.has(goRoundKey) &&
             typeof msg.room.raceSeed === 'number'
           ) {
             const meInRoom = msg.room.participants.find((p) => p.id === myId);
@@ -3473,10 +3484,11 @@ export default function App() {
         if (msg.type === 'room:race-finished' && Array.isArray(msg.rankings)) {
           serverRaceStatusRef.current = 'completed';
           setServerRaceStatus('completed');
+          const finishedRoundKey = `${(msg.room?.code || roomConfigRef.current.code || 'ARENA').toUpperCase()}:${msg.raceRound || -1}`;
           if (
             !isSpectatingRef.current &&
             statusRef.current === 'idle' &&
-            !startedRoundSetRef.current.has(msg.raceRound || -1)
+            !startedRoundSetRef.current.has(finishedRoundKey)
           ) {
             return;
           }
@@ -3553,6 +3565,7 @@ export default function App() {
         roomWsRef.current = null;
       }
       setServerRoomConnected(false);
+      setRoomRttMs(null);
       if (!closedByCleanup) {
         reconnectTimer = setTimeout(() => {
           setWsReconnectNonce((n) => n + 1);
@@ -3562,6 +3575,7 @@ export default function App() {
 
     ws.onerror = () => {
       setServerRoomConnected(false);
+      setRoomRttMs(null);
     };
 
     return () => {
@@ -3626,7 +3640,19 @@ export default function App() {
       setRoomNotice(mpStrings.onlyLeaderControlsRoom);
       return;
     }
-    setRoomConfig((prev) => ({ ...prev, fillWithBots: !prev.fillWithBots }));
+    const nextFill = !roomConfig.fillWithBots;
+    setRoomConfig((prev) => ({ ...prev, fillWithBots: nextFill }));
+    setCompetitors((prev) => fitCompetitorsToCapacity(prev, roomConfig.maxPlayers, nextFill));
+    const ws = roomWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'room:update-config',
+          roomCode: roomConfig.code,
+          fillWithBots: nextFill,
+        })
+      );
+    }
   };
 
   const handleRegenerateRoomCode = () => {
@@ -3801,6 +3827,15 @@ export default function App() {
         onToggleViewMode={() => setViewMode((prev) => (prev === '2d' ? '3d' : '2d'))}
         timeMode={timeMode}
         onToggleTimeMode={() => setTimeMode((prev) => (prev === 'day' ? 'night' : 'day'))}
+        rttMs={roomRttMs}
+        serverConnected={serverRoomConnected}
+        canSpectate={
+          status === 'idle' &&
+          !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+          (serverRaceStatus === 'running' || serverRaceStatus === 'starting')
+        }
+        isSpectating={isSpectating}
+        onSpectate={handleEnterSpectatorMode}
       />
 
       {/* 2. Área Central de Corrida */}
@@ -4003,6 +4038,7 @@ export default function App() {
             </div>
           )}
 
+          <VoiceSpeakerOverlay status={status} lobbyOpen={lobbyOpen} />
           <VoiceChatPanel variant="compact" roomCode={roomConfig.code} />
           <GameCanvas
             status={status}
@@ -4242,9 +4278,7 @@ export default function App() {
               canPlayAgain={
                 !wasSpectatorOutcome &&
                 balance >= betAmount &&
-                (wsRoomSessionKey.startsWith('SOLO_IDLE_') ||
-                  isLocalRoomHost ||
-                  roomConfig.accessMode === 'random')
+                (wsRoomSessionKey.startsWith('SOLO_IDLE_') || isLocalRoomHost)
               }
             />
           </PodiumErrorBoundary>

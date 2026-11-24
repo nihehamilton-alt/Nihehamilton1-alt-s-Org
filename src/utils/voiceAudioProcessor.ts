@@ -6,6 +6,7 @@ export interface VoiceProcessorParams {
   noiseGateMode: VoiceGateSensitivity;
   hasHeadset: boolean;
   remoteSpeaking: boolean;
+  gateThreshold?: number;
 }
 
 export interface VoiceProcessorTelemetry {
@@ -273,6 +274,16 @@ export async function createVoiceAudioProcessor(
   compressor.attack.value = 0.008;
   compressor.release.value = 0.18;
 
+  // GainNode explícito da porta de ruído / silenciamento suave sem cliques
+  const noiseGateGainNode = ctx.createGain();
+  noiseGateGainNode.gain.value = params.micMuted ? 0 : 1;
+
+  const syncGateGainNode = () => {
+    if (!ctx || disposed) return;
+    const target = params.micMuted ? 0 : 1;
+    noiseGateGainNode.gain.setTargetAtTime(target, ctx.currentTime, 0.012);
+  };
+
   const dest = ctx.createMediaStreamDestination();
   const silentKeepAlive = ctx.createGain();
   silentKeepAlive.gain.value = 0;
@@ -339,7 +350,8 @@ export async function createVoiceAudioProcessor(
       };
 
       presenceFilter.connect(workletNode);
-      workletNode.connect(postGateAnalyser);
+      workletNode.connect(noiseGateGainNode);
+      noiseGateGainNode.connect(postGateAnalyser);
       postGateAnalyser.connect(compressor);
       compressor.connect(dest);
       compressor.connect(silentKeepAlive);
@@ -353,6 +365,7 @@ export async function createVoiceAudioProcessor(
           params = { ...params, ...next };
           if (!disposed) {
             pushWorkletParams();
+            syncGateGainNode();
             if (params.micMuted === false) {
               void ensureCtxRunning();
             }
@@ -371,6 +384,7 @@ export async function createVoiceAudioProcessor(
             lowpassStage2.disconnect();
             presenceFilter.disconnect();
             workletNode.disconnect();
+            noiseGateGainNode.disconnect();
             postGateAnalyser.disconnect();
             compressor.disconnect();
             silentKeepAlive.disconnect();
@@ -491,7 +505,8 @@ export async function createVoiceAudioProcessor(
     };
 
     presenceFilter.connect(scriptNode);
-    scriptNode.connect(postGateAnalyser);
+    scriptNode.connect(noiseGateGainNode);
+    noiseGateGainNode.connect(postGateAnalyser);
     postGateAnalyser.connect(compressor);
     compressor.connect(dest);
     compressor.connect(silentKeepAlive);
@@ -503,8 +518,11 @@ export async function createVoiceAudioProcessor(
       mode: 'scriptprocessor',
       updateParams: (next) => {
         params = { ...params, ...next };
-        if (!disposed && params.micMuted === false) {
-          void ensureCtxRunning();
+        if (!disposed) {
+          syncGateGainNode();
+          if (params.micMuted === false) {
+            void ensureCtxRunning();
+          }
         }
       },
       resume: ensureCtxRunning,
@@ -520,6 +538,7 @@ export async function createVoiceAudioProcessor(
           lowpassStage2.disconnect();
           presenceFilter.disconnect();
           scriptNode.disconnect();
+          noiseGateGainNode.disconnect();
           postGateAnalyser.disconnect();
           compressor.disconnect();
           silentKeepAlive.disconnect();
@@ -532,14 +551,101 @@ export async function createVoiceAudioProcessor(
       },
     };
   } catch {
-    ctx.close().catch(() => {});
-    return {
-      outputStream: rawStream,
-      analyserNode: null,
-      mode: 'passthrough',
-      updateParams: () => {},
-      resume: async () => {},
-      dispose: () => {},
-    };
+    // Último recurso com BiquadFilter + GainNode (porta de ruído via AnalyserNode) + DynamicsCompressorNode
+    try {
+      const preGateAnalyser = ctx.createAnalyser();
+      preGateAnalyser.fftSize = 256;
+      const meterBuf = new Float32Array(preGateAnalyser.fftSize);
+      let gateOpen = false;
+      let holdUntil = 0;
+
+      presenceFilter.connect(preGateAnalyser);
+      preGateAnalyser.connect(noiseGateGainNode);
+      noiseGateGainNode.connect(postGateAnalyser);
+      postGateAnalyser.connect(compressor);
+      compressor.connect(dest);
+
+      const gateTimer = window.setInterval(() => {
+        if (disposed || !ctx) return;
+        if (params.micMuted) {
+          gateOpen = false;
+          noiseGateGainNode.gain.setTargetAtTime(0, ctx.currentTime, 0.012);
+          onTelemetry({ preGateRms: 0, postGateRms: 0, gateOpen: false, noiseFloor: 0.005 });
+          return;
+        }
+        preGateAnalyser.getFloatTimeDomainData(meterBuf);
+        let sumSq = 0;
+        for (let i = 0; i < meterBuf.length; i++) sumSq += meterBuf[i] * meterBuf[i];
+        const rms = Math.sqrt(sumSq / meterBuf.length);
+        const threshold =
+          typeof params.gateThreshold === 'number'
+            ? params.gateThreshold
+            : params.noiseGateMode === 'strict'
+            ? 0.011
+            : 0.0065;
+        const nowMs = performance.now();
+        if (rms >= threshold) {
+          gateOpen = true;
+          holdUntil = nowMs + 360;
+        } else if (nowMs > holdUntil) {
+          gateOpen = false;
+        }
+        noiseGateGainNode.gain.setTargetAtTime(gateOpen ? 1 : 0, ctx.currentTime, gateOpen ? 0.01 : 0.08);
+        onTelemetry({
+          preGateRms: rms,
+          postGateRms: gateOpen ? rms : 0,
+          gateOpen,
+          noiseFloor: threshold * 0.5,
+        });
+      }, 45);
+
+      return {
+        outputStream: dest.stream,
+        analyserNode: postGateAnalyser,
+        mode: 'scriptprocessor',
+        updateParams: (next) => {
+          params = { ...params, ...next };
+          if (!disposed) {
+            syncGateGainNode();
+            if (params.micMuted === false) {
+              void ensureCtxRunning();
+            }
+          }
+        },
+        resume: ensureCtxRunning,
+        dispose: () => {
+          disposed = true;
+          clearInterval(gateTimer);
+          try {
+            source.disconnect();
+            highpassStage1.disconnect();
+            highpassStage2.disconnect();
+            roomMudCut.disconnect();
+            lowpassStage1.disconnect();
+            lowpassStage2.disconnect();
+            presenceFilter.disconnect();
+            preGateAnalyser.disconnect();
+            noiseGateGainNode.disconnect();
+            postGateAnalyser.disconnect();
+            compressor.disconnect();
+            dest.disconnect();
+          } catch {
+            // noop
+          }
+          ctx?.close().catch(() => {});
+          ctx = null;
+        },
+      };
+    } catch {
+      ctx.close().catch(() => {});
+      return {
+        outputStream: rawStream,
+        analyserNode: null,
+        mode: 'passthrough',
+        updateParams: () => {},
+        resume: async () => {},
+        dispose: () => {},
+      };
+    }
   }
 }

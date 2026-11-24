@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { motion, useReducedMotion, Variants } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion, Variants } from 'framer-motion';
 import confetti from 'canvas-confetti';
 import { Share2, Check, LogOut } from 'lucide-react';
 import {
@@ -809,187 +809,340 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           </motion.div>
         )}
 
-        {(activeTab === 'podium' || activeTab === 'both') && (
-          <motion.div
-            variants={shouldReduceMotion ? undefined : podiumSlideUpVariants}
-            className="relative z-10 pt-1 pb-1"
-          >
-            <div className="flex items-end justify-center gap-2 sm:gap-3 h-48 sm:h-52">
-              {second && (
-                <div className="flex-1 flex flex-col items-center max-w-[145px]">
-                  <motion.div
-                    initial={{ y: -80, opacity: 0, scale: 0.6 }}
-                    animate={{ y: 0, opacity: 1, scale: 1 }}
-                    transition={{ type: 'spring', damping: 14, stiffness: 180, delay: 0.35 }}
-                    className="flex flex-col items-center mb-1 text-center"
-                  >
-                    <div className="relative">
-                      <AvatarDoll
-                        avatarId={second.avatarId}
-                        name={second.name}
-                        color={second.color}
-                        size={42}
-                        variant="full"
-                        className="filter drop-shadow"
-                      />
-                      <span className="absolute -bottom-1 -right-1 text-xs">🥈</span>
-                    </div>
-                    <span className="text-[11px] font-black text-zinc-200 truncate w-full mt-0.5">
-                      {renderRunnerName(second)}
-                    </span>
-                    <span className="text-[9px] font-mono text-zinc-400">
-                      {Math.floor(second.progressDistance)}m · {mpStrings.stakePerRunnerShort}: {formatMoney(breakdownRows[1]?.betAmount ?? betAmountKz)}
-                    </span>
-                    <span className="text-[11px] font-mono font-black text-emerald-400 bg-emerald-950/90 px-2 py-0.5 rounded-md border border-emerald-800 mt-0.5">
-                      +{formatMoney(breakdownRows[1]?.payoutKz ?? threeTorneiras.secondPrizeKz)}
-                    </span>
-                  </motion.div>
+        <AnimatePresence mode="wait">
+          {(activeTab === 'podium' || activeTab === 'both') && (
+            <motion.div
+              key={`podium-stage-${activeTab}`}
+              initial={shouldReduceMotion ? false : { opacity: 0, y: 24 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 16 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 24 }}
+              className="relative z-10 pt-2 pb-1"
+            >
+              <div className="flex items-end justify-center gap-2 sm:gap-3 h-52 sm:h-56 relative">
+                {/* Base luminosa do palco */}
+                <div
+                  aria-hidden="true"
+                  className="absolute bottom-0 left-4 right-4 h-3 rounded-full bg-gradient-to-r from-transparent via-amber-400/30 to-transparent blur-sm pointer-events-none"
+                />
 
-                  <motion.div
-                    initial={{ scaleY: 0, opacity: 0 }}
-                    animate={{ scaleY: 1, opacity: 1 }}
-                    transition={{ type: 'spring', damping: 18, stiffness: 220, delay: 0.2 }}
-                    style={{ originY: 1 }}
-                    className="w-full h-22 sm:h-26 bg-gradient-to-t from-zinc-800 via-slate-700 to-slate-600 rounded-t-2xl border-t-2 border-x border-slate-400/60 shadow-lg flex flex-col items-center justify-center p-1 relative overflow-hidden"
-                  >
-                    <div className="text-2xl sm:text-3xl font-black font-mono text-slate-200">
-                      2
-                    </div>
-                    <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-slate-300">
-                      {t.podium.secondPlace}
-                    </span>
-                    <span className="text-[8px] font-mono text-slate-400">25%</span>
-                  </motion.div>
-                </div>
-              )}
-
-              {first && (
-                <div className="flex-1 flex flex-col items-center max-w-[160px] relative">
-                  {userRank === 1 && (
-                    <Top1GoldenBurst burstKey={explosionKey} variant="pedestal" />
-                  )}
-
-                  <motion.div
-                    animate={{
-                      scale: [1, 1.25, 1],
-                      opacity: [0.4, 0.85, 0.4],
-                    }}
-                    transition={{ repeat: Infinity, duration: 2.2, type: 'tween', ease: 'easeInOut' }}
-                    className="absolute top-2 w-28 h-28 bg-amber-400/30 rounded-full blur-2xl pointer-events-none"
-                  />
-
-                  <motion.div
-                    initial={{ y: -100, opacity: 0, scale: 0.4 }}
-                    animate={{ y: 0, opacity: 1, scale: 1 }}
-                    transition={{ type: 'spring', damping: 12, stiffness: 190, delay: 0.55 }}
-                    className="flex flex-col items-center mb-1 text-center z-10"
-                  >
+                {second && (
+                  <div className="flex-1 flex flex-col items-center max-w-[145px] relative">
                     <motion.div
-                      animate={{ y: [0, -4, 0] }}
-                      transition={{ repeat: Infinity, duration: 1.6, type: 'tween', ease: 'easeInOut' }}
-                      className="text-lg filter drop-shadow-[0_0_8px_rgba(250,204,21,1)] leading-none"
+                      initial={
+                        shouldReduceMotion
+                          ? false
+                          : { y: 78, opacity: 0, scale: 0.42, rotate: -8 }
+                      }
+                      animate={{ y: 0, opacity: 1, scale: 1, rotate: 0 }}
+                      transition={{
+                        type: 'spring',
+                        stiffness: 265,
+                        damping: 15,
+                        mass: 0.9,
+                        delay: shouldReduceMotion ? 0 : 0.36,
+                      }}
+                      className="flex flex-col items-center mb-1.5 text-center z-10"
                     >
-                      👑
+                      <motion.div
+                        initial={shouldReduceMotion ? false : { y: 16, scale: 0.65 }}
+                        animate={{ y: 0, scale: 1 }}
+                        transition={{
+                          type: 'spring',
+                          stiffness: 320,
+                          damping: 13,
+                          delay: shouldReduceMotion ? 0 : 0.42,
+                        }}
+                        className="relative"
+                      >
+                        <AvatarDoll
+                          avatarId={second.avatarId}
+                          name={second.name}
+                          color={second.color}
+                          size={42}
+                          variant="full"
+                          className="filter drop-shadow-[0_6px_12px_rgba(148,163,184,0.35)]"
+                        />
+                        <motion.span
+                          initial={shouldReduceMotion ? false : { scale: 0, rotate: -30 }}
+                          animate={{ scale: 1, rotate: 0 }}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 420,
+                            damping: 14,
+                            delay: shouldReduceMotion ? 0 : 0.56,
+                          }}
+                          className="absolute -bottom-1 -right-1 text-xs"
+                        >
+                          🥈
+                        </motion.span>
+                      </motion.div>
+                      <span className="text-[11px] font-black text-zinc-200 truncate w-full mt-0.5">
+                        {renderRunnerName(second)}
+                      </span>
+                      <span className="text-[9px] font-mono text-zinc-400">
+                        {Math.floor(second.progressDistance)}m · {mpStrings.stakePerRunnerShort}:{' '}
+                        {formatMoney(breakdownRows[1]?.betAmount ?? betAmountKz)}
+                      </span>
+                      <span className="text-[11px] font-mono font-black text-emerald-400 bg-emerald-950/90 px-2 py-0.5 rounded-md border border-emerald-800 mt-0.5">
+                        +{formatMoney(breakdownRows[1]?.payoutKz ?? threeTorneiras.secondPrizeKz)}
+                      </span>
                     </motion.div>
 
-                    <div className="relative">
-                      <AvatarDoll
-                        avatarId={first.avatarId}
-                        name={first.name}
-                        color={first.color}
-                        size={52}
-                        variant="full"
-                        className="filter drop-shadow-[0_0_15px_rgba(245,158,11,0.8)]"
-                      />
-                      <span className="absolute -bottom-1 -right-1 text-sm">🏆</span>
-                    </div>
-
-                    <span className="text-xs font-black text-amber-300 truncate w-full mt-0.5">
-                      {renderRunnerName(first)}
-                    </span>
-                    <span className="text-[10px] font-mono text-zinc-400">
-                      {Math.floor(first.progressDistance)}m · {mpStrings.stakePerRunnerShort}: {formatMoney(breakdownRows[0]?.betAmount ?? betAmountKz)}
-                    </span>
-                    <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-950 px-2.5 py-0.5 rounded-md border border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)] mt-0.5">
-                      +{formatMoney(breakdownRows[0]?.payoutKz ?? threeTorneiras.firstPrizeKz)}
-                    </span>
-                  </motion.div>
-
-                  <motion.div
-                    initial={{ scaleY: 0, opacity: 0 }}
-                    animate={{ scaleY: 1, opacity: 1 }}
-                    transition={{ type: 'spring', damping: 16, stiffness: 200, delay: 0.15 }}
-                    style={{ originY: 1 }}
-                    className="w-full h-28 sm:h-32 bg-gradient-to-t from-amber-950 via-yellow-700 to-amber-500 rounded-t-2xl border-t-2 border-x border-amber-300 shadow-[0_0_25px_rgba(245,158,11,0.4)] flex flex-col items-center justify-center p-1 relative overflow-hidden"
-                  >
                     <motion.div
-                      animate={{ rotate: 360 }}
-                      transition={{ repeat: Infinity, duration: 10, ease: 'linear' }}
-                      className="absolute inset-0 bg-gradient-to-r from-transparent via-white/15 to-transparent pointer-events-none"
+                      initial={shouldReduceMotion ? false : { scaleY: 0, y: 20, opacity: 0 }}
+                      animate={{ scaleY: 1, y: 0, opacity: 1 }}
+                      transition={{
+                        type: 'spring',
+                        damping: 18,
+                        stiffness: 230,
+                        delay: shouldReduceMotion ? 0 : 0.22,
+                      }}
+                      style={{ originY: 1 }}
+                      className="w-full h-22 sm:h-26 bg-gradient-to-t from-zinc-800 via-slate-700 to-slate-600 rounded-t-2xl border-t-2 border-x border-slate-400/60 shadow-lg flex flex-col items-center justify-center p-1 relative overflow-hidden"
+                    >
+                      <div className="text-2xl sm:text-3xl font-black font-mono text-slate-200">
+                        2
+                      </div>
+                      <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-slate-300">
+                        {t.podium.secondPlace}
+                      </span>
+                      <span className="text-[8px] font-mono text-slate-400">25%</span>
+                    </motion.div>
+                  </div>
+                )}
+
+                {first && (
+                  <div className="flex-1 flex flex-col items-center max-w-[160px] relative">
+                    {userRank === 1 && (
+                      <Top1GoldenBurst burstKey={explosionKey} variant="pedestal" />
+                    )}
+
+                    <motion.div
+                      animate={
+                        shouldReduceMotion
+                          ? undefined
+                          : {
+                              scale: [1, 1.25, 1],
+                              opacity: [0.4, 0.85, 0.4],
+                            }
+                      }
+                      transition={{ repeat: Infinity, duration: 2.2, type: 'tween', ease: 'easeInOut' }}
+                      className="absolute top-2 w-28 h-28 bg-amber-400/30 rounded-full blur-2xl pointer-events-none"
                     />
-                    <div className="text-3xl sm:text-4xl font-black font-mono text-zinc-950 drop-shadow">
-                      1
-                    </div>
-                    <span className="text-[10px] font-mono uppercase tracking-wider font-black text-amber-950">
-                      {t.podium.championBadge}
-                    </span>
-                    <span className="text-[8px] font-mono text-amber-950/80 font-bold">45%</span>
-                  </motion.div>
-                </div>
-              )}
 
-              {third && (
-                <div className="flex-1 flex flex-col items-center max-w-[145px]">
-                  <motion.div
-                    initial={{ y: -70, opacity: 0, scale: 0.6 }}
-                    animate={{ y: 0, opacity: 1, scale: 1 }}
-                    transition={{ type: 'spring', damping: 14, stiffness: 180, delay: 0.45 }}
-                    className="flex flex-col items-center mb-1 text-center"
-                  >
-                    <div className="relative">
-                      <AvatarDoll
-                        avatarId={third.avatarId}
-                        name={third.name}
-                        color={third.color}
-                        size={40}
-                        variant="full"
-                        className="filter drop-shadow"
+                    {/* Onda dourada ao aterrar no degrau do 1º lugar */}
+                    {!shouldReduceMotion && (
+                      <motion.div
+                        initial={{ scale: 0.45, opacity: 0 }}
+                        animate={{ scale: [0.5, 1.45, 1.75], opacity: [0, 0.75, 0] }}
+                        transition={{ duration: 0.85, delay: 0.62, ease: 'easeOut' }}
+                        className="absolute top-10 w-20 h-20 rounded-full border-2 border-amber-300/70 pointer-events-none"
                       />
-                      <span className="absolute -bottom-1 -right-1 text-xs">🥉</span>
-                    </div>
-                    <span className="text-[11px] font-black text-zinc-200 truncate w-full mt-0.5">
-                      {renderRunnerName(third)}
-                    </span>
-                    <span className="text-[9px] font-mono text-zinc-400">
-                      {Math.floor(third.progressDistance)}m · {mpStrings.stakePerRunnerShort}: {formatMoney(breakdownRows[2]?.betAmount ?? betAmountKz)}
-                    </span>
-                    <span className="text-[10px] font-mono text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded-md border border-amber-800/80 mt-0.5">
-                      {t.podium.honorBadge}
-                    </span>
-                  </motion.div>
+                    )}
 
-                  <motion.div
-                    initial={{ scaleY: 0, opacity: 0 }}
-                    animate={{ scaleY: 1, opacity: 1 }}
-                    transition={{ type: 'spring', damping: 18, stiffness: 220, delay: 0.25 }}
-                    style={{ originY: 1 }}
-                    className="w-full h-16 sm:h-20 bg-gradient-to-t from-amber-950 via-yellow-900 to-yellow-800 rounded-t-2xl border-t-2 border-x border-amber-600/70 shadow-md flex flex-col items-center justify-center p-1 relative overflow-hidden"
-                  >
-                    <div className="text-xl sm:text-2xl font-black font-mono text-amber-200">
-                      3
-                    </div>
-                    <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-amber-300">
-                      {t.podium.thirdPlace}
-                    </span>
-                    <span className="text-[8px] font-mono text-amber-400/80">
-                      {t.podium.honorBadge}
-                    </span>
-                  </motion.div>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
+                    <motion.div
+                      initial={
+                        shouldReduceMotion
+                          ? false
+                          : { y: 108, opacity: 0, scale: 0.34, rotate: -10 }
+                      }
+                      animate={{ y: 0, opacity: 1, scale: 1, rotate: 0 }}
+                      transition={{
+                        type: 'spring',
+                        stiffness: 245,
+                        damping: 13,
+                        mass: 0.96,
+                        delay: shouldReduceMotion ? 0 : 0.52,
+                      }}
+                      className="flex flex-col items-center mb-1.5 text-center z-10"
+                    >
+                      <motion.div
+                        initial={shouldReduceMotion ? false : { y: 18, scale: 0.4, opacity: 0 }}
+                        animate={
+                          shouldReduceMotion
+                            ? { y: 0, scale: 1, opacity: 1 }
+                            : { y: [0, -5, 0], scale: 1, opacity: 1 }
+                        }
+                        transition={
+                          shouldReduceMotion
+                            ? { duration: 0.1 }
+                            : {
+                                y: { repeat: Infinity, duration: 1.6, type: 'tween', ease: 'easeInOut', delay: 0.9 },
+                                scale: { type: 'spring', stiffness: 400, damping: 14, delay: 0.68 },
+                                opacity: { duration: 0.25, delay: 0.64 },
+                              }
+                        }
+                        className="text-lg filter drop-shadow-[0_0_8px_rgba(250,204,21,1)] leading-none"
+                      >
+                        👑
+                      </motion.div>
+
+                      <motion.div
+                        initial={shouldReduceMotion ? false : { y: 20, scale: 0.55 }}
+                        animate={{ y: 0, scale: 1 }}
+                        transition={{
+                          type: 'spring',
+                          stiffness: 310,
+                          damping: 12,
+                          delay: shouldReduceMotion ? 0 : 0.58,
+                        }}
+                        className="relative"
+                      >
+                        <AvatarDoll
+                          avatarId={first.avatarId}
+                          name={first.name}
+                          color={first.color}
+                          size={52}
+                          variant="full"
+                          className="filter drop-shadow-[0_0_15px_rgba(245,158,11,0.8)]"
+                        />
+                        <motion.span
+                          initial={shouldReduceMotion ? false : { scale: 0, rotate: 25 }}
+                          animate={{ scale: 1, rotate: 0 }}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 420,
+                            damping: 12,
+                            delay: shouldReduceMotion ? 0 : 0.74,
+                          }}
+                          className="absolute -bottom-1 -right-1 text-sm"
+                        >
+                          🏆
+                        </motion.span>
+                      </motion.div>
+
+                      <span className="text-xs font-black text-amber-300 truncate w-full mt-0.5">
+                        {renderRunnerName(first)}
+                      </span>
+                      <span className="text-[10px] font-mono text-zinc-400">
+                        {Math.floor(first.progressDistance)}m · {mpStrings.stakePerRunnerShort}:{' '}
+                        {formatMoney(breakdownRows[0]?.betAmount ?? betAmountKz)}
+                      </span>
+                      <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-950 px-2.5 py-0.5 rounded-md border border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)] mt-0.5">
+                        +{formatMoney(breakdownRows[0]?.payoutKz ?? threeTorneiras.firstPrizeKz)}
+                      </span>
+                    </motion.div>
+
+                    <motion.div
+                      initial={shouldReduceMotion ? false : { scaleY: 0, y: 24, opacity: 0 }}
+                      animate={{ scaleY: 1, y: 0, opacity: 1 }}
+                      transition={{
+                        type: 'spring',
+                        damping: 16,
+                        stiffness: 215,
+                        delay: shouldReduceMotion ? 0 : 0.3,
+                      }}
+                      style={{ originY: 1 }}
+                      className="w-full h-28 sm:h-32 bg-gradient-to-t from-amber-950 via-yellow-700 to-amber-500 rounded-t-2xl border-t-2 border-x border-amber-300 shadow-[0_0_25px_rgba(245,158,11,0.4)] flex flex-col items-center justify-center p-1 relative overflow-hidden"
+                    >
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ repeat: Infinity, duration: 10, ease: 'linear' }}
+                        className="absolute inset-0 bg-gradient-to-r from-transparent via-white/15 to-transparent pointer-events-none"
+                      />
+                      <div className="text-3xl sm:text-4xl font-black font-mono text-zinc-950 drop-shadow">
+                        1
+                      </div>
+                      <span className="text-[10px] font-mono uppercase tracking-wider font-black text-amber-950">
+                        {t.podium.championBadge}
+                      </span>
+                      <span className="text-[8px] font-mono text-amber-950/80 font-bold">45%</span>
+                    </motion.div>
+                  </div>
+                )}
+
+                {third && (
+                  <div className="flex-1 flex flex-col items-center max-w-[145px] relative">
+                    <motion.div
+                      initial={
+                        shouldReduceMotion
+                          ? false
+                          : { y: 66, opacity: 0, scale: 0.45, rotate: 8 }
+                      }
+                      animate={{ y: 0, opacity: 1, scale: 1, rotate: 0 }}
+                      transition={{
+                        type: 'spring',
+                        stiffness: 270,
+                        damping: 15,
+                        mass: 0.88,
+                        delay: shouldReduceMotion ? 0 : 0.22,
+                      }}
+                      className="flex flex-col items-center mb-1.5 text-center z-10"
+                    >
+                      <motion.div
+                        initial={shouldReduceMotion ? false : { y: 14, scale: 0.65 }}
+                        animate={{ y: 0, scale: 1 }}
+                        transition={{
+                          type: 'spring',
+                          stiffness: 320,
+                          damping: 14,
+                          delay: shouldReduceMotion ? 0 : 0.28,
+                        }}
+                        className="relative"
+                      >
+                        <AvatarDoll
+                          avatarId={third.avatarId}
+                          name={third.name}
+                          color={third.color}
+                          size={40}
+                          variant="full"
+                          className="filter drop-shadow-[0_6px_12px_rgba(217,119,6,0.35)]"
+                        />
+                        <motion.span
+                          initial={shouldReduceMotion ? false : { scale: 0, rotate: 20 }}
+                          animate={{ scale: 1, rotate: 0 }}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 420,
+                            damping: 14,
+                            delay: shouldReduceMotion ? 0 : 0.42,
+                          }}
+                          className="absolute -bottom-1 -right-1 text-xs"
+                        >
+                          🥉
+                        </motion.span>
+                      </motion.div>
+                      <span className="text-[11px] font-black text-zinc-200 truncate w-full mt-0.5">
+                        {renderRunnerName(third)}
+                      </span>
+                      <span className="text-[9px] font-mono text-zinc-400">
+                        {Math.floor(third.progressDistance)}m · {mpStrings.stakePerRunnerShort}:{' '}
+                        {formatMoney(breakdownRows[2]?.betAmount ?? betAmountKz)}
+                      </span>
+                      <span className="text-[10px] font-mono text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded-md border border-amber-800/80 mt-0.5">
+                        {t.podium.honorBadge}
+                      </span>
+                    </motion.div>
+
+                    <motion.div
+                      initial={shouldReduceMotion ? false : { scaleY: 0, y: 18, opacity: 0 }}
+                      animate={{ scaleY: 1, y: 0, opacity: 1 }}
+                      transition={{
+                        type: 'spring',
+                        damping: 18,
+                        stiffness: 235,
+                        delay: shouldReduceMotion ? 0 : 0.12,
+                      }}
+                      style={{ originY: 1 }}
+                      className="w-full h-16 sm:h-20 bg-gradient-to-t from-amber-950 via-yellow-900 to-yellow-800 rounded-t-2xl border-t-2 border-x border-amber-600/70 shadow-md flex flex-col items-center justify-center p-1 relative overflow-hidden"
+                    >
+                      <div className="text-xl sm:text-2xl font-black font-mono text-amber-200">
+                        3
+                      </div>
+                      <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-amber-300">
+                        {t.podium.thirdPlace}
+                      </span>
+                      <span className="text-[8px] font-mono text-amber-400/80">
+                        {t.podium.honorBadge}
+                      </span>
+                    </motion.div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Tabela Completa: Quanto Cada Corredor Apostou e Ganhou */}
         <motion.div
@@ -1011,9 +1164,18 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           </div>
 
           <div className="flex flex-col gap-1">
-            {breakdownRows.map(({ runner, rank, betAmount: rBet, payoutKz }) => (
-              <div
+            {breakdownRows.map(({ runner, rank, betAmount: rBet, payoutKz }, idx) => (
+              <motion.div
                 key={runner.id}
+                initial={shouldReduceMotion ? false : { opacity: 0, y: 28, scale: 0.94 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{
+                  type: 'spring',
+                  stiffness: 290,
+                  damping: 20,
+                  mass: 0.85,
+                  delay: shouldReduceMotion ? 0 : 0.14 + idx * 0.08,
+                }}
                 className={`grid grid-cols-12 gap-1 items-center px-2 py-1.5 rounded-xl border ${
                   runner.isPlayer
                     ? 'bg-amber-500/15 border-amber-400/60 text-amber-100'
@@ -1023,7 +1185,15 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                 }`}
               >
                 <div className="col-span-5 flex items-center gap-1.5 min-w-0">
-                  <span
+                  <motion.span
+                    initial={shouldReduceMotion ? false : { scale: 0.3, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    transition={{
+                      type: 'spring',
+                      stiffness: 420,
+                      damping: 15,
+                      delay: shouldReduceMotion ? 0 : 0.22 + idx * 0.08,
+                    }}
                     className={`text-[10px] font-black w-4 shrink-0 ${
                       rank === 1
                         ? 'text-amber-400'
@@ -1035,14 +1205,31 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                     }`}
                   >
                     {rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `${rank}º`}
-                  </span>
-                  <AvatarDoll
-                    avatarId={runner.avatarId}
-                    name={runner.name}
-                    color={runner.color}
-                    size={20}
-                    variant="bust"
-                  />
+                  </motion.span>
+                  <motion.div
+                    initial={
+                      shouldReduceMotion
+                        ? false
+                        : { y: 24, scale: 0.35, opacity: 0, rotate: -14 }
+                    }
+                    animate={{ y: 0, scale: 1, opacity: 1, rotate: 0 }}
+                    transition={{
+                      type: 'spring',
+                      stiffness: 340,
+                      damping: 14,
+                      mass: 0.8,
+                      delay: shouldReduceMotion ? 0 : 0.18 + idx * 0.08,
+                    }}
+                    className="shrink-0"
+                  >
+                    <AvatarDoll
+                      avatarId={runner.avatarId}
+                      name={runner.name}
+                      color={runner.color}
+                      size={20}
+                      variant="bust"
+                    />
+                  </motion.div>
                   <span className="truncate font-sans font-bold text-[11px]">
                     {renderRunnerName(runner)}
                   </span>
@@ -1060,7 +1247,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                 >
                   {payoutKz > 0 ? `+${formatMoney(payoutKz)}` : formatMoney(0)}
                 </span>
-              </div>
+              </motion.div>
             ))}
           </div>
         </motion.div>

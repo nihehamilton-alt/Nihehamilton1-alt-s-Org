@@ -19,6 +19,16 @@ import {
   upsertVoiceActivitySession,
   type VoiceActivitySessionLog,
 } from '../utils/voiceActivityDb';
+import {
+  applyAdaptiveDelayToNode,
+  computeAdaptiveVoiceBufferMs,
+  computeWebRtcJitterBufferTargetMs,
+  createAdaptivePlaybackGraph,
+  disposeAdaptivePlaybackGraph,
+  processVoicePongSample,
+  setAdaptiveGraphMuted,
+  type AdaptivePlaybackGraphNode,
+} from '../utils/voiceAdaptiveBuffer';
 import type { GameStatus, TelemetryInvestigationEntry } from '../types/game';
 
 export type { VoiceActivitySessionLog };
@@ -35,6 +45,7 @@ export interface VoiceRemotePeer {
   muted: boolean;
   deafened: boolean;
   speaking: boolean;
+  rttMs?: number | null;
 }
 
 interface VoiceChatContextValue {
@@ -63,6 +74,14 @@ interface VoiceChatContextValue {
   hasHeadset: boolean;
   selectedMicLabel: string | null;
   localPlayerName: string;
+  /** RTT suavizado (ms) medido via servidor /ws/voice */
+  rttMs: number | null;
+  /** Jitter de rede estimado (ms) */
+  jitterMs: number;
+  /** Atraso alvo atual do buffer adaptativo Web Audio (ms) */
+  adaptiveBufferMs: number;
+  /** Deslocamento estimado entre relógio do servidor e cliente (ms) */
+  serverClockOffsetMs: number;
   investigatingCompetitors: Record<string, TelemetryInvestigationEntry>;
   voiceSessionHistory: VoiceActivitySessionLog[];
   currentVoiceActivity: VoiceActivitySessionLog | null;
@@ -197,6 +216,13 @@ export const VoiceChatProvider: React.FC<{
     null
   );
 
+  const [rttMs, setRttMs] = useState<number | null>(null);
+  const [jitterMs, setJitterMs] = useState<number>(0);
+  const [adaptiveBufferMs, setAdaptiveBufferMs] = useState<number>(() =>
+    computeAdaptiveVoiceBufferMs({ rttMs: null, jitterMs: 0, raceStatus })
+  );
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState<number>(0);
+
   const peerIdRef = useRef<string>(getSessionPlayerId());
   const wsRef = useRef<WebSocket | null>(null);
   const rawMicStreamRef = useRef<MediaStream | null>(null);
@@ -206,21 +232,8 @@ export const VoiceChatProvider: React.FC<{
   const makingOfferRef = useRef<Map<string, boolean>>(new Map());
   const remoteAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
-  const remoteAnalysersRef = useRef<
-    Map<
-      string,
-      {
-        source: MediaStreamAudioSourceNode;
-        analyser: AnalyserNode;
-        zeroGain: GainNode;
-        stream: MediaStream;
-      }
-    >
-  >(new Map());
+  const remoteAdaptiveGraphsRef = useRef<Map<string, AdaptivePlaybackGraphNode>>(new Map());
   const analyserScratchRef = useRef<Float32Array<ArrayBuffer> | null>(null);
-  const remoteFallbackAudioRef = useRef<
-    Map<string, { source: MediaStreamAudioSourceNode; gain: GainNode }>
-  >(new Map());
   const playbackCtxRef = useRef<AudioContext | null>(null);
   const audioProcessorRef = useRef<VoiceAudioProcessorHandle | null>(null);
   const lastSpeakingEmitRef = useRef<boolean>(false);
@@ -229,6 +242,14 @@ export const VoiceChatProvider: React.FC<{
   const lastUiLevelRef = useRef<number>(0);
   const lastPreLevelRef = useRef<number>(0);
   const lastSuppressedRef = useRef<boolean>(false);
+
+  const rttMsRef = useRef<number | null>(null);
+  const jitterMsRef = useRef<number>(0);
+  const adaptiveBufferMsRef = useRef<number>(adaptiveBufferMs);
+  const peerRttMapRef = useRef<Map<string, number | null>>(new Map());
+  const voicePingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const voiceCalibrationTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const lastBroadcastRttRef = useRef<{ rtt: number; at: number }>({ rtt: -1, at: 0 });
 
   const identityRef = useRef({ roomCode, playerName, playerAvatar });
   const raceRoundRef = useRef<number>(raceRound);
@@ -410,22 +431,77 @@ export const VoiceChatProvider: React.FC<{
   }, [buildActivitySnapshot, isMicMuted, settleTrackerClocks, syncProcessorParams]);
 
   const syncRemoteOutputMuteStates = useCallback(() => {
+    const webAudioActive = Boolean(
+      playbackCtxRef.current && playbackCtxRef.current.state === 'running'
+    );
     for (const [pId, stream] of remoteStreamsRef.current.entries()) {
       const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(pId);
       stream.getAudioTracks().forEach((tr) => {
         tr.enabled = !shouldMute;
       });
     }
+    for (const [pId, node] of remoteAdaptiveGraphsRef.current.entries()) {
+      const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(pId);
+      setAdaptiveGraphMuted(playbackCtxRef.current, node, shouldMute);
+    }
     for (const [pId, audioEl] of remoteAudiosRef.current.entries()) {
       const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(pId);
-      audioEl.muted = shouldMute;
-      audioEl.volume = shouldMute ? 0 : 1.0;
-    }
-    for (const [pId, nodes] of remoteFallbackAudioRef.current.entries()) {
-      const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(pId);
-      nodes.gain.gain.value = shouldMute ? 0 : 1.0;
+      // Quando o grafo adaptativo Web Audio (DelayNode -> GainNode) está ativo,
+      // mantemos o elemento <audio> mudo apenas como bomba de decodificação WebRTC no Chromium.
+      if (webAudioActive && remoteAdaptiveGraphsRef.current.has(pId)) {
+        audioEl.muted = true;
+        audioEl.volume = 0;
+      } else {
+        audioEl.muted = shouldMute;
+        audioEl.volume = shouldMute ? 0 : 1.0;
+      }
     }
   }, []);
+
+  const syncAdaptivePlaybackDelay = useCallback(
+    (overrideBufferMs?: number) => {
+      const globalTargetMs =
+        typeof overrideBufferMs === 'number'
+          ? overrideBufferMs
+          : computeAdaptiveVoiceBufferMs({
+              rttMs: rttMsRef.current,
+              jitterMs: jitterMsRef.current,
+              raceStatus: raceStatusRef.current,
+            });
+
+      adaptiveBufferMsRef.current = globalTargetMs;
+      setAdaptiveBufferMs(globalTargetMs);
+
+      const ctx = playbackCtxRef.current;
+      if (ctx && ctx.state !== 'closed') {
+        for (const [remotePeerId, graphNode] of remoteAdaptiveGraphsRef.current.entries()) {
+          const peerTargetMs = computeAdaptiveVoiceBufferMs({
+            rttMs: rttMsRef.current,
+            jitterMs: jitterMsRef.current,
+            raceStatus: raceStatusRef.current,
+            peerRttMs: peerRttMapRef.current.get(remotePeerId) ?? null,
+          });
+          applyAdaptiveDelayToNode(ctx, graphNode, peerTargetMs);
+        }
+      }
+
+      const jitterTargetMs = computeWebRtcJitterBufferTargetMs(globalTargetMs);
+      for (const pc of pcsRef.current.values()) {
+        for (const receiver of pc.getReceivers()) {
+          if (receiver.track?.kind !== 'audio') continue;
+          try {
+            const jitterReceiver = receiver as RTCRtpReceiver & { jitterBufferTarget?: number };
+            if (typeof jitterReceiver.jitterBufferTarget !== 'undefined') {
+              jitterReceiver.jitterBufferTarget = jitterTargetMs;
+            }
+          } catch {
+            // Optional WebRTC jitterBufferTarget
+          }
+        }
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     deafenedRef.current = isDeafened;
@@ -468,6 +544,24 @@ export const VoiceChatProvider: React.FC<{
     raceRoundRef.current = raceRound;
     raceStatusRef.current = raceStatus;
 
+    // Recalcula e aplica imediatamente o buffer adaptativo ao mudar de estado do jogo
+    if (prevStatus !== raceStatus) {
+      syncAdaptivePlaybackDelay();
+      if (
+        (raceStatus === 'starting' || raceStatus === 'running') &&
+        wsRef.current?.readyState === WebSocket.OPEN
+      ) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'voice:ping',
+            clientTime: Date.now(),
+            raceStatus,
+            raceRound,
+          })
+        );
+      }
+    }
+
     if (!joinedRef.current) return;
 
     const roundStarted = raceRound > 0 && raceRound !== prevRound;
@@ -491,6 +585,7 @@ export const VoiceChatProvider: React.FC<{
     flushActivityToDb,
     raceRound,
     raceStatus,
+    syncAdaptivePlaybackDelay,
   ]);
 
   useEffect(() => {
@@ -564,6 +659,17 @@ export const VoiceChatProvider: React.FC<{
       if (headsetOutput?.deviceId) {
         for (const audioEl of remoteAudiosRef.current.values()) {
           applyPreferredOutputSink(audioEl, headsetOutput.deviceId);
+        }
+        const ctx = playbackCtxRef.current as
+          | (AudioContext & { sinkId?: string; setSinkId?: (id: string) => Promise<void> })
+          | null;
+        if (
+          ctx &&
+          ctx.state !== 'closed' &&
+          typeof ctx.setSinkId === 'function' &&
+          ctx.sinkId !== headsetOutput.deviceId
+        ) {
+          ctx.setSinkId(headsetOutput.deviceId).catch(() => {});
         }
       }
       return {
@@ -689,116 +795,91 @@ export const VoiceChatProvider: React.FC<{
     if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
       playbackCtxRef.current = new AudioCtx({ latencyHint: 'interactive' });
     }
-    if (playbackCtxRef.current.state === 'suspended') {
-      await playbackCtxRef.current.resume().catch(() => {});
+    const ctx = playbackCtxRef.current;
+    if (preferredOutputIdRef.current) {
+      const sinkableCtx = ctx as AudioContext & {
+        sinkId?: string;
+        setSinkId?: (id: string) => Promise<void>;
+      };
+      if (
+        typeof sinkableCtx.setSinkId === 'function' &&
+        sinkableCtx.sinkId !== preferredOutputIdRef.current
+      ) {
+        sinkableCtx.setSinkId(preferredOutputIdRef.current).catch(() => {});
+      }
     }
-    return playbackCtxRef.current;
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
+    }
+    return ctx;
   }, []);
 
-  const attachRemoteAnalyser = useCallback(
+  const attachAdaptiveRemotePlayback = useCallback(
     async (remotePeerId: string, remoteStream: MediaStream) => {
-      const existing = remoteAnalysersRef.current.get(remotePeerId);
+      const existing = remoteAdaptiveGraphsRef.current.get(remotePeerId);
+      const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
+      const targetDelayMs = computeAdaptiveVoiceBufferMs({
+        rttMs: rttMsRef.current,
+        jitterMs: jitterMsRef.current,
+        raceStatus: raceStatusRef.current,
+        peerRttMs: peerRttMapRef.current.get(remotePeerId) ?? null,
+      });
+
       if (existing && existing.stream === remoteStream) {
+        const ctx = await ensurePlaybackCtxRunning();
+        if (ctx && ctx.state === 'running') {
+          applyAdaptiveDelayToNode(ctx, existing, targetDelayMs);
+          setAdaptiveGraphMuted(ctx, existing, shouldMute);
+          syncRemoteOutputMuteStates();
+        }
         return;
       }
+
       if (existing) {
-        try {
-          existing.source.disconnect();
-          existing.analyser.disconnect();
-          existing.zeroGain.disconnect();
-        } catch {
-          // noop
-        }
-        remoteAnalysersRef.current.delete(remotePeerId);
+        disposeAdaptivePlaybackGraph(existing);
+        remoteAdaptiveGraphsRef.current.delete(remotePeerId);
       }
 
       const ctx = await ensurePlaybackCtxRunning();
       if (!ctx || ctx.state === 'closed') return;
       try {
-        const source = ctx.createMediaStreamSource(remoteStream);
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.65;
-        const zeroGain = ctx.createGain();
-        zeroGain.gain.value = 0;
-        source.connect(analyser);
-        analyser.connect(zeroGain);
-        zeroGain.connect(ctx.destination);
-        remoteAnalysersRef.current.set(remotePeerId, {
-          source,
-          analyser,
-          zeroGain,
+        const graphNode = createAdaptivePlaybackGraph({
+          ctx,
           stream: remoteStream,
+          initialDelayMs: targetDelayMs,
+          muted: shouldMute,
         });
+        remoteAdaptiveGraphsRef.current.set(remotePeerId, graphNode);
+        syncRemoteOutputMuteStates();
       } catch {
-        // noop
+        // Fallback automático permanece no elemento <audio> se createMediaStreamSource falhar
       }
     },
-    [ensurePlaybackCtxRunning]
-  );
-
-  const detachFallbackWebAudioPlayback = useCallback((remotePeerId: string) => {
-    const existing = remoteFallbackAudioRef.current.get(remotePeerId);
-    if (existing) {
-      try {
-        existing.source.disconnect();
-        existing.gain.disconnect();
-      } catch {
-        // noop
-      }
-      remoteFallbackAudioRef.current.delete(remotePeerId);
-    }
-  }, []);
-
-  const attachFallbackWebAudioPlayback = useCallback(
-    async (remotePeerId: string, remoteStream: MediaStream) => {
-      const ctx = await ensurePlaybackCtxRunning();
-      if (!ctx) return;
-      detachFallbackWebAudioPlayback(remotePeerId);
-      try {
-        const source = ctx.createMediaStreamSource(remoteStream);
-        const gain = ctx.createGain();
-        const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
-        gain.gain.value = shouldMute ? 0 : 1.0;
-        source.connect(gain);
-        gain.connect(ctx.destination);
-        remoteFallbackAudioRef.current.set(remotePeerId, { source, gain });
-      } catch {
-        // noop
-      }
-    },
-    [detachFallbackWebAudioPlayback, ensurePlaybackCtxRunning]
+    [ensurePlaybackCtxRunning, syncRemoteOutputMuteStates]
   );
 
   const unlockRemoteAudioElements = useCallback(() => {
-    void ensurePlaybackCtxRunning();
-    for (const [remotePeerId, stream] of remoteStreamsRef.current.entries()) {
-      void attachRemoteAnalyser(remotePeerId, stream);
-    }
-    for (const [remotePeerId, audioEl] of remoteAudiosRef.current.entries()) {
-      applyPreferredOutputSink(audioEl);
-      const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
-      audioEl.muted = shouldMute;
-      audioEl.volume = shouldMute ? 0 : 1.0;
-      if (audioEl.paused && audioEl.srcObject) {
-        audioEl
-          .play()
-          .then(() => {
-            detachFallbackWebAudioPlayback(remotePeerId);
-          })
-          .catch(() => {
-            const stream = remoteStreamsRef.current.get(remotePeerId);
-            if (stream) {
-              void attachFallbackWebAudioPlayback(remotePeerId, stream);
-            }
-          });
+    void (async () => {
+      await ensurePlaybackCtxRunning();
+      for (const [remotePeerId, stream] of remoteStreamsRef.current.entries()) {
+        await attachAdaptiveRemotePlayback(remotePeerId, stream);
       }
-    }
+      for (const [remotePeerId, audioEl] of remoteAudiosRef.current.entries()) {
+        applyPreferredOutputSink(audioEl);
+        if (audioEl.paused && audioEl.srcObject) {
+          await audioEl.play().catch(() => {});
+        }
+        const webAudioRunning =
+          playbackCtxRef.current?.state === 'running' &&
+          remoteAdaptiveGraphsRef.current.has(remotePeerId);
+        const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
+        audioEl.muted = webAudioRunning ? true : shouldMute;
+        audioEl.volume = webAudioRunning || shouldMute ? 0 : 1.0;
+      }
+    })();
   }, [
     applyPreferredOutputSink,
-    attachFallbackWebAudioPlayback,
-    attachRemoteAnalyser,
-    detachFallbackWebAudioPlayback,
+    attachAdaptiveRemotePlayback,
     ensurePlaybackCtxRunning,
   ]);
 
@@ -948,28 +1029,12 @@ export const VoiceChatProvider: React.FC<{
     makingOfferRef.current.delete(remotePeerId);
     pendingIceRef.current.delete(remotePeerId);
     remoteStreamsRef.current.delete(remotePeerId);
+    peerRttMapRef.current.delete(remotePeerId);
 
-    const remoteAnalyserNode = remoteAnalysersRef.current.get(remotePeerId);
-    if (remoteAnalyserNode) {
-      try {
-        remoteAnalyserNode.source.disconnect();
-        remoteAnalyserNode.analyser.disconnect();
-        remoteAnalyserNode.zeroGain.disconnect();
-      } catch {
-        // noop
-      }
-      remoteAnalysersRef.current.delete(remotePeerId);
-    }
-
-    const fallbackNodes = remoteFallbackAudioRef.current.get(remotePeerId);
-    if (fallbackNodes) {
-      try {
-        fallbackNodes.source.disconnect();
-        fallbackNodes.gain.disconnect();
-      } catch {
-        // noop
-      }
-      remoteFallbackAudioRef.current.delete(remotePeerId);
+    const adaptiveGraph = remoteAdaptiveGraphsRef.current.get(remotePeerId);
+    if (adaptiveGraph) {
+      disposeAdaptivePlaybackGraph(adaptiveGraph);
+      remoteAdaptiveGraphsRef.current.delete(remotePeerId);
     }
 
     const pc = pcsRef.current.get(remotePeerId);
@@ -1006,25 +1071,11 @@ export const VoiceChatProvider: React.FC<{
     pendingIceRef.current.clear();
     makingOfferRef.current.clear();
     remoteStreamsRef.current.clear();
-    for (const node of remoteAnalysersRef.current.values()) {
-      try {
-        node.source.disconnect();
-        node.analyser.disconnect();
-        node.zeroGain.disconnect();
-      } catch {
-        // noop
-      }
+    peerRttMapRef.current.clear();
+    for (const node of remoteAdaptiveGraphsRef.current.values()) {
+      disposeAdaptivePlaybackGraph(node);
     }
-    remoteAnalysersRef.current.clear();
-    for (const nodes of remoteFallbackAudioRef.current.values()) {
-      try {
-        nodes.source.disconnect();
-        nodes.gain.disconnect();
-      } catch {
-        // noop
-      }
-    }
-    remoteFallbackAudioRef.current.clear();
+    remoteAdaptiveGraphsRef.current.clear();
     if (typeof document !== 'undefined') {
       document.querySelectorAll('audio[data-voice-peer]').forEach((el) => {
         const audio = el as HTMLAudioElement;
@@ -1036,7 +1087,19 @@ export const VoiceChatProvider: React.FC<{
     remoteAudiosRef.current.clear();
   }, [closePeerConnection]);
 
+  const clearVoicePingTimers = useCallback(() => {
+    if (voicePingTimerRef.current) {
+      clearInterval(voicePingTimerRef.current);
+      voicePingTimerRef.current = null;
+    }
+    for (const timeoutId of voiceCalibrationTimeoutsRef.current) {
+      clearTimeout(timeoutId);
+    }
+    voiceCalibrationTimeoutsRef.current = [];
+  }, []);
+
   const cleanupAllConnections = useCallback(() => {
+    clearVoicePingTimers();
     clearAllPeerConnections();
     if (wsRef.current) {
       try {
@@ -1054,9 +1117,21 @@ export const VoiceChatProvider: React.FC<{
       playbackCtxRef.current.close().catch(() => {});
       playbackCtxRef.current = null;
     }
+    rttMsRef.current = null;
+    jitterMsRef.current = 0;
+    const baseBuffer = computeAdaptiveVoiceBufferMs({
+      rttMs: null,
+      jitterMs: 0,
+      raceStatus: raceStatusRef.current,
+    });
+    adaptiveBufferMsRef.current = baseBuffer;
+    setRttMs(null);
+    setJitterMs(0);
+    setServerClockOffsetMs(0);
+    setAdaptiveBufferMs(baseBuffer);
     setPeers([]);
     setIsConnecting(false);
-  }, [clearAllPeerConnections, stopAudioPipeline]);
+  }, [clearAllPeerConnections, clearVoicePingTimers, stopAudioPipeline]);
 
   useEffect(() => {
     return () => {
@@ -1241,7 +1316,9 @@ export const VoiceChatProvider: React.FC<{
         try {
           const receiver = event.receiver as RTCRtpReceiver & { jitterBufferTarget?: number };
           if (receiver && typeof receiver.jitterBufferTarget !== 'undefined') {
-            receiver.jitterBufferTarget = 60;
+            receiver.jitterBufferTarget = computeWebRtcJitterBufferTargetMs(
+              adaptiveBufferMsRef.current
+            );
           }
         } catch {
           // Optional WebRTC jitter buffer smoothing
@@ -1250,9 +1327,9 @@ export const VoiceChatProvider: React.FC<{
         incomingTrack.enabled = !shouldMuteTrack;
         const remoteStream = event.streams[0] || new MediaStream([incomingTrack]);
         remoteStreamsRef.current.set(remotePeerId, remoteStream);
-        void attachRemoteAnalyser(remotePeerId, remoteStream);
+        void attachAdaptiveRemotePlayback(remotePeerId, remoteStream);
 
-        // Garante exatamente 1 elemento <audio> por jogador remoto para evitar eco/voz duplicada
+        // Garante exatamente 1 elemento <audio> por jogador remoto (bomba de decodificação WebRTC)
         if (typeof document !== 'undefined') {
           document
             .querySelectorAll(`audio[data-voice-peer="${remotePeerId}"]`)
@@ -1281,18 +1358,20 @@ export const VoiceChatProvider: React.FC<{
         if (audioEl.srcObject !== remoteStream) {
           audioEl.srcObject = remoteStream;
         }
+        const webAudioRunning =
+          playbackCtxRef.current?.state === 'running' &&
+          remoteAdaptiveGraphsRef.current.has(remotePeerId);
         const shouldMute = deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId);
-        audioEl.muted = shouldMute;
-        audioEl.volume = shouldMute ? 0 : 1.0;
+        audioEl.muted = webAudioRunning ? true : shouldMute;
+        audioEl.volume = webAudioRunning || shouldMute ? 0 : 1.0;
 
         audioEl
           .play()
           .then(() => {
-            detachFallbackWebAudioPlayback(remotePeerId);
+            void attachAdaptiveRemotePlayback(remotePeerId, remoteStream);
           })
           .catch(() => {
-            // Fallback automático por Web Audio API caso o browser/WebView bloqueie autoplay de <audio>
-            void attachFallbackWebAudioPlayback(remotePeerId, remoteStream);
+            void attachAdaptiveRemotePlayback(remotePeerId, remoteStream);
           });
       };
 
@@ -1321,11 +1400,9 @@ export const VoiceChatProvider: React.FC<{
     },
     [
       applyPreferredOutputSink,
-      attachFallbackWebAudioPlayback,
+      attachAdaptiveRemotePlayback,
       attachLocalTrackToPeer,
-      attachRemoteAnalyser,
       closePeerConnection,
-      detachFallbackWebAudioPlayback,
       sendRenegotiationOffer,
       sendSignal,
     ]
@@ -1334,6 +1411,7 @@ export const VoiceChatProvider: React.FC<{
   const connectWebSocket = useCallback(
     (mode: VoiceChannelMode) => {
       if (!isSupported) return;
+      clearVoicePingTimers();
       clearAllPeerConnections();
 
       if (wsRef.current) {
@@ -1365,6 +1443,18 @@ export const VoiceChatProvider: React.FC<{
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
+      const emitVoicePing = () => {
+        if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(
+          JSON.stringify({
+            type: 'voice:ping',
+            clientTime: Date.now(),
+            raceStatus: raceStatusRef.current,
+            raceRound: raceRoundRef.current,
+          })
+        );
+      };
+
       ws.onopen = () => {
         if (wsRef.current !== ws) {
           ws.close();
@@ -1383,7 +1473,14 @@ export const VoiceChatProvider: React.FC<{
           mode,
           muted: micMutedRef.current,
           deafened: deafenedRef.current,
+          rttMs: rttMsRef.current ?? undefined,
         });
+
+        // Calibração inicial rápida (3 pings) + batimento contínuo de RTT a cada 2,5s
+        emitVoicePing();
+        voiceCalibrationTimeoutsRef.current.push(setTimeout(emitVoicePing, 220));
+        voiceCalibrationTimeoutsRef.current.push(setTimeout(emitVoicePing, 600));
+        voicePingTimerRef.current = setInterval(emitVoicePing, 2500);
       };
 
       ws.onmessage = async (event) => {
@@ -1400,11 +1497,60 @@ export const VoiceChatProvider: React.FC<{
             muted?: boolean;
             deafened?: boolean;
             speaking?: boolean;
+            rttMs?: number | null;
+            clientTime?: number;
+            serverTime?: number;
             sdp?: RTCSessionDescriptionInit;
             candidate?: RTCIceCandidateInit;
           };
 
           if (!msg.type) return;
+
+          if (msg.type === 'voice:pong') {
+            const receivedAt = Date.now();
+            const clientTime =
+              typeof msg.clientTime === 'number' && Number.isFinite(msg.clientTime)
+                ? msg.clientTime
+                : receivedAt;
+            const serverTime =
+              typeof msg.serverTime === 'number' && Number.isFinite(msg.serverTime)
+                ? msg.serverTime
+                : receivedAt;
+
+            const sample = processVoicePongSample({
+              clientTime,
+              serverTime,
+              receivedAt,
+              prevRttMs: rttMsRef.current,
+              prevJitterMs: jitterMsRef.current,
+              raceStatus: raceStatusRef.current,
+            });
+
+            rttMsRef.current = sample.smoothedRttMs;
+            jitterMsRef.current = sample.jitterMs;
+            setRttMs(sample.smoothedRttMs);
+            setJitterMs(sample.jitterMs);
+            setServerClockOffsetMs(sample.serverClockOffsetMs);
+            syncAdaptivePlaybackDelay(sample.targetBufferMs);
+
+            const nowMs = Date.now();
+            if (
+              joinedRef.current &&
+              (lastBroadcastRttRef.current.rtt < 0 ||
+                Math.abs(sample.smoothedRttMs - lastBroadcastRttRef.current.rtt) >= 12 ||
+                nowMs - lastBroadcastRttRef.current.at >= 8000)
+            ) {
+              lastBroadcastRttRef.current = { rtt: sample.smoothedRttMs, at: nowMs };
+              sendSignal({
+                type: 'voice:state',
+                muted: micMutedRef.current,
+                deafened: deafenedRef.current,
+                speaking: lastSpeakingEmitRef.current,
+                rttMs: sample.smoothedRttMs,
+              });
+            }
+            return;
+          }
 
           if (msg.type === 'voice:joined') {
             if (msg.roomKey) setActiveRoomKey(msg.roomKey);
@@ -1412,6 +1558,9 @@ export const VoiceChatProvider: React.FC<{
             const deduped = rawPeers.filter(
               (p, i, arr) => p.peerId !== peerIdRef.current && arr.findIndex((x) => x.peerId === p.peerId) === i
             );
+            for (const p of deduped) {
+              peerRttMapRef.current.set(p.peerId, typeof p.rttMs === 'number' ? p.rttMs : null);
+            }
             setPeers(deduped);
             for (const p of deduped) {
               await createPeerConnection(p.peerId, true);
@@ -1422,6 +1571,10 @@ export const VoiceChatProvider: React.FC<{
           if (msg.type === 'voice:peer-joined' && msg.peer) {
             const joinedPeer = msg.peer;
             if (joinedPeer.peerId === peerIdRef.current) return;
+            peerRttMapRef.current.set(
+              joinedPeer.peerId,
+              typeof joinedPeer.rttMs === 'number' ? joinedPeer.rttMs : null
+            );
             setPeers((prev) => {
               if (prev.some((p) => p.peerId === joinedPeer.peerId)) return prev;
               return [...prev, joinedPeer];
@@ -1446,6 +1599,10 @@ export const VoiceChatProvider: React.FC<{
           }
 
           if (msg.type === 'voice:peer-state' && msg.peerId) {
+            if (typeof msg.rttMs === 'number' && Number.isFinite(msg.rttMs)) {
+              peerRttMapRef.current.set(msg.peerId, msg.rttMs);
+              syncAdaptivePlaybackDelay();
+            }
             setPeers((prev) =>
               prev.map((p) =>
                 p.peerId === msg.peerId
@@ -1454,6 +1611,7 @@ export const VoiceChatProvider: React.FC<{
                       muted: typeof msg.muted === 'boolean' ? msg.muted : p.muted,
                       deafened: typeof msg.deafened === 'boolean' ? msg.deafened : p.deafened,
                       speaking: typeof msg.speaking === 'boolean' ? msg.speaking : p.speaking,
+                      rttMs: typeof msg.rttMs === 'number' ? msg.rttMs : p.rttMs,
                     }
                   : p
               )
@@ -1465,6 +1623,10 @@ export const VoiceChatProvider: React.FC<{
             if (msg.fromPeerId === peerIdRef.current) return;
             if (msg.fromPeer) {
               const incomingPeer = msg.fromPeer;
+              peerRttMapRef.current.set(
+                incomingPeer.peerId,
+                typeof incomingPeer.rttMs === 'number' ? incomingPeer.rttMs : null
+              );
               setPeers((prev) =>
                 prev.some((p) => p.peerId === incomingPeer.peerId)
                   ? prev
@@ -1520,6 +1682,7 @@ export const VoiceChatProvider: React.FC<{
 
       ws.onerror = () => {
         if (wsRef.current !== ws) return;
+        clearVoicePingTimers();
         setIsConnecting(false);
         if (!navigator.onLine) {
           setConnectionState('offline-local');
@@ -1528,6 +1691,7 @@ export const VoiceChatProvider: React.FC<{
 
       ws.onclose = () => {
         if (wsRef.current !== ws) return;
+        clearVoicePingTimers();
         setIsConnecting(false);
         if (!joinedRef.current) {
           setConnectionState('disconnected');
@@ -1540,11 +1704,13 @@ export const VoiceChatProvider: React.FC<{
       attachLocalTrackToPeer,
       cleanupAllConnections,
       clearAllPeerConnections,
+      clearVoicePingTimers,
       closePeerConnection,
       createPeerConnection,
       drainPendingIceCandidates,
       isSupported,
       sendSignal,
+      syncAdaptivePlaybackDelay,
     ]
   );
 
@@ -1804,7 +1970,7 @@ export const VoiceChatProvider: React.FC<{
 
     const peerAnalysers: Record<string, AnalyserNode> = {};
     const peerLevels: Record<string, number> = {};
-    for (const [remotePeerId, entry] of remoteAnalysersRef.current.entries()) {
+    for (const [remotePeerId, entry] of remoteAdaptiveGraphsRef.current.entries()) {
       peerAnalysers[remotePeerId] = entry.analyser;
       if (deafenedRef.current || mutedPeersSetRef.current.has(remotePeerId)) {
         peerLevels[remotePeerId] = 0;
@@ -1844,6 +2010,10 @@ export const VoiceChatProvider: React.FC<{
       hasHeadset,
       selectedMicLabel,
       localPlayerName: playerName || 'Corredor',
+      rttMs,
+      jitterMs,
+      adaptiveBufferMs,
+      serverClockOffsetMs,
       investigatingCompetitors,
       voiceSessionHistory,
       currentVoiceActivity,
@@ -1882,6 +2052,10 @@ export const VoiceChatProvider: React.FC<{
       hasHeadset,
       selectedMicLabel,
       playerName,
+      rttMs,
+      jitterMs,
+      adaptiveBufferMs,
+      serverClockOffsetMs,
       investigatingCompetitors,
       voiceSessionHistory,
       currentVoiceActivity,

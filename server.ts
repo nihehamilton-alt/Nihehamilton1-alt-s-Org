@@ -697,6 +697,33 @@ async function startServer() {
 
   const triggerSynchronizedRaceStart = (room: ServerRoom): { started: boolean; waitingParticipants: RoomParticipant[] } => {
     resolveRoomHostAndLanes(room);
+    if (
+      room.raceStatus === 'starting' &&
+      typeof room.syncedRaceStartAt === 'number' &&
+      room.syncedRaceStartAt > Date.now() - 500
+    ) {
+      broadcastToRoom(room.code, {
+        type: 'room:race-start',
+        room,
+        raceRound: room.raceRound,
+        raceSeed: room.raceSeed,
+        raceStartAt: room.syncedRaceStartAt,
+        syncedRaceStartAt: room.syncedRaceStartAt,
+        betAmount: room.betAmount,
+        serverTime: Date.now(),
+      });
+      return { started: true, waitingParticipants: [] };
+    }
+    if (room.raceStatus === 'running') {
+      const raceElapsedExpired =
+        typeof room.syncedRaceStartAt === 'number' &&
+        Date.now() > room.syncedRaceStartAt + 44_000;
+      if (!raceElapsedExpired) {
+        return { started: true, waitingParticipants: [] };
+      }
+      finalizeRoomRace(room);
+    }
+
     const connectedParticipants = room.participants.filter((p) => p.connected !== false);
     const unready = getUnreadyParticipants(room);
     if (connectedParticipants.length === 0 || unready.length > 0) {
@@ -734,6 +761,7 @@ async function startServer() {
     room.raceSeed = Math.floor(1 + Math.random() * 2_000_000_000);
     room.syncedRaceStartAt = syncedStartAt;
     room.raceStartAt = syncedStartAt;
+    room.lastResults = undefined;
     room.updatedAt = now;
 
     const ordered = [
@@ -1510,6 +1538,7 @@ async function startServer() {
     muted: boolean;
     deafened: boolean;
     speaking: boolean;
+    rttMs: number | null;
     joinedAt: number;
     ws: WebSocket;
   }
@@ -1526,6 +1555,7 @@ async function startServer() {
     muted: p.muted,
     deafened: p.deafened,
     speaking: p.speaking,
+    rttMs: p.rttMs,
   });
 
   const sendWs = (ws: WebSocket, payload: unknown) => {
@@ -2437,7 +2467,7 @@ async function startServer() {
 
         if (msg.type === 'room:return-lobby') {
           resolveRoomHostAndLanes(room);
-          if (room.hostId === clientRef.playerId || room.raceStatus === 'completed') {
+          if (room.raceStatus === 'completed') {
             const prevStartCtrl = roomStartControl.get(room.code);
             if (prevStartCtrl?.timer) clearTimeout(prevStartCtrl.timer);
             roomStartControl.delete(room.code);
@@ -2457,7 +2487,22 @@ async function startServer() {
             room.updatedAt = Date.now();
             saveDb(db);
             broadcastToRoom(room.code, { type: 'room:state', room, serverTime: room.updatedAt });
+          } else if (room.raceStatus === 'idle' && participant) {
+            participant.isSpectating = false;
+            participant.progressDistance = 0;
+            participant.finished = false;
+            participant.stumbling = false;
+            participant.jumpY = 0;
+            participant.action = 'running';
+            resolveRoomHostAndLanes(room);
+            room.updatedAt = Date.now();
+            saveDb(db);
+            broadcastToRoom(room.code, { type: 'room:state', room, serverTime: room.updatedAt });
+          } else {
+            // Não abortar uma contagem regressiva ('starting') ou corrida em curso ('running')
+            sendRoomWs(ws, { type: 'room:state', room, serverTime: Date.now() });
           }
+          return;
         }
       } catch {
         // Ignore malformed messages
@@ -2490,12 +2535,32 @@ async function startServer() {
           muted?: boolean;
           deafened?: boolean;
           speaking?: boolean;
+          rttMs?: number;
+          adaptiveBufferMs?: number;
+          clientTime?: number;
+          raceStatus?: string;
+          raceRound?: number;
           targetPeerId?: string;
           sdp?: unknown;
           candidate?: unknown;
         };
 
         if (!msg || !msg.type) return;
+
+        if (msg.type === 'voice:ping') {
+          const clientTime =
+            typeof msg.clientTime === 'number' && Number.isFinite(msg.clientTime)
+              ? msg.clientTime
+              : Date.now();
+          sendWs(ws, {
+            type: 'voice:pong',
+            clientTime,
+            serverTime: Date.now(),
+            raceStatus: typeof msg.raceStatus === 'string' ? msg.raceStatus : undefined,
+            raceRound: typeof msg.raceRound === 'number' ? msg.raceRound : undefined,
+          });
+          return;
+        }
 
         if (msg.type === 'voice:join' && msg.peerId) {
           removeVoicePeer(ws);
@@ -2527,6 +2592,10 @@ async function startServer() {
             muted: Boolean(msg.muted),
             deafened: Boolean(msg.deafened),
             speaking: false,
+            rttMs:
+              typeof msg.rttMs === 'number' && Number.isFinite(msg.rttMs) && msg.rttMs >= 0
+                ? Math.round(msg.rttMs)
+                : null,
             joinedAt: Date.now(),
             ws,
           };
@@ -2571,6 +2640,9 @@ async function startServer() {
           if (typeof msg.muted === 'boolean') sender.muted = msg.muted;
           if (typeof msg.deafened === 'boolean') sender.deafened = msg.deafened;
           if (typeof msg.speaking === 'boolean') sender.speaking = msg.speaking;
+          if (typeof msg.rttMs === 'number' && Number.isFinite(msg.rttMs) && msg.rttMs >= 0) {
+            sender.rttMs = Math.round(msg.rttMs);
+          }
 
           broadcastToVoiceRoom(
             senderRef.roomKey,
@@ -2580,6 +2652,7 @@ async function startServer() {
               muted: sender.muted,
               deafened: sender.deafened,
               speaking: sender.speaking,
+              rttMs: sender.rttMs,
             },
             sender.peerId
           );
