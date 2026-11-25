@@ -199,7 +199,7 @@ export const pt: AppTranslations = {
     inviteSlot: 'Vaga para Amigo',
     waitingFriendsHint: 'Partilha o código ou QR para preencher esta vaga com um amigo real.',
     arenaPot: 'Pote da Arena',
-    championPrize: '1º Lugar (45%)',
+    championPrize: '1º Lugar (50%)',
     startArenaBtn: 'INICIAR CORRIDA NA ARENA',
     createNote: 'Cria a tua própria sala com limite de corredores e valor de entrada.',
     roomTitleLabel: 'Nome da Arena',
@@ -292,7 +292,7 @@ export const pt: AppTranslations = {
       'Atingir um obstáculo não te elimina da partida: apenas abrandas durante ~1,1 segundos. Mantém o foco até ao Trono Real para recuperar posições!',
     sec4Title: '4. As 3 Torneiras (Distribuição Oficial)',
     sec4Body:
-      'Do pote total da partida: 70% vai para os Vencedores (45% 1º Lugar e 25% 2º Lugar), 20% para a Casa/Operadora e 10% para os Royalties Oficiais do Criador.',
+      'Do pote total da partida: 70% vai para os Vencedores (50% 1º Lugar e 20% 2º Lugar), 20% para a Casa/Operadora e 10% para os Royalties Oficiais do Criador.',
     sec5Title: '5. Modo Demo vs Modo Real',
     sec5Body:
       'Usa o Modo Demo para treinar sem risco com saldo recarregável. No Modo Real, o saldo inicia em 0 Kz e reflete exclusivamente as tuas entradas e prémios oficiais.',
@@ -612,7 +612,7 @@ export const en: AppTranslations = {
     inviteSlot: 'Open Friend Slot',
     waitingFriendsHint: 'Share the code or QR to fill this slot with a real friend.',
     arenaPot: 'Arena Pot',
-    championPrize: '1st Place (45%)',
+    championPrize: '1st Place (50%)',
     startArenaBtn: 'START ARENA RACE',
     createNote: 'Create your own room with custom player cap and entry stake.',
     roomTitleLabel: 'Arena Name',
@@ -705,7 +705,7 @@ export const en: AppTranslations = {
       'Hitting an obstacle never knocks you out: you only stumble for ~1.1s. Keep racing to the Royal Throne to overtake rivals!',
     sec4Title: '4. The 3 Taps (Official Split)',
     sec4Body:
-      'From every match pot: 70% goes to Winners (45% 1st Place & 25% 2nd Place), 20% to House/Operator, and 10% to Official Creator Royalties.',
+      'From every match pot: 70% goes to Winners (50% 1st Place & 20% 2nd Place), 20% to House/Operator, and 10% to Official Creator Royalties.',
     sec5Title: '5. Demo vs Real Mode',
     sec5Body:
       'Use Demo Mode for risk-free practice with refillable balance. In Real Mode, balance starts at 0 Kz and reflects only real stakes and prizes.',

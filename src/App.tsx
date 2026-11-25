@@ -16,6 +16,7 @@ import {
   TelemetryInvestigationEntry,
   ServerRaceStatus,
   PlayerAction,
+  RoomChatMessage,
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
 import { ClientTelemetryValidator } from './utils/telemetryValidator';
@@ -406,6 +407,7 @@ export default function App() {
   const serverClockOffsetRef = useRef<number>(0);
   const bestRttRef = useRef<number>(Number.POSITIVE_INFINITY);
   const [roomRttMs, setRoomRttMs] = useState<number | null>(null);
+  const [roomChatMessages, setRoomChatMessages] = useState<RoomChatMessage[]>([]);
   const hasCalibratedClockRef = useRef<boolean>(false);
   const forceSynchronizedRunRef = useRef<(() => void) | null>(null);
   const startRequestLockUntilRef = useRef<number>(0);
@@ -1290,8 +1292,13 @@ export default function App() {
         setBalance((prev) => prev + payout);
       }
 
-      if (rank >= 1 && rank <= 3) {
+      if (rank === 1) {
+        sounds.playVictoryFanfare();
+      } else if (rank >= 2 && rank <= 3) {
         sounds.playTopThreeCelebration(rank);
+      }
+
+      if (rank >= 1 && rank <= 3) {
         setTop3Streak((prev) => {
           const newStreak = prev + 1;
           localStorage.setItem('rei_zero_top3_streak', newStreak.toString());
@@ -2296,6 +2303,7 @@ export default function App() {
       setSyncedRaceStartAt(null);
       setPendingSyncPodium(false);
       setAuthoritativeRankings(null);
+      setRoomChatMessages([]);
       statusRef.current = 'idle';
       setStatus('idle');
 
@@ -2371,6 +2379,20 @@ export default function App() {
     enterSoloLobbyState(mpStrings.leftRoomNotice);
   }, [enterSoloLobbyState, mpStrings.leftRoomNotice, roomConfig.code]);
 
+  const handleSendRoomChatMessage = useCallback((rawText: string) => {
+    const cleaned = rawText.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 240);
+    if (!cleaned) return;
+    const ws = roomWsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({
+        type: 'room:chat-send',
+        roomCode: roomConfigRef.current.code,
+        text: cleaned,
+      })
+    );
+  }, []);
+
   const handleDeleteRoom = async () => {
     if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
       handleLeaveRoom();
@@ -2409,6 +2431,7 @@ export default function App() {
     setIsLocalRoomHost(!viaInviteRef.current);
     removedLocalIdsRef.current.clear();
     publicRoundCompletedRef.current = false;
+    setRoomChatMessages([]);
     setRoomNotice(null);
     const updatedConfig: RoomConfig = {
       code: cleanCode,
@@ -3293,6 +3316,9 @@ export default function App() {
           rankings?: RoomStandingEntry[];
           code?: string;
           targetId?: string;
+          roomCode?: string;
+          chatMessages?: RoomChatMessage[];
+          message?: RoomChatMessage;
         };
 
         if (msg.type === 'room:pong' && typeof msg.serverTime === 'number') {
@@ -3315,7 +3341,27 @@ export default function App() {
           serverClockOffsetRef.current = msg.serverTime - Date.now();
         }
 
+        if (msg.type === 'room:chat-message' && msg.message) {
+          const targetCode = (msg.roomCode || msg.message.roomCode || '').toUpperCase();
+          const currentCode = (roomConfigRef.current.code || '').toUpperCase();
+          if (targetCode && currentCode && targetCode !== currentCode) {
+            return;
+          }
+          const incomingMsg = msg.message;
+          setRoomChatMessages((prev) =>
+            prev.some((m) => m.id === incomingMsg.id)
+              ? prev
+              : [...prev.slice(-59), incomingMsg]
+          );
+          return;
+        }
+
         if ((msg.type === 'room:joined' || msg.type === 'room:state') && msg.room) {
+          if (msg.type === 'room:joined') {
+            setRoomChatMessages(
+              Array.isArray(msg.chatMessages) ? msg.chatMessages.slice(-60) : []
+            );
+          }
           if (msg.type === 'room:joined' && msg.rotatedPublicMatch) {
             startedRoundSetRef.current.clear();
             finalizedRoundSetRef.current.clear();
@@ -4252,6 +4298,9 @@ export default function App() {
                 (serverRaceStatus === 'running' || serverRaceStatus === 'starting')
               }
               onEnterSpectatorMode={handleEnterSpectatorMode}
+              chatMessages={roomChatMessages}
+              onSendChatMessage={handleSendRoomChatMessage}
+              localPlayerId={getSessionPlayerId()}
             />
           </div>
         )}

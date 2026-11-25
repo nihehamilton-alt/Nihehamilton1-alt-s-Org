@@ -279,3 +279,15 @@ export interface WeatherState {
   windDirection: -1 | 1;
   gustPulse: number;
 }
+
+export interface RoomChatMessage {
+  id: string;
+  roomCode: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar: string;
+  senderColor: string;
+  isHost: boolean;
+  text: string;
+  sentAt: number;
+}

@@ -45,6 +45,13 @@ export interface MultiplayerStrings {
   noBetSpectatorNote: string;
   exitSpectatorBtn: string;
   spectatorResultsBadge: string;
+  roomChatTitle: string;
+  roomChatLiveBadge: string;
+  roomChatOfflineBadge: string;
+  roomChatEmpty: string;
+  roomChatOfflineHint: string;
+  roomChatPlaceholder: string;
+  roomChatSendBtn: string;
 }
 
 const PT_STRINGS: MultiplayerStrings = {
@@ -94,6 +101,13 @@ const PT_STRINGS: MultiplayerStrings = {
   noBetSpectatorNote: 'Sem aposta ativa',
   exitSpectatorBtn: 'Sair do Fantasma',
   spectatorResultsBadge: 'Modo Fantasma · Corrida observada sem aposta',
+  roomChatTitle: 'Chat da Sala',
+  roomChatLiveBadge: 'Ao Vivo',
+  roomChatOfflineBadge: 'Local',
+  roomChatEmpty: 'Nenhuma mensagem ainda. Cumprimenta os corredores!',
+  roomChatOfflineHint: 'Liga-te a uma sala online para conversar em tempo real.',
+  roomChatPlaceholder: 'Escreve uma mensagem para a sala...',
+  roomChatSendBtn: 'Enviar',
 };
 
 const EN_STRINGS: MultiplayerStrings = {
@@ -143,6 +157,13 @@ const EN_STRINGS: MultiplayerStrings = {
   noBetSpectatorNote: 'No bet active',
   exitSpectatorBtn: 'Exit Ghost',
   spectatorResultsBadge: 'Ghost Mode · Observed race with no bet',
+  roomChatTitle: 'Room Chat',
+  roomChatLiveBadge: 'Live',
+  roomChatOfflineBadge: 'Local',
+  roomChatEmpty: 'No messages yet. Say hello to the runners!',
+  roomChatOfflineHint: 'Connect to an online room to chat in real time.',
+  roomChatPlaceholder: 'Type a message to the room...',
+  roomChatSendBtn: 'Send',
 };
 
 const ES_STRINGS: MultiplayerStrings = {
@@ -192,6 +213,13 @@ const ES_STRINGS: MultiplayerStrings = {
   noBetSpectatorNote: 'Sin apuesta activa',
   exitSpectatorBtn: 'Salir de Fantasma',
   spectatorResultsBadge: 'Modo Fantasma · Carrera observada sin apuesta',
+  roomChatTitle: 'Chat de la Sala',
+  roomChatLiveBadge: 'En Vivo',
+  roomChatOfflineBadge: 'Local',
+  roomChatEmpty: 'Aún no hay mensajes. ¡Saluda a los corredores!',
+  roomChatOfflineHint: 'Conéctate a una sala en línea para chatear en tiempo real.',
+  roomChatPlaceholder: 'Escribe un mensaje para la sala...',
+  roomChatSendBtn: 'Enviar',
 };
 
 const FR_STRINGS: MultiplayerStrings = {
@@ -241,6 +269,13 @@ const FR_STRINGS: MultiplayerStrings = {
   noBetSpectatorNote: 'Aucune mise active',
   exitSpectatorBtn: 'Quitter Fantôme',
   spectatorResultsBadge: 'Mode Fantôme · Course observée sans mise',
+  roomChatTitle: 'Chat de la Salle',
+  roomChatLiveBadge: 'En Direct',
+  roomChatOfflineBadge: 'Local',
+  roomChatEmpty: 'Aucun message pour l’instant. Saluez les coureurs !',
+  roomChatOfflineHint: 'Rejoignez une salle en ligne pour discuter en temps réel.',
+  roomChatPlaceholder: 'Écrire un message à la salle...',
+  roomChatSendBtn: 'Envoyer',
 };
 
 export function getMultiplayerStrings(lang: SupportedLanguage): MultiplayerStrings {

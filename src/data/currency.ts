@@ -140,7 +140,7 @@ export function getDefaultRatesMap(): ExchangeRatesMap {
 
 /**
  * Distribuição Oficial "As 3 Torneiras do Rei":
- * 70% Vencedores (45% 1º Lugar, 25% 2º Lugar, 0% 3º Lugar), 20% Casa, 10% Criador.
+ * 70% Vencedores (50% 1º Lugar, 20% 2º Lugar, 0% 3º Lugar), 20% Casa, 10% Criador.
  */
 export function calculateThreeTorneiras(betKz: number, playerCount: number): ThreeTorneirasSplit {
   const safeBet = Math.max(0, Math.floor(Number.isFinite(betKz) ? betKz : 0));
@@ -151,7 +151,7 @@ export function calculateThreeTorneiras(betKz: number, playerCount: number): Thr
   const houseFeeKz = Math.floor(totalPotKz * 0.2);
   const creatorRoyaltyKz = Math.max(0, totalPotKz - winnersPotKz - houseFeeKz);
 
-  const firstPrizeKz = Math.floor(totalPotKz * 0.45);
+  const firstPrizeKz = Math.floor(totalPotKz * 0.5);
   const secondPrizeKz = Math.max(0, winnersPotKz - firstPrizeKz);
   const thirdPrizeKz = 0;
 

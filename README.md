@@ -79,19 +79,18 @@
 ## 6. MONETIZAÇÃO (AS 3 TORNEIRAS DO REI) & FINANCEIRO GLOBAL
 - **Banca e Distribuição:**
   - Ex: 5 jogadores × 500 KZ = 2.500 KZ de banca total.
-  - **70% para os Vencedores** (1º e 2º lugares dividem a fatia)
+  - **70% para os Vencedores** (**50%** do pote total para o **1º Lugar** e **20%** para o **2º Lugar**, mesmo no Modo Real)
   - **20% para a CASA**
   - **10% de Royalties para o CRIADOR REI ZERO**
 - **Loja e Passe do Rei:**
   - Venda de Skins (5% para o Criador)
   - Passe do Rei (5.000 KZ/mês com 5% de royalties para o Criador).
-- **Financeiro Global:** Sistema de conversão automática de moedas (Kz, R$, EUR, USD).
+- **Financeiro Global:** Sistema de conversão automática de moedas (Kz, R$, EUR, USD, etc.).
 
 ---
 
 ## 7. PAINEL DO CRIADOR — DASHBOARD DO REI ZERO
-- **Acesso Restrito:** Rota `/admin-rei-zero`
-- **Login:** `admin` | **Senha:** `rei2026` (Exclusivo para Hamilton David Nihefe Muenda).
+- **Acesso Restrito:** Rota `/admin-rei-zero` protegida por autenticação criptográfica exclusiva para Hamilton David Nihefe Muenda (credenciais ocultas por segurança).
 - **Métricas em Tempo Real:** Partidas jogadas (Hoje/Ontem/Mês), GGR Total em USD, Royalties acumulados (10% GGR + 5% Skins + 5% Passe), relatórios de vendas, estatísticas de mapas/modos (2D vs 3D | Dia vs Noite), top jogadores e exportação em CSV/PDF.
 - **Rodapé Legal Obrigatório:**
   `"PROPRIEDADE INTELECTUAL DE HAMILTON DAVID NIHEFE MUENDA - O ZERO | ROYALTIES: 10% GGR | ESCALONAMENTO: 15% ACIMA DE 10.000 PARTIDAS/DIA | 20% ACIMA DE 50.000 PARTIDAS/DIA | REVISÃO 12 MESES"`

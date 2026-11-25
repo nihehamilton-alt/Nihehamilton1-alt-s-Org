@@ -19,14 +19,14 @@ export function calculatePrizePool(playerCount: number, betKz: number, isDemo: b
   const splits = [
     {
       rank: 1,
-      percent: 45,
-      amount: isDemo ? Math.floor(threeTorneiras.totalPotKz * 0.60) : threeTorneiras.firstPrizeKz,
+      percent: 50,
+      amount: isDemo ? Math.floor(threeTorneiras.totalPotKz * 0.5) : threeTorneiras.firstPrizeKz,
       title: '🥇 1º Lugar (Grande Campeão do Trono)',
     },
     {
       rank: 2,
-      percent: 25,
-      amount: isDemo ? Math.floor(threeTorneiras.totalPotKz * 0.40) : threeTorneiras.secondPrizeKz,
+      percent: 20,
+      amount: isDemo ? Math.floor(threeTorneiras.totalPotKz * 0.2) : threeTorneiras.secondPrizeKz,
       title: '🥈 2º Lugar (Vice-Campeão da Marginal)',
     },
     {

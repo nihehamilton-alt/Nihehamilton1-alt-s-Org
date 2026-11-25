@@ -224,7 +224,11 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
       podiumAudioPlayedRef.current = true;
       try {
         if (!isSpectator && userRank === 1) {
-          sounds.playFirstPlaceVictoryCelebration();
+          if (sounds.wasVictoryFanfareTriggeredRecently()) {
+            sounds.playCheeringCrowd(4.4, 0.06);
+          } else {
+            sounds.playFirstPlaceVictoryCelebration();
+          }
         } else {
           sounds.playCelebratorySound(false);
         }
@@ -907,7 +911,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-slate-300">
                         {t.podium.secondPlace}
                       </span>
-                      <span className="text-[8px] font-mono text-slate-400">25%</span>
+                      <span className="text-[8px] font-mono text-slate-400">20%</span>
                     </motion.div>
                   </div>
                 )}
@@ -1047,7 +1051,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       <span className="text-[10px] font-mono uppercase tracking-wider font-black text-amber-950">
                         {t.podium.championBadge}
                       </span>
-                      <span className="text-[8px] font-mono text-amber-950/80 font-bold">45%</span>
+                      <span className="text-[8px] font-mono text-amber-950/80 font-bold">50%</span>
                     </motion.div>
                   </div>
                 )}

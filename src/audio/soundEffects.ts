@@ -16,6 +16,7 @@ class SoundEngine {
   private stadiumReverbSend: GainNode | null = null;
   private activeCelebrationNodes: AudioNode[] = [];
   private activeCelebrationSources: Array<{ stop: (when?: number) => void }> = [];
+  private lastVictoryFanfareAt: number = 0;
 
   private initContext() {
     if (!this.ctx && typeof window !== 'undefined') {
@@ -845,6 +846,11 @@ class SoundEngine {
     this.initContext();
     if (!this.ctx) return;
 
+    if (startOffsetSec === 0) {
+      this.stopCelebrationAudio();
+    }
+    this.lastVictoryFanfareAt = Date.now();
+
     const ctx = this.ctx;
     const outputs = this.getCelebrationOutputs();
     if (!outputs) return;
@@ -1046,6 +1052,10 @@ class SoundEngine {
       this.trackCelebrationSource(osc);
       this.trackCelebrationNode(gain);
     });
+  }
+
+  public wasVictoryFanfareTriggeredRecently(windowMs: number = 1500): boolean {
+    return this.lastVictoryFanfareAt > 0 && Date.now() - this.lastVictoryFanfareAt <= windowMs;
   }
 
   // Sequência completa exclusiva do 1.º Lugar ao abrir o Pódio:

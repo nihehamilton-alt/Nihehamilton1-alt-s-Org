@@ -21,10 +21,11 @@ import {
   Mic,
   MicOff,
   Volume2,
+  Send,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
-import { Competitor, RoomAccessMode, RoomConfig, ServerRaceStatus } from '../types/game';
+import { Competitor, RoomAccessMode, RoomChatMessage, RoomConfig, ServerRaceStatus } from '../types/game';
 import {
   MIN_BET_KZ,
   MAX_BET_KZ,
@@ -83,6 +84,9 @@ interface LobbyRoomProps {
   serverRaceStatus?: ServerRaceStatus;
   canSpectate?: boolean;
   onEnterSpectatorMode?: () => void;
+  chatMessages?: RoomChatMessage[];
+  onSendChatMessage?: (text: string) => void;
+  localPlayerId?: string;
 }
 
 function formatEditableRoomBet(kz: number, decimals: number, rate: number): string {
@@ -124,6 +128,9 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   serverRaceStatus = 'idle',
   canSpectate = false,
   onEnterSpectatorMode,
+  chatMessages = [],
+  onSendChatMessage,
+  localPlayerId = '',
 }) => {
   const { lang, currency, currencyMeta, t, rates, formatMoney } = useI18n();
   const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
@@ -159,6 +166,8 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   const rateForCurrency = rates[currency] || currencyMeta.defaultKzPerUnit || 1;
   const [arenaBetInput, setArenaBetInput] = useState<string>('');
   const [arenaBetError, setArenaBetError] = useState<string | null>(null);
+  const [chatInput, setChatInput] = useState<string>('');
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   const [newTitle, setNewTitle] = useState<string>(roomConfig.title || 'Arena do Hamilton');
   const [newHost, setNewHost] = useState<string>(roomConfig.hostName || 'Hamilton O Zero');
@@ -189,6 +198,29 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
       setNewBetInput(formatEditableRoomBet(newBet, currencyMeta.decimals, rateForCurrency));
     }
   }, [newBet, currency, currencyMeta.decimals, rateForCurrency, isEditingNewBet, newBetInput]);
+
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [chatMessages.length, activeTab]);
+
+  const handleChatSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!serverConnected || !onSendChatMessage) return;
+    const cleaned = chatInput.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 240);
+    if (!cleaned) return;
+    onSendChatMessage(cleaned);
+    setChatInput('');
+  };
+
+  const formatChatTime = (ts: number) => {
+    try {
+      return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return '';
+    }
+  };
 
   const minLocalBet = useMemo(
     () => convertKzToCurrency(MIN_BET_KZ, currency, rates),
@@ -1205,6 +1237,124 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                 {t.lobby.waitingFriendsHint}
               </div>
             )}
+          </div>
+
+          {/* Chat de Texto em Tempo Real (WebSocket /ws/room) */}
+          <div className="p-3 game-subplate rounded-2xl border border-amber-500/25 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                <MessageCircle size={14} />
+                <span>{mpStrings.roomChatTitle}</span>
+                {chatMessages.length > 0 && (
+                  <span className="text-[10px] font-mono text-zinc-400">
+                    ({chatMessages.length})
+                  </span>
+                )}
+              </span>
+              <span
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold border ${
+                  serverConnected
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    serverConnected ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'
+                  }`}
+                />
+                <span>
+                  {serverConnected ? mpStrings.roomChatLiveBadge : mpStrings.roomChatOfflineBadge}
+                </span>
+              </span>
+            </div>
+
+            <div
+              ref={chatScrollRef}
+              className="game-panel rounded-xl border border-zinc-800/90 px-2.5 py-2 h-36 overflow-y-auto flex flex-col gap-1.5"
+              aria-live="polite"
+            >
+              {chatMessages.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-center px-3">
+                  <span className="text-[11px] font-mono text-zinc-500">
+                    {serverConnected ? mpStrings.roomChatEmpty : mpStrings.roomChatOfflineHint}
+                  </span>
+                </div>
+              ) : (
+                chatMessages.map((msg) => {
+                  const isOwn = Boolean(localPlayerId && msg.senderId === localPlayerId);
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`flex items-start gap-2 rounded-lg px-2 py-1.5 text-xs ${
+                        isOwn
+                          ? 'bg-amber-500/12 border border-amber-500/25'
+                          : 'bg-zinc-900/75 border border-zinc-800/70'
+                      }`}
+                    >
+                      <span
+                        className="w-6 h-6 rounded-full flex items-center justify-center text-sm shrink-0 border border-white/10"
+                        style={{ backgroundColor: `${msg.senderColor || '#38bdf8'}26` }}
+                        aria-hidden="true"
+                      >
+                        {msg.senderAvatar || '⚡'}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1 min-w-0">
+                            <span
+                              className="font-bold text-[11px] truncate"
+                              style={{ color: isOwn ? '#fcd34d' : msg.senderColor || '#e4e4e7' }}
+                            >
+                              {msg.senderName}
+                            </span>
+                            {msg.isHost && (
+                              <span className="text-[9px] font-mono font-bold px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+                                👑
+                              </span>
+                            )}
+                            {isOwn && (
+                              <span className="text-[9px] font-mono text-amber-300/80 shrink-0">
+                                {t.youTag}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[9px] font-mono text-zinc-500 tabular-nums shrink-0">
+                            {formatChatTime(msg.sentAt)}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-zinc-200 break-words leading-snug mt-0.5">
+                          {msg.text}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <form onSubmit={handleChatSubmit} className="flex items-center gap-1.5">
+              <input
+                type="text"
+                maxLength={240}
+                value={chatInput}
+                disabled={!serverConnected || !onSendChatMessage}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder={
+                  serverConnected ? mpStrings.roomChatPlaceholder : mpStrings.roomChatOfflineHint
+                }
+                aria-label={mpStrings.roomChatTitle}
+                className="flex-1 min-w-0 game-panel rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-500 border border-zinc-700 focus:border-amber-400 focus:outline-none disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={!serverConnected || !onSendChatMessage || chatInput.trim().length === 0}
+                className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+              >
+                <Send size={13} />
+                <span className="hidden sm:inline">{mpStrings.roomChatSendBtn}</span>
+              </button>
+            </form>
           </div>
 
           {onUpdateBet && (

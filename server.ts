@@ -241,6 +241,28 @@ async function startServer() {
 
   const roomSockets = new Map<string, Set<WebSocket>>();
   const socketToRoomClient = new Map<WebSocket, { roomCode: string; playerId: string }>();
+  interface ServerRoomChatMessage {
+    id: string;
+    roomCode: string;
+    senderId: string;
+    senderName: string;
+    senderAvatar: string;
+    senderColor: string;
+    isHost: boolean;
+    text: string;
+    sentAt: number;
+  }
+  const MAX_ROOM_CHAT_MESSAGES = 50;
+  const CHAT_COOLDOWN_MS = 300;
+  const roomChatHistory = new Map<string, ServerRoomChatMessage[]>();
+  const socketLastChatAt = new WeakMap<WebSocket, number>();
+  let roomChatSeq = 0;
+  const getRoomChatHistory = (roomCode: string): ServerRoomChatMessage[] =>
+    roomChatHistory.get(roomCode) || [];
+  const sanitizeChatText = (raw: unknown): string => {
+    if (typeof raw !== 'string') return '';
+    return raw.replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 240);
+  };
   const lastPublicOpponents = new Map<string, Set<string>>();
   const recentPublicOpponents = new Map<string, string[]>();
   const roomFinishControl = new Map<
@@ -592,7 +614,7 @@ async function startServer() {
     const winnersPotKz = Math.floor(totalPotKz * 0.7);
     const houseFeeKz = Math.floor(totalPotKz * 0.2);
     const creatorRoyaltyKz = Math.max(0, totalPotKz - winnersPotKz - houseFeeKz);
-    const firstPrizeKz = Math.floor(totalPotKz * 0.45);
+    const firstPrizeKz = Math.floor(totalPotKz * 0.5);
     const secondPrizeKz = Math.max(0, winnersPotKz - firstPrizeKz);
     return {
       totalPotKz,
@@ -1247,6 +1269,7 @@ async function startServer() {
       delete db.rooms[code];
       saveDb(db);
     }
+    roomChatHistory.delete(code);
 
     broadcastToRoom(code, {
       type: 'room:deleted',
@@ -1946,6 +1969,7 @@ async function startServer() {
           jumpY?: number;
           stumbling?: boolean;
           finished?: boolean;
+          text?: string;
           bots?: Array<{
             id: string;
             name: string;
@@ -2002,6 +2026,7 @@ async function startServer() {
                 oldRoom.pendingStart = false;
                 oldRoom.raceStartAt = null;
                 oldRoom.syncedRaceStartAt = null;
+                roomChatHistory.delete(oldRoom.code);
               }
               resolveRoomHostAndLanes(oldRoom);
               oldRoom.updatedAt = now;
@@ -2068,6 +2093,7 @@ async function startServer() {
           sendRoomWs(ws, {
             type: 'room:joined',
             room: nextRoom,
+            chatMessages: getRoomChatHistory(nextCode),
             serverTime: now,
             rotatedPublicMatch: true,
             startAfterJoin: Boolean(msg.autoStart),
@@ -2207,7 +2233,12 @@ async function startServer() {
           room.updatedAt = now;
           saveDb(db);
 
-          sendRoomWs(ws, { type: 'room:joined', room, serverTime: now });
+          sendRoomWs(ws, {
+            type: 'room:joined',
+            room,
+            chatMessages: getRoomChatHistory(code),
+            serverTime: now,
+          });
           if (room.pendingStart && getUnreadyParticipants(room).length === 0) {
             triggerSynchronizedRaceStart(room);
           } else {
@@ -2502,6 +2533,44 @@ async function startServer() {
             // Não abortar uma contagem regressiva ('starting') ou corrida em curso ('running')
             sendRoomWs(ws, { type: 'room:state', room, serverTime: Date.now() });
           }
+          return;
+        }
+
+        if (msg.type === 'room:chat-send' && participant) {
+          const nowChat = Date.now();
+          const lastChat = socketLastChatAt.get(ws) || 0;
+          if (nowChat - lastChat < CHAT_COOLDOWN_MS) {
+            return;
+          }
+          const cleanedText = sanitizeChatText(msg.text);
+          if (!cleanedText) {
+            return;
+          }
+          socketLastChatAt.set(ws, nowChat);
+          roomChatSeq = (roomChatSeq + 1) % 1000000;
+          const chatMessage: ServerRoomChatMessage = {
+            id: `chat-${nowChat}-${roomChatSeq}-${participant.id.slice(0, 8)}`,
+            roomCode: room.code,
+            senderId: participant.id,
+            senderName: participant.name,
+            senderAvatar: participant.avatar || '⚡',
+            senderColor: participant.color || '#38bdf8',
+            isHost: Boolean(participant.isHost),
+            text: cleanedText,
+            sentAt: nowChat,
+          };
+          const history = roomChatHistory.get(room.code) || [];
+          history.push(chatMessage);
+          if (history.length > MAX_ROOM_CHAT_MESSAGES) {
+            history.splice(0, history.length - MAX_ROOM_CHAT_MESSAGES);
+          }
+          roomChatHistory.set(room.code, history);
+
+          broadcastToRoom(room.code, {
+            type: 'room:chat-message',
+            roomCode: room.code,
+            message: chatMessage,
+          });
           return;
         }
       } catch {
