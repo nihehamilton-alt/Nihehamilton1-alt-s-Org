@@ -1,7 +1,9 @@
 import React from 'react';
+import { Volume1, Volume2, VolumeX } from 'lucide-react';
 import { GameStatus, ViewMode, TimeMode } from '../types/game';
 import { useI18n } from '../contexts/I18nContext';
 import { TOTAL_GAME_TIME_SECONDS, HARD_MODE_START_SECONDS } from '../game/constants';
+import { sounds } from '../audio/soundEffects';
 
 interface GameHeaderProps {
   status: GameStatus;
@@ -466,12 +468,13 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
           >
             <button
               type="button"
+              data-testid="sfx-toggle-button"
+              data-sfx-state={isSfxActive ? 'active' : 'muted'}
               onClick={() => {
-                if (!soundEnabled) {
-                  onToggleSound();
+                if (!isSfxActive) {
+                  sounds.unlockAudio();
+                  if (!soundEnabled) onToggleSound();
                   if (volume <= 0) onVolumeChange(0.7);
-                } else if (volume <= 0) {
-                  onVolumeChange(0.7);
                 } else {
                   onToggleSound();
                 }
@@ -479,20 +482,28 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
               aria-pressed={isSfxActive}
               aria-label={sfxToggleTooltip}
               title={sfxToggleTooltip}
-              className={`px-2 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+              className={`px-2.5 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-all active:scale-95 ${
                 isSfxActive
-                  ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-400/50'
-                  : 'bg-rose-950/75 hover:bg-rose-900/80 text-rose-300 border border-rose-500/45'
+                  ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-400/55 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
+                  : 'bg-rose-950/80 hover:bg-rose-900/85 text-rose-200 border border-rose-500/55 shadow-[0_0_10px_rgba(244,63,94,0.16)]'
               }`}
             >
               <span
                 className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                   isSfxActive
-                    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]'
+                    ? 'bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.85)]'
                     : 'bg-rose-400'
                 }`}
               />
-              <span>{isSfxActive ? (volume > 0.5 ? '🔊' : '🔉') : '🔇'}</span>
+              {isSfxActive ? (
+                volume > 0.5 ? (
+                  <Volume2 className="w-3.5 h-3.5 text-emerald-300 shrink-0" strokeWidth={2.3} />
+                ) : (
+                  <Volume1 className="w-3.5 h-3.5 text-emerald-300 shrink-0" strokeWidth={2.3} />
+                )
+              ) : (
+                <VolumeX className="w-3.5 h-3.5 text-rose-300 shrink-0" strokeWidth={2.3} />
+              )}
               <span className="font-mono uppercase tracking-tight text-[10px]">
                 {isSfxActive ? sfxOnLabel : sfxMutedLabel}
               </span>

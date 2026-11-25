@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { AnimatePresence, motion, useReducedMotion, Variants } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Share2, Check, LogOut } from 'lucide-react';
+import { Share2, Check, LogOut, Crown } from 'lucide-react';
 import {
   Competitor,
   ThreeTorneirasSplit,
@@ -38,6 +38,160 @@ interface ResultsPodiumProps {
   returnTarget?: 'room' | 'lobby';
   isSpectator?: boolean;
 }
+
+// ============================================================================
+// COROA DOURADA ICÓNICA SOBRE O AVATAR DO 1º LUGAR
+// ============================================================================
+const GoldenCrownIconOverlay: React.FC<{
+  size?: 'lg' | 'sm';
+  shouldReduceMotion: boolean;
+}> = ({ size = 'lg', shouldReduceMotion }) => {
+  if (size === 'sm') {
+    return (
+      <motion.div
+        initial={shouldReduceMotion ? false : { y: -8, scale: 0.4, opacity: 0 }}
+        animate={
+          shouldReduceMotion
+            ? { y: 0, scale: 1, opacity: 1 }
+            : { y: [0, -1.5, 0], scale: 1, opacity: 1 }
+        }
+        transition={
+          shouldReduceMotion
+            ? { duration: 0.1 }
+            : {
+                y: { repeat: Infinity, duration: 1.8, type: 'tween', ease: 'easeInOut', delay: 0.7 },
+                scale: { type: 'spring', stiffness: 440, damping: 14, delay: 0.32 },
+                opacity: { duration: 0.2, delay: 0.3 },
+              }
+        }
+        aria-hidden="true"
+        data-testid="first-place-crown-badge"
+        className="pointer-events-none absolute -top-2.5 left-1/2 -translate-x-1/2 z-20 flex items-center justify-center"
+      >
+        <span className="absolute inset-0 rounded-full bg-amber-400/50 blur-[3px]" />
+        <Crown
+          className="relative w-3.5 h-3.5 text-amber-300 fill-yellow-400 drop-shadow-[0_1px_4px_rgba(250,204,21,0.95)]"
+          strokeWidth={2.2}
+        />
+      </motion.div>
+    );
+  }
+
+  return (
+    <motion.div
+      initial={shouldReduceMotion ? false : { y: -22, scale: 0.3, rotate: -14, opacity: 0 }}
+      animate={
+        shouldReduceMotion
+          ? { y: 0, scale: 1, rotate: 0, opacity: 1 }
+          : { y: [0, -4, 0], scale: 1, rotate: [0, -2, 2, 0], opacity: 1 }
+      }
+      transition={
+        shouldReduceMotion
+          ? { duration: 0.1 }
+          : {
+              y: { repeat: Infinity, duration: 1.9, type: 'tween', ease: 'easeInOut', delay: 0.9 },
+              rotate: { repeat: Infinity, duration: 3.4, type: 'tween', ease: 'easeInOut', delay: 0.9 },
+              scale: { type: 'spring', stiffness: 380, damping: 13, delay: 0.66 },
+              opacity: { duration: 0.25, delay: 0.62 },
+            }
+      }
+      aria-hidden="true"
+      data-testid="first-place-golden-crown"
+      className="pointer-events-none absolute -top-7 left-1/2 -translate-x-1/2 z-20 flex items-center justify-center"
+    >
+      {/* Aura dourada radiante */}
+      <motion.span
+        animate={
+          shouldReduceMotion
+            ? undefined
+            : { scale: [0.92, 1.22, 0.92], opacity: [0.45, 0.85, 0.45] }
+        }
+        transition={{ repeat: Infinity, duration: 2.1, type: 'tween', ease: 'easeInOut' }}
+        className="absolute w-10 h-7 rounded-full bg-amber-400/50 blur-md"
+      />
+
+      {/* Brilhos laterais */}
+      {!shouldReduceMotion && (
+        <>
+          <motion.span
+            animate={{ scale: [0.6, 1.25, 0.6], opacity: [0.35, 1, 0.35] }}
+            transition={{ repeat: Infinity, duration: 1.4, ease: 'easeInOut' }}
+            className="absolute -left-2.5 top-1 w-1.5 h-1.5 rounded-full bg-yellow-200 shadow-[0_0_6px_#fef08a]"
+          />
+          <motion.span
+            animate={{ scale: [1.1, 0.5, 1.1], opacity: [0.9, 0.3, 0.9] }}
+            transition={{ repeat: Infinity, duration: 1.6, ease: 'easeInOut', delay: 0.35 }}
+            className="absolute -right-2.5 top-0.5 w-1.5 h-1.5 rounded-full bg-amber-100 shadow-[0_0_6px_#fde68a]"
+          />
+        </>
+      )}
+
+      {/* Coroa Dourada Metálica SVG com joias */}
+      <svg
+        width="38"
+        height="28"
+        viewBox="0 0 40 30"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        className="relative drop-shadow-[0_3px_10px_rgba(245,158,11,0.95)]"
+      >
+        <defs>
+          <linearGradient id="goldenCrownGrad" x1="20" y1="3" x2="20" y2="27" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="#FEF9C3" />
+            <stop offset="35%" stopColor="#FACC15" />
+            <stop offset="75%" stopColor="#F59E0B" />
+            <stop offset="100%" stopColor="#B45309" />
+          </linearGradient>
+          <linearGradient id="goldenCrownRim" x1="6" y1="22" x2="34" y2="26" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="#B45309" />
+            <stop offset="50%" stopColor="#FEF08A" />
+            <stop offset="100%" stopColor="#B45309" />
+          </linearGradient>
+        </defs>
+
+        {/* Corpo da coroa */}
+        <path
+          d="M6.5 22.5L4 9.5L12.5 15.5L20 5.5L27.5 15.5L36 9.5L33.5 22.5H6.5Z"
+          fill="url(#goldenCrownGrad)"
+          stroke="#78350F"
+          strokeWidth="1.4"
+          strokeLinejoin="round"
+        />
+
+        {/* Faixa de base */}
+        <rect
+          x="6.2"
+          y="21.5"
+          width="27.6"
+          height="4.4"
+          rx="2.1"
+          fill="url(#goldenCrownRim)"
+          stroke="#78350F"
+          strokeWidth="1.3"
+        />
+
+        {/* Esferas douradas nas pontas */}
+        <circle cx="4" cy="8.5" r="2.1" fill="#FEF08A" stroke="#92400E" strokeWidth="1" />
+        <circle cx="20" cy="4.2" r="2.6" fill="#FEF9C3" stroke="#92400E" strokeWidth="1.1" />
+        <circle cx="36" cy="8.5" r="2.1" fill="#FEF08A" stroke="#92400E" strokeWidth="1" />
+
+        {/* Joias incrustadas */}
+        <polygon points="20,12.5 22.4,16 20,19.5 17.6,16" fill="#EF4444" stroke="#7F1D1D" strokeWidth="0.8" />
+        <circle cx="12.2" cy="17.8" r="1.45" fill="#10B981" stroke="#064E3B" strokeWidth="0.7" />
+        <circle cx="27.8" cy="17.8" r="1.45" fill="#38BDF8" stroke="#0C4A6E" strokeWidth="0.7" />
+
+        {/* Reflexo especular */}
+        <path
+          d="M11 23.2H29"
+          stroke="#FEF9C3"
+          strokeWidth="1"
+          strokeLinecap="round"
+          strokeOpacity="0.85"
+        />
+      </svg>
+    </motion.div>
+  );
+};
 
 // ============================================================================
 // SISTEMA DE CONFETES E PARTÍCULAS TRIUNFAIS COM FRAMER MOTION
@@ -161,8 +315,16 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
   const { lang, t, formatMoney } = useI18n();
   const mpStrings = useMemo(() => getMultiplayerStrings(lang), [lang]);
   const shouldReduceMotion = useReducedMotion();
+  const isFirstPlaceWinner = !isSpectator && userRank === 1;
   const [activeTab, setActiveTab] = useState<'ceremony' | 'podium' | 'both'>('ceremony');
   const isCeremonyCalmMode = activeTab === 'ceremony';
+  const victoryRibbonLabel = useMemo(() => {
+    const code = (lang || 'pt').slice(0, 2);
+    if (code === 'en') return '1ST PLACE VICTORY · ROYAL CHAMPION';
+    if (code === 'es') return 'VICTORIA 1º LUGAR · CAMPEÓN REAL';
+    if (code === 'fr') return 'VICTOIRE 1RE PLACE · CHAMPION ROYAL';
+    return 'VITÓRIA 1º LUGAR · CAMPEÃO DO TRONO';
+  }, [lang]);
   const [shareState, setShareState] = useState<'idle' | 'shared' | 'copied'>('idle');
   const [ceremonyFinished, setCeremonyFinished] = useState<boolean>(false);
   const [autoReturnSeconds, setAutoReturnSeconds] = useState<number | null>(null);
@@ -223,7 +385,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
     if (!podiumAudioPlayedRef.current) {
       podiumAudioPlayedRef.current = true;
       try {
-        if (!isSpectator && userRank === 1) {
+        if (isFirstPlaceWinner) {
           if (sounds.wasVictoryFanfareTriggeredRecently()) {
             sounds.playCheeringCrowd(4.4, 0.06);
           } else {
@@ -237,17 +399,22 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
       }
     }
 
-    // Mantém o ecrã 100% calmo e estático durante a cerimónia de coroação (sem rajadas a piscar por cima do palco 3D)
-    if (isCeremonyCalmMode || isSpectator) {
+    // Efeito exclusivo de Confetes e Salvas de Vitória quando o jogador vence em 1º lugar
+    if (!isFirstPlaceWinner || shouldReduceMotion) {
       return;
     }
 
+    const championColors = ['#facc15', '#f59e0b', '#dc2626', '#16a34a', '#ffffff'];
+
     try {
       confetti({
-        particleCount: 65,
-        spread: 75,
-        origin: { y: 0.55 },
-        colors: ['#16a34a', '#dc2626', '#090a0f', '#facc15'],
+        particleCount: 85,
+        spread: 88,
+        startVelocity: 42,
+        origin: { y: 0.52 },
+        colors: championColors,
+        zIndex: 70,
+        disableForReducedMotion: true,
       });
     } catch {
       // ignore confetti canvas error
@@ -256,44 +423,51 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
     const secondBurst = setTimeout(() => {
       try {
         confetti({
-          particleCount: 40,
+          particleCount: 55,
           angle: 60,
-          spread: 55,
-          origin: { x: 0 },
-          colors: ['#facc15', '#dc2626'],
+          spread: 62,
+          startVelocity: 48,
+          origin: { x: 0.02, y: 0.78 },
+          colors: ['#facc15', '#dc2626', '#ffffff'],
+          zIndex: 70,
+          disableForReducedMotion: true,
         });
         confetti({
-          particleCount: 40,
+          particleCount: 55,
           angle: 120,
-          spread: 55,
-          origin: { x: 1 },
-          colors: ['#16a34a', '#facc15'],
+          spread: 62,
+          startVelocity: 48,
+          origin: { x: 0.98, y: 0.78 },
+          colors: ['#16a34a', '#facc15', '#ffffff'],
+          zIndex: 70,
+          disableForReducedMotion: true,
         });
       } catch {
         // ignore
       }
-    }, 450);
+    }, 360);
 
     const thirdBurst = setTimeout(() => {
       try {
-        if (userRank <= 2) {
-          confetti({
-            particleCount: 55,
-            spread: 85,
-            origin: { y: 0.35, x: 0.5 },
-            colors: ['#facc15', '#38bdf8', '#10b981', '#f59e0b'],
-          });
-        }
+        confetti({
+          particleCount: 70,
+          spread: 100,
+          startVelocity: 36,
+          origin: { y: 0.28, x: 0.5 },
+          colors: ['#facc15', '#fbbf24', '#38bdf8', '#10b981', '#f59e0b'],
+          zIndex: 70,
+          disableForReducedMotion: true,
+        });
       } catch {
         // ignore
       }
-    }, 1200);
+    }, 950);
 
     return () => {
       clearTimeout(secondBurst);
       clearTimeout(thirdBurst);
     };
-  }, [showPodium, userRank, isCeremonyCalmMode, isSpectator]);
+  }, [showPodium, isFirstPlaceWinner, shouldReduceMotion, explosionKey]);
 
   useEffect(() => {
     return () => {
@@ -503,25 +677,22 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         isCeremonyCalmMode ? 'podium-ceremony-still' : rankBackdropClass
       }`}
     >
-      {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
+      {showPodium && isFirstPlaceWinner && (
         <>
-          <div aria-hidden="true" className="podium-rank1-shimmer" />
-          <div aria-hidden="true" className="podium-rank1-flare" />
-          <div aria-hidden="true" className="podium-rank1-glint" />
-          {showPodium && <FirstPlaceFireworksCanvas burstKey={explosionKey} />}
-          {showPodium && <ConfettiCannonCanvas burstKey={explosionKey} />}
+          <ConfettiCannonCanvas burstKey={explosionKey} />
+          {!shouldReduceMotion && <FramerConfettiOverlay />}
+          <FirstPlaceParticleExplosion burstKey={explosionKey} />
+          {!isCeremonyCalmMode && (
+            <>
+              <div aria-hidden="true" className="podium-rank1-shimmer" />
+              <div aria-hidden="true" className="podium-rank1-flare" />
+              <div aria-hidden="true" className="podium-rank1-glint" />
+              <FirstPlaceFireworksCanvas burstKey={explosionKey} />
+              <CelebrationExplosion key={explosionKey} playAudio={false} />
+            </>
+          )}
         </>
       )}
-
-      {!isCeremonyCalmMode && !isSpectator && (
-        <CelebrationExplosion key={explosionKey} playAudio={false} />
-      )}
-
-      {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
-        <FirstPlaceParticleExplosion burstKey={explosionKey} />
-      )}
-
-      {!isCeremonyCalmMode && !isSpectator && userRank <= 2 && <FramerConfettiOverlay />}
 
       <motion.div
         variants={skipVerticalMotion ? undefined : podiumContainerVariants}
@@ -587,16 +758,38 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           variants={skipVerticalMotion ? undefined : podiumSlideUpVariants}
           className="flex flex-col items-center text-center relative z-10 pt-6 sm:pt-0"
         >
+          {isFirstPlaceWinner && (
+            <motion.div
+              key={`victory-ribbon-${explosionKey}`}
+              initial={shouldReduceMotion ? false : { opacity: 0, y: -16, scale: 0.84 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ type: 'spring', stiffness: 360, damping: 18, delay: 0.06 }}
+              className="mb-2 inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-gradient-to-r from-amber-500/25 via-yellow-400/30 to-amber-500/25 border border-amber-300/75 text-amber-200 text-[10px] sm:text-[11px] font-mono font-black tracking-widest uppercase shadow-[0_0_24px_rgba(250,204,21,0.4)]"
+            >
+              <span aria-hidden="true">🏆</span>
+              <span>{victoryRibbonLabel}</span>
+              <span aria-hidden="true">✨</span>
+            </motion.div>
+          )}
+
           <motion.div
             initial={skipVerticalMotion ? false : { y: 26, scale: 0.55, opacity: 0, rotate: -18 }}
             animate={{ y: 0, scale: 1, opacity: 1, rotate: 0 }}
             transition={{ type: 'spring', stiffness: 360, damping: 18, delay: 0.08 }}
             className="relative mb-1"
           >
-            <span className="text-4xl sm:text-5xl filter drop-shadow-[0_0_20px_rgba(245,158,11,0.9)]">
+            {isFirstPlaceWinner && !shouldReduceMotion && (
+              <motion.span
+                aria-hidden="true"
+                animate={{ scale: [0.95, 1.35, 0.95], opacity: [0.35, 0.85, 0.35] }}
+                transition={{ repeat: Infinity, duration: 2.1, ease: 'easeInOut' }}
+                className="absolute inset-0 -m-2 rounded-full bg-amber-400/30 blur-md pointer-events-none"
+              />
+            )}
+            <span className="relative text-4xl sm:text-5xl filter drop-shadow-[0_0_20px_rgba(245,158,11,0.9)]">
               {isSpectator ? '👻' : '👑'}
             </span>
-            {!isCeremonyCalmMode && !isSpectator && userRank === 1 && (
+            {isFirstPlaceWinner && (
               <motion.span
                 animate={{ scale: [1, 1.3, 1], opacity: [0.7, 1, 0.7] }}
                 transition={{ repeat: Infinity, duration: 1.8, type: 'tween', ease: 'easeInOut' }}
@@ -788,7 +981,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
             >
               {t.podium.tabPodium}
             </button>
-            {!isCeremonyCalmMode && !isSpectator && (
+            {(isFirstPlaceWinner || (!isCeremonyCalmMode && !isSpectator)) && (
               <button
                 onClick={handleTriggerExplosion}
                 type="button"
@@ -821,9 +1014,9 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
               animate={{ opacity: 1, y: 0 }}
               exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 16 }}
               transition={{ type: 'spring', stiffness: 260, damping: 24 }}
-              className="relative z-10 pt-2 pb-1"
+              className="relative z-10 pt-5 pb-1"
             >
-              <div className="flex items-end justify-center gap-2 sm:gap-3 h-52 sm:h-56 relative">
+              <div className="flex items-end justify-center gap-2 sm:gap-3 h-56 sm:h-64 relative">
                 {/* Base luminosa do palco */}
                 <div
                   aria-hidden="true"
@@ -962,27 +1155,6 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       className="flex flex-col items-center mb-1.5 text-center z-10"
                     >
                       <motion.div
-                        initial={shouldReduceMotion ? false : { y: 18, scale: 0.4, opacity: 0 }}
-                        animate={
-                          shouldReduceMotion
-                            ? { y: 0, scale: 1, opacity: 1 }
-                            : { y: [0, -5, 0], scale: 1, opacity: 1 }
-                        }
-                        transition={
-                          shouldReduceMotion
-                            ? { duration: 0.1 }
-                            : {
-                                y: { repeat: Infinity, duration: 1.6, type: 'tween', ease: 'easeInOut', delay: 0.9 },
-                                scale: { type: 'spring', stiffness: 400, damping: 14, delay: 0.68 },
-                                opacity: { duration: 0.25, delay: 0.64 },
-                              }
-                        }
-                        className="text-lg filter drop-shadow-[0_0_8px_rgba(250,204,21,1)] leading-none"
-                      >
-                        👑
-                      </motion.div>
-
-                      <motion.div
                         initial={shouldReduceMotion ? false : { y: 20, scale: 0.55 }}
                         animate={{ y: 0, scale: 1 }}
                         transition={{
@@ -991,8 +1163,12 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                           damping: 12,
                           delay: shouldReduceMotion ? 0 : 0.58,
                         }}
-                        className="relative"
+                        className="relative mt-2"
                       >
+                        <GoldenCrownIconOverlay
+                          size="lg"
+                          shouldReduceMotion={Boolean(shouldReduceMotion)}
+                        />
                         <AvatarDoll
                           avatarId={first.avatarId}
                           name={first.name}
@@ -1224,8 +1400,14 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       mass: 0.8,
                       delay: shouldReduceMotion ? 0 : 0.18 + idx * 0.08,
                     }}
-                    className="shrink-0"
+                    className="relative shrink-0"
                   >
+                    {rank === 1 && (
+                      <GoldenCrownIconOverlay
+                        size="sm"
+                        shouldReduceMotion={Boolean(shouldReduceMotion)}
+                      />
+                    )}
                     <AvatarDoll
                       avatarId={runner.avatarId}
                       name={runner.name}

@@ -934,6 +934,9 @@ export default function App() {
     sounds.enabled = soundEnabled;
     if (!soundEnabled) {
       sounds.stopRaceBgm();
+      sounds.stopCelebrationAudio();
+    } else {
+      sounds.unlockAudio();
     }
   }, [soundEnabled]);
 
