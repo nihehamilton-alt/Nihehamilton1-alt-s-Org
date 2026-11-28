@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import {
   Lane,
   Player,
@@ -52,6 +52,7 @@ import { useI18n } from '../contexts/I18nContext';
 import { getLocalizedPowerUp } from '../data/translations';
 import { drawVolumetricObstacle25D } from './canvasObstacles25D';
 import { drawCanvasRunnerAvatar } from './canvasRunnerAvatar';
+import { AvatarDoll } from './AvatarDoll';
 import { getMultiplayerStrings } from '../utils/multiplayerStrings';
 import {
   createDefaultWeatherState,
@@ -545,10 +546,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       syncDashUi(0);
       setActivePowerUpNotice(null);
 
-      // Reinicia estado de ritmo e colisões dos 4 corredores rivais (velocidade base igual para todos)
+      // Reinicia estado de ritmo e colisões apenas dos bots (jogadores humanos reais nunca usam IA)
       botRuntimeRef.current.clear();
       competitors.forEach((c) => {
-        if (!c.isPlayer) {
+        if (!c.isPlayer && c.isBot && !c.isRemoteHuman) {
           botRuntimeRef.current.set(c.id, {
             stumbleTimer: 0,
             slideTimer: 0,
@@ -624,7 +625,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     list.push(item);
   };
 
-  // Camada de Verificação de Limites (Boundary Check): força coordenada X para o centro da faixa designada a cada frame
+  // Camada de Verificação de Limites (Boundary Check): garante que laneX respeita os limites da pista sem cortar a animação lateral
   const enforcePlayerLaneBoundary = (player: Player) => {
     const safeTargetLane = clampLaneIndex(player.targetLane);
     const safeLane = clampLaneIndex(player.lane);
@@ -641,7 +642,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     // Nunca permite ultrapassar os limites físicos laterais da pista (Faixa 0 .. Faixa 4)
     player.laneX = Math.max(TRACK_MIN_CENTER_X, Math.min(TRACK_MAX_CENTER_X, player.laneX));
 
-    if (safeLane === safeTargetLane || Math.abs(player.laneX - targetCenter) < 1.25) {
+    if (Math.abs(player.laneX - targetCenter) < 0.75) {
       player.laneX = targetCenter;
       player.lane = safeTargetLane;
       return;
@@ -667,13 +668,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       comp.laneX = targetCenter;
       comp.lane = safeTargetLane;
       return;
-    }
-
-    if (safeLane !== safeTargetLane) {
-      const originCenter = LANE_CENTERS[safeLane];
-      const corridorMin = Math.max(TRACK_MIN_CENTER_X, Math.min(originCenter, targetCenter));
-      const corridorMax = Math.min(TRACK_MAX_CENTER_X, Math.max(originCenter, targetCenter));
-      comp.laneX = Math.max(corridorMin, Math.min(corridorMax, comp.laneX));
     }
 
     if (!Number.isFinite(comp.progressDistance) || comp.progressDistance < 0) {
@@ -1106,17 +1100,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           s.speed = Math.max(2.6, activeSpeed);
           s.playerDistance = Math.max(0, s.playerDistance + dt * (s.speed * 1.5));
 
-          // Interpolação fluida de troca de faixa + boundary check estrito
+          // Interpolação fluida contínua de troca de faixa (laneX anima sempre até alcançar o destino)
           const clampedTargetLane = clampLaneIndex(s.player.targetLane);
           s.player.targetLane = clampedTargetLane;
           const targetPlayerX = LANE_CENTERS[clampedTargetLane];
           const prevPlayerLaneX = Number.isFinite(s.player.laneX) ? s.player.laneX : targetPlayerX;
-          const playerLaneLerp = 1 - Math.exp(-34 * dt);
-          if (s.player.lane === clampedTargetLane) {
+          const playerLaneLerp = 1 - Math.exp(-16 * dt);
+          if (Math.abs(targetPlayerX - prevPlayerLaneX) < 0.75) {
             s.player.laneX = targetPlayerX;
+            s.player.lane = clampedTargetLane;
           } else {
             s.player.laneX = prevPlayerLaneX + (targetPlayerX - prevPlayerLaneX) * playerLaneLerp;
-            if (Math.abs(targetPlayerX - s.player.laneX) < 0.85) {
+            if (Math.abs(targetPlayerX - s.player.laneX) < 0.75) {
               s.player.laneX = targetPlayerX;
               s.player.lane = clampedTargetLane;
             }
@@ -1248,22 +1243,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 });
               }
             }
-          } else if (!comp.isBot && !comp.id.startsWith('friend-') && remoteMap) {
-            // Jogador humano real controlado remotamente em tempo real com dead-reckoning fluido 60 FPS
-            const snap = remoteMap.get(comp.id);
+          } else if (!comp.isBot || comp.isRemoteHuman) {
+            // Jogador humano real controlado remotamente em tempo real — nunca usa IA ou movimentos inventados
+            const snap = remoteMap?.get(comp.id);
             if (snap) {
-              const ageSec = Math.min(0.12, Math.max(0, (Date.now() - (snap.updatedAt || Date.now())) / 1000));
+              const rawAgeMs = Math.max(0, Date.now() - (snap.updatedAt || Date.now()));
+              const ageSec = rawAgeMs < 350 ? Math.min(0.08, rawAgeMs / 1000) : 0;
               const expectedPace =
                 (snap.stumbling
                   ? baseWaveSpeed * 0.65 * 1.5
                   : snap.action === 'dashing'
                   ? baseWaveSpeed * 1.55 * 1.5
                   : baseWaveSpeed * 1.5) * nextWeather.speedMultiplier;
-              const projectedDist = snap.finished
-                ? snap.progressDistance
-                : snap.progressDistance + ageSec * expectedPace;
+              const projectedDist =
+                snap.finished || ageSec <= 0
+                  ? snap.progressDistance
+                  : snap.progressDistance + ageSec * expectedPace;
               const distGap = projectedDist - comp.progressDistance;
-              if (Math.abs(distGap) > 35) {
+              if (Math.abs(distGap) > 35 || ageSec <= 0) {
                 comp.progressDistance = projectedDist;
               } else {
                 const distLerp = 1 - Math.exp(-22 * dt);
@@ -1272,15 +1269,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                   comp.progressDistance + distGap * distLerp
                 );
               }
-              comp.lane = clampLaneIndex(snap.lane);
               comp.targetLane = clampLaneIndex(snap.targetLane ?? snap.lane);
               const snapTargetX =
                 typeof snap.laneX === 'number' && Number.isFinite(snap.laneX)
-                  ? snap.laneX
+                  ? Math.max(TRACK_MIN_CENTER_X, Math.min(TRACK_MAX_CENTER_X, snap.laneX))
                   : LANE_CENTERS[comp.targetLane];
               const currX = Number.isFinite(comp.laneX) ? comp.laneX : snapTargetX;
-              const xLerp = 1 - Math.exp(-28 * dt);
-              comp.laneX = currX + (snapTargetX - currX) * xLerp;
+              const xLerp = 1 - Math.exp(-14 * dt);
+              if (Math.abs(snapTargetX - currX) < 0.75) {
+                comp.laneX = snapTargetX;
+                comp.lane = clampLaneIndex(snap.lane);
+              } else {
+                comp.laneX = currX + (snapTargetX - currX) * xLerp;
+                comp.lane = nearestLaneFromX(comp.laneX);
+              }
               const jumpLerp = 1 - Math.exp(-26 * dt);
               comp.jumpY = Math.max(0, (comp.jumpY || 0) + (snap.jumpY - (comp.jumpY || 0)) * jumpLerp);
               const prevCompAction = comp.action;
@@ -1303,8 +1305,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                   }
                 }
               }
+            } else {
+              // Sem telemetria recebida ainda: mantém posição exata na faixa sem inventar movimentos
+              comp.lane = clampLaneIndex(comp.lane);
+              comp.targetLane = clampLaneIndex(comp.targetLane ?? comp.lane);
+              comp.laneX = LANE_CENTERS[comp.targetLane];
+              comp.jumpY = 0;
+              comp.action = 'running';
+              comp.stumbling = false;
+              enforceCompetitorLaneBoundary(comp);
             }
-          } else {
+          } else if (comp.isBot && !comp.isRemoteHuman) {
             let bot = botRuntimeRef.current.get(comp.id);
             if (!bot) {
               bot = {
@@ -1389,19 +1400,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               }
             }
 
-            // Garante que cada corredor rival corre disciplinado dentro das 5 faixas oficiais [0..4]
+            // Garante transição lateral animada de laneX dentro das 5 faixas oficiais [0..4]
             const safeTargetLane = clampLaneIndex(comp.targetLane ?? comp.lane);
             comp.targetLane = safeTargetLane;
             const targetX = LANE_CENTERS[safeTargetLane];
-            if (comp.lane === safeTargetLane) {
+            const currX =
+              typeof comp.laneX === 'number' && Number.isFinite(comp.laneX)
+                ? Math.max(TRACK_MIN_CENTER_X, Math.min(TRACK_MAX_CENTER_X, comp.laneX))
+                : targetX;
+            if (Math.abs(targetX - currX) < 0.75) {
               comp.laneX = targetX;
+              comp.lane = safeTargetLane;
             } else {
-              const botLaneLerp = 1 - Math.exp(-26 * dt);
-              const currX =
-                typeof comp.laneX === 'number' && Number.isFinite(comp.laneX)
-                  ? Math.max(TRACK_MIN_CENTER_X, Math.min(TRACK_MAX_CENTER_X, comp.laneX))
-                  : targetX;
+              const botLaneLerp = 1 - Math.exp(-14 * dt);
               comp.laneX = currX + (targetX - currX) * botLaneLerp;
+              if (Math.abs(targetX - comp.laneX) < 0.75) {
+                comp.laneX = targetX;
+                comp.lane = safeTargetLane;
+              }
             }
             enforceCompetitorLaneBoundary(comp);
 
@@ -2845,72 +2861,155 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             {mpStrings.roomBetInlineLabel}: {formatMoney(betAmountKz)}
           </span>
         </div>
-        <div className="grid grid-cols-5 gap-1">
-          {[...liveHudRunners]
-            .sort((a, b) => (a.targetLane ?? a.lane) - (b.targetLane ?? b.lane))
-            .slice(0, 5)
-            .map((runner) => {
-              const displayLane = Math.max(0, Math.min(4, runner.targetLane ?? runner.lane)) + 1;
-              const moveGlyph = runner.profileReady === false
-                ? '⏳'
-                : runner.stumbling
-                ? '⚠️'
-                : runner.action === 'dashing'
-                ? '⚡'
-                : runner.action === 'jumping' || (runner.jumpY || 0) > 8
-                ? '🦘'
-                : runner.action === 'sliding'
-                ? '⬇️'
-                : '🏃';
-              const moveLabel = runner.stumbling
-                ? mpStrings.actionStumbling
-                : runner.action === 'dashing'
-                ? mpStrings.actionDashing
-                : runner.action === 'jumping' || (runner.jumpY || 0) > 8
-                ? mpStrings.actionJumping
-                : runner.action === 'sliding'
-                ? mpStrings.actionSliding
-                : mpStrings.actionRunning;
-              const isRemoteLive = !runner.isBot && !runner.isPlayer && !runner.id.startsWith('friend-');
-              const runnerBet = runner.betAmount ?? betAmountKz;
-              return (
-                <div
-                  key={runner.id}
-                  className={`px-1.5 py-1 rounded-lg border text-[9px] font-mono flex flex-col gap-0.5 min-w-0 ${
-                    runner.isPlayer
-                      ? 'bg-amber-500/15 border-amber-400/70 text-amber-100'
-                      : isRemoteLive
-                      ? 'bg-emerald-950/45 border-emerald-500/50 text-emerald-100'
-                      : 'bg-zinc-900/80 border-zinc-800 text-zinc-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-0.5">
-                    <span className="flex items-center gap-1 min-w-0">
-                      <span
-                        className="w-1.5 h-1.5 rounded-full shrink-0"
-                        style={{ backgroundColor: runner.color || '#f59e0b' }}
-                      />
-                      <span className="font-black text-[9px] truncate">F{displayLane}</span>
-                    </span>
-                    <span title={moveLabel}>{moveGlyph}</span>
-                  </div>
-                  <span className="truncate font-bold text-[9px] leading-tight">
-                    {runner.name.replace(/\s*\(.*?\)\s*$/, '')}
-                  </span>
-                  <div className="flex items-center justify-between gap-0.5 text-[8px] opacity-90 tabular-nums">
-                    <span className="text-amber-300 font-bold truncate">
-                      {formatMoney(runnerBet)}
-                    </span>
-                    {status === 'running' && (
-                      <span className="text-zinc-300 shrink-0">
-                        {Math.round(runner.progressDistance || 0)}m
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+        {/* Mini-pista de 5 Faixas com ícones dos competidores animados via Framer Motion */}
+        <div
+          className="relative w-full h-8 rounded-xl bg-zinc-950/90 border border-white/10 overflow-hidden px-1 flex items-center"
+          aria-label={mpStrings.liveRunnersBarTitle}
+        >
+          {/* Divisórias das 5 faixas */}
+          <div className="absolute inset-0 grid grid-cols-5 pointer-events-none">
+            {[0, 1, 2, 3, 4].map((laneNum) => (
+              <div
+                key={laneNum}
+                className="h-full border-r last:border-r-0 border-dashed border-white/10 flex items-end justify-center pb-0.5"
+              >
+                <span className="text-[7px] font-mono text-zinc-600 font-bold">
+                  F{laneNum + 1}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {liveHudRunners.slice(0, 5).map((runner) => {
+            const laneCenterX =
+              typeof runner.laneX === 'number' && Number.isFinite(runner.laneX)
+                ? runner.laneX
+                : LANE_CENTERS[clampLaneIndex(runner.targetLane ?? runner.lane)];
+            const normalizedLaneRatio = Math.max(
+              0,
+              Math.min(1, (laneCenterX - LANE_CENTERS[0]) / Math.max(1, LANE_CENTERS[4] - LANE_CENTERS[0]))
+            );
+            const leftPct = 10 + normalizedLaneRatio * 80;
+            const isRemoteLive = !runner.isBot && !runner.isPlayer && !runner.id.startsWith('friend-');
+            return (
+              <motion.div
+                key={`radar-avatar-${runner.id}`}
+                data-testid={`competitor-lane-avatar-${runner.id}`}
+                data-lane={clampLaneIndex(runner.targetLane ?? runner.lane)}
+                initial={false}
+                animate={{
+                  left: `${leftPct}%`,
+                  scale: runner.stumbling ? 0.88 : runner.action === 'dashing' ? 1.12 : 1,
+                  y: (runner.jumpY || 0) > 8 ? -3 : 0,
+                }}
+                transition={{
+                  left: { type: 'spring', stiffness: 280, damping: 24, mass: 0.75 },
+                  scale: { duration: 0.2 },
+                  y: { duration: 0.18 },
+                }}
+                style={{ transform: 'translateX(-50%)' }}
+                className={`absolute top-1 z-10 w-6 h-6 rounded-full flex items-center justify-center border shadow-md ${
+                  runner.isPlayer
+                    ? 'bg-amber-500/30 border-amber-300 shadow-[0_0_10px_rgba(251,191,36,0.5)]'
+                    : isRemoteLive
+                    ? 'bg-emerald-950/90 border-emerald-400/80 shadow-[0_0_8px_rgba(52,211,153,0.4)]'
+                    : 'bg-zinc-900/95 border-zinc-600/80'
+                }`}
+                title={`${runner.name.replace(/\s*\(.*?\)\s*$/, '')} · F${clampLaneIndex(runner.targetLane ?? runner.lane) + 1}`}
+              >
+                <AvatarDoll
+                  avatarId={runner.avatarId}
+                  name={runner.name}
+                  color={runner.color}
+                  size={18}
+                  variant="bust"
+                  stumbling={Boolean(runner.stumbling)}
+                />
+              </motion.div>
+            );
+          })}
         </div>
+
+        <LayoutGroup id="live-runners-strip">
+          <div className="grid grid-cols-5 gap-1">
+            {[...liveHudRunners]
+              .sort((a, b) => (a.targetLane ?? a.lane) - (b.targetLane ?? b.lane))
+              .slice(0, 5)
+              .map((runner) => {
+                const displayLane = Math.max(0, Math.min(4, runner.targetLane ?? runner.lane)) + 1;
+                const moveGlyph = runner.profileReady === false
+                  ? '⏳'
+                  : runner.stumbling
+                  ? '⚠️'
+                  : runner.action === 'dashing'
+                  ? '⚡'
+                  : runner.action === 'jumping' || (runner.jumpY || 0) > 8
+                  ? '🦘'
+                  : runner.action === 'sliding'
+                  ? '⬇️'
+                  : '🏃';
+                const moveLabel = runner.stumbling
+                  ? mpStrings.actionStumbling
+                  : runner.action === 'dashing'
+                  ? mpStrings.actionDashing
+                  : runner.action === 'jumping' || (runner.jumpY || 0) > 8
+                  ? mpStrings.actionJumping
+                  : runner.action === 'sliding'
+                  ? mpStrings.actionSliding
+                  : mpStrings.actionRunning;
+                const isRemoteLive = !runner.isBot && !runner.isPlayer && !runner.id.startsWith('friend-');
+                const runnerBet = runner.betAmount ?? betAmountKz;
+                return (
+                  <motion.div
+                    key={runner.id}
+                    layout="position"
+                    transition={{ type: 'spring', stiffness: 360, damping: 30, mass: 0.85 }}
+                    className={`px-1.5 py-1 rounded-lg border text-[9px] font-mono flex flex-col gap-0.5 min-w-0 ${
+                      runner.isPlayer
+                        ? 'bg-amber-500/15 border-amber-400/70 text-amber-100'
+                        : isRemoteLive
+                        ? 'bg-emerald-950/45 border-emerald-500/50 text-emerald-100'
+                        : 'bg-zinc-900/80 border-zinc-800 text-zinc-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-0.5">
+                      <span className="flex items-center gap-1 min-w-0">
+                        <motion.span
+                          layout="position"
+                          transition={{ type: 'spring', stiffness: 420, damping: 28 }}
+                          className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-zinc-950/80 border border-white/15 shrink-0 overflow-hidden"
+                        >
+                          <AvatarDoll
+                            avatarId={runner.avatarId}
+                            name={runner.name}
+                            color={runner.color}
+                            size={15}
+                            variant="bust"
+                            stumbling={Boolean(runner.stumbling)}
+                          />
+                        </motion.span>
+                        <span className="font-black text-[9px] truncate">F{displayLane}</span>
+                      </span>
+                      <span title={moveLabel}>{moveGlyph}</span>
+                    </div>
+                    <span className="truncate font-bold text-[9px] leading-tight">
+                      {runner.name.replace(/\s*\(.*?\)\s*$/, '')}
+                    </span>
+                    <div className="flex items-center justify-between gap-0.5 text-[8px] opacity-90 tabular-nums">
+                      <span className="text-amber-300 font-bold truncate">
+                        {formatMoney(runnerBet)}
+                      </span>
+                      {status === 'running' && (
+                        <span className="text-zinc-300 shrink-0">
+                          {Math.round(runner.progressDistance || 0)}m
+                        </span>
+                      )}
+                    </div>
+                  </motion.div>
+                );
+              })}
+          </div>
+        </LayoutGroup>
       </div>
 
       {/* Notificação Ativa de Power-Up */}

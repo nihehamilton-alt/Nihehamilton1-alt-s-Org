@@ -17,6 +17,7 @@ import {
   ServerRaceStatus,
   PlayerAction,
   RoomChatMessage,
+  RoomDesyncAlert,
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
 import { ClientTelemetryValidator } from './utils/telemetryValidator';
@@ -274,6 +275,13 @@ export default function App() {
 
   // 7. Configurações de Modais, Operadora B2B e Áudio
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [bgmEnabled, setBgmEnabled] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('rei_zero_bgm_enabled');
+      return saved === null ? true : saved === 'true';
+    }
+    return true;
+  });
   const [volume, setVolume] = useState<number>(0.7);
   const [rulesOpen, setRulesOpen] = useState<boolean>(false);
   const [howToPlayTutorialOpen, setHowToPlayTutorialOpen] = useState<boolean>(false);
@@ -292,6 +300,20 @@ export default function App() {
       setSoundEnabled(true);
     }
   };
+
+  const handleToggleBgm = useCallback(() => {
+    setBgmEnabled((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rei_zero_bgm_enabled', String(next));
+      }
+      sounds.setBgmEnabled(next);
+      if (next) {
+        sounds.unlockAudio();
+      }
+      return next;
+    });
+  }, []);
 
   // 7.1 Tela Oficial de Carregamento (Loading)
   const [isLoadingScreen, setIsLoadingScreen] = useState<boolean>(() => {
@@ -429,6 +451,7 @@ export default function App() {
   const [investigatingCompetitors, setInvestigatingCompetitors] = useState<
     Record<string, TelemetryInvestigationEntry>
   >({});
+  const [roomDesyncAlerts, setRoomDesyncAlerts] = useState<RoomDesyncAlert[]>([]);
   const roomWsRef = useRef<WebSocket | null>(null);
   const serverClockOffsetRef = useRef<number>(0);
   const bestRttRef = useRef<number>(Number.POSITIVE_INFINITY);
@@ -449,7 +472,7 @@ export default function App() {
   const [raceSeed, setRaceSeed] = useState<number | null>(null);
   const [syncedRaceStartAt, setSyncedRaceStartAt] = useState<number | null>(null);
   const [isLocalRoomHost, setIsLocalRoomHost] = useState<boolean>(
-    () => !initialHasUrlRoom || isInitialLocalCreator
+    () => isInitialLocalCreator
   );
   const [isEditingRoomOrProfile, setIsEditingRoomOrProfile] = useState<boolean>(false);
   const [waitingForOpponent, setWaitingForOpponent] = useState<boolean>(false);
@@ -484,6 +507,12 @@ export default function App() {
     betAmount: number;
     fillWithBots?: boolean;
     maxPlayers?: number;
+    lastResults?: {
+      raceRound: number;
+      betAmount: number;
+      finishedAt: number;
+      rankings: RoomStandingEntry[];
+    };
     participants: Array<{
       id: string;
       name: string;
@@ -565,12 +594,79 @@ export default function App() {
     });
   }, [roomConfig.code]);
 
+  const upsertRoomDesyncAlert = useCallback((incoming: RoomDesyncAlert) => {
+    setRoomDesyncAlerts((prev) => {
+      const idx = prev.findIndex(
+        (entry) =>
+          entry.competitorId === incoming.competitorId &&
+          entry.raceRound === incoming.raceRound
+      );
+      if (idx >= 0) {
+        const current = prev[idx];
+        const next = [...prev];
+        next[idx] = {
+          ...current,
+          ...incoming,
+          anomalyCount: Math.max(current.anomalyCount, incoming.anomalyCount),
+          detectedAt: Math.max(current.detectedAt, incoming.detectedAt),
+        };
+        return next;
+      }
+      return [...prev, incoming];
+    });
+  }, []);
+
+  const reportConsistentlyImpossibleMovement = useCallback(
+    (entry: TelemetryInvestigationEntry) => {
+      const round = activeRaceRoundRef.current || serverRaceRoundRef.current || 1;
+      const alert: RoomDesyncAlert = {
+        competitorId: entry.competitorId,
+        competitorName: entry.competitorName,
+        reason: entry.reason,
+        detectedAt: entry.detectedAt,
+        raceRound: round,
+        anomalyCount: entry.anomalyCount ?? 2,
+        reportedBy: getSessionPlayerId(),
+      };
+      upsertRoomDesyncAlert(alert);
+
+      const resolvedRoomCode = (
+        latestServerRoomRef.current?.code ||
+        roomConfigRef.current.code ||
+        ''
+      )
+        .trim()
+        .toUpperCase();
+      if (!resolvedRoomCode || resolvedRoomCode === 'ARENA-AO-VIVO') return;
+
+      const ws = roomWsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'room:desync-alert',
+            roomCode: resolvedRoomCode,
+            raceRound: round,
+            competitorId: alert.competitorId,
+            competitorName: alert.competitorName,
+            reason: alert.reason,
+            detectedAt: alert.detectedAt,
+            anomalyCount: alert.anomalyCount,
+          })
+        );
+      } else {
+        void telemetryValidatorRef.current.flushBatch();
+      }
+    },
+    [upsertRoomDesyncAlert]
+  );
+
   useEffect(() => {
     void telemetryValidatorRef.current.flushBatch();
     telemetryValidatorRef.current.resetAll();
     startedRoundSetRef.current.clear();
     finalizedRoundSetRef.current.clear();
     setInvestigatingCompetitors({});
+    setRoomDesyncAlerts([]);
   }, [wsRoomSessionKey]);
 
   useEffect(() => {
@@ -1051,12 +1147,13 @@ export default function App() {
   }, [soundEnabled]);
 
   useEffect(() => {
-    if (status === 'running' && soundEnabled) {
+    sounds.setBgmEnabled(bgmEnabled);
+    if (status === 'running' && soundEnabled && bgmEnabled && volume > 0) {
       sounds.playRaceBgm();
     } else {
       sounds.stopRaceBgm();
     }
-  }, [status, soundEnabled]);
+  }, [status, soundEnabled, bgmEnabled, volume]);
 
   // Garante faixas exclusivas preservando posições atribuídas pelo servidor (anfitrião=2, convidados=[1,3,0,4])
   const assignDistinctLanes = useCallback((list: Competitor[], resetProgress = false): Competitor[] => {
@@ -1232,6 +1329,7 @@ export default function App() {
     setShowPodium(false);
     setPendingSyncPodium(false);
     setAuthoritativeRankings(null);
+    setRoomDesyncAlerts([]);
     setWaitingForOpponent(false);
     setWaitingOpponentNames([]);
     setCountdownValue(null);
@@ -1893,14 +1991,7 @@ export default function App() {
     sounds.unlockAudio();
     setTop3Celebration(null);
 
-    const inServerRoomSession =
-      !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
-      (serverRoomConnected ||
-        viaInviteRef.current ||
-        initialHasUrlRoom ||
-        connectedHumansCount > 1 ||
-        serverHumansCountRef.current > 1 ||
-        !isAutoMatchRef.current);
+    const inServerRoomSession = !wsRoomSessionKey.startsWith('SOLO_IDLE_');
     const ws = roomWsRef.current;
 
     const isPublicMatch = isAutoMatchRef.current || roomConfig.accessMode === 'random';
@@ -1926,6 +2017,11 @@ export default function App() {
         setRoomNotice(mpStrings.waitingMorePlayersToStart);
         return;
       }
+      const resolvedRoomCode = (latestServerRoomRef.current?.code || roomConfig.code || '').trim().toUpperCase();
+      if (!resolvedRoomCode || resolvedRoomCode === 'ARENA-AO-VIVO') {
+        setWsReconnectNonce((n) => n + 1);
+        return;
+      }
       if (isPublicMatch) {
         publicRoundCompletedRef.current = false;
       }
@@ -1933,11 +2029,11 @@ export default function App() {
       startedFromRoomRef.current = fromRoom || lobbyOpen;
       setRoomNotice(null);
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'room:start-request', roomCode: roomConfig.code }));
+        ws.send(JSON.stringify({ type: 'room:start-request', roomCode: resolvedRoomCode }));
         return;
       }
       if (typeof navigator !== 'undefined' && navigator.onLine) {
-        fetch(`/api/rooms/${encodeURIComponent(roomConfig.code)}/start`, {
+        fetch(`/api/rooms/${encodeURIComponent(resolvedRoomCode)}/start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ requesterId: getSessionPlayerId() }),
@@ -2096,17 +2192,49 @@ export default function App() {
     );
   };
 
+  const lastHttpTelemetryAtRef = useRef<number>(0);
+
   // Envia telemetria em tempo real da corrida do jogador local para os adversários na sala
   const handleLocalRaceTelemetry = useCallback(
     (telemetry: LocalRunnerTelemetry) => {
       if (isSpectatingRef.current) return;
-      const ws = roomWsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
       if (activeRaceRoundRef.current <= 0) return;
-      ws.send(
-        JSON.stringify({
-          type: 'room:race-telemetry',
-          roomCode: roomConfig.code,
+
+      const resolvedRoomCode = (latestServerRoomRef.current?.code || roomConfig.code || '').trim().toUpperCase();
+      if (!resolvedRoomCode || resolvedRoomCode === 'ARENA-AO-VIVO') return;
+
+      const ws = roomWsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'room:race-telemetry',
+            roomCode: resolvedRoomCode,
+            raceRound: activeRaceRoundRef.current,
+            progressDistance: telemetry.progressDistance,
+            lane: telemetry.lane,
+            targetLane: telemetry.targetLane,
+            laneX: telemetry.laneX,
+            action: telemetry.action,
+            jumpY: telemetry.jumpY,
+            stumbling: telemetry.stumbling,
+            finished: telemetry.finished,
+          })
+        );
+        return;
+      }
+
+      // Fallback HTTP caso o WebSocket caia durante a corrida
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      const nowMs = Date.now();
+      if (!telemetry.finished && nowMs - lastHttpTelemetryAtRef.current < 180) return;
+      lastHttpTelemetryAtRef.current = nowMs;
+
+      fetch(`/api/rooms/${encodeURIComponent(resolvedRoomCode)}/progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: getSessionPlayerId(),
           raceRound: activeRaceRoundRef.current,
           progressDistance: telemetry.progressDistance,
           lane: telemetry.lane,
@@ -2116,10 +2244,10 @@ export default function App() {
           jumpY: telemetry.jumpY,
           stumbling: telemetry.stumbling,
           finished: telemetry.finished,
-        })
-      );
+        }),
+      }).catch(() => {});
     },
-    [roomConfig.code]
+    [roomConfig.code, wsRoomSessionKey]
   );
 
   // Fim da corrida após os 40 segundos exatos
@@ -2319,10 +2447,10 @@ export default function App() {
     });
   }, [fitCompetitorsToCapacity, roomConfig.fillWithBots, roomConfig.maxPlayers]);
 
-  // Gerenciamento e Simulação Realista de Amigos Entrando pelo Link
+  // Gerenciamento e Simulação de Amigos (exclusivo do modo local offline; desativado em salas online)
   const handleAddFriendSimulation = () => {
-    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
-      setRoomNotice(mpStrings.onlyLeaderControlsRoom);
+    if (!wsRoomSessionKey.startsWith('SOLO_IDLE_')) {
+      if (!isLocalRoomHost) setRoomNotice(mpStrings.onlyLeaderControlsRoom);
       return;
     }
     const cap = clampRoomMax(roomConfig.maxPlayers, 5);
@@ -2766,7 +2894,7 @@ export default function App() {
     isAutoMatchRef.current = Boolean(payload.viaRandomMatch);
     isRoomCreatorRef.current = false;
     viaInviteRef.current = payload.viaInvite ?? true;
-    setIsLocalRoomHost(!viaInviteRef.current);
+    setIsLocalRoomHost(false);
     removedLocalIdsRef.current.clear();
     publicRoundCompletedRef.current = false;
     setRoomChatMessages([]);
@@ -3104,6 +3232,7 @@ export default function App() {
       raceSeed?: number;
       raceStartAt?: number | null;
       syncedRaceStartAt?: number | null;
+      desyncAlerts?: RoomDesyncAlert[];
       participants: ServerRoomParticipantPayload[];
     };
 
@@ -3127,12 +3256,14 @@ export default function App() {
 
       if (nextServerRaceStatus === 'running' || nextServerRaceStatus === 'starting') {
         const nowSyncMs = Date.now();
+        const wsIsOpen = roomWsRef.current?.readyState === WebSocket.OPEN;
         room.participants.forEach((p) => {
           if (p.id === myId || p.isSpectating || p.connected === false) return;
           const existing = remotePlayersRef.current.get(p.id);
           const serverDist = Number(p.progressDistance || 0);
           if (
             !existing ||
+            !wsIsOpen ||
             nowSyncMs - existing.updatedAt > 900 ||
             serverDist > existing.progressDistance
           ) {
@@ -3142,21 +3273,57 @@ export default function App() {
             const pTarget = (typeof p.targetLane === 'number'
               ? Math.max(0, Math.min(4, p.targetLane))
               : existing?.targetLane ?? pLane) as Lane;
-            remotePlayersRef.current.set(p.id, {
+            const nextLaneX =
+              typeof p.laneX === 'number' ? p.laneX : existing?.laneX ?? LANE_CENTERS[pTarget];
+            const nextProgress = Math.max(existing?.progressDistance ?? 0, serverDist);
+            const hasTelemetryChanged =
+              !existing ||
+              nextProgress !== existing.progressDistance ||
+              pLane !== existing.lane ||
+              nextLaneX !== existing.laneX;
+            const nextSnapshot: RemoteRunnerSnapshot = {
               playerId: p.id,
-              progressDistance: Math.max(existing?.progressDistance ?? 0, serverDist),
+              progressDistance: nextProgress,
               lane: pLane,
               targetLane: pTarget,
-              laneX: typeof p.laneX === 'number' ? p.laneX : existing?.laneX ?? LANE_CENTERS[pTarget],
+              laneX: nextLaneX,
               action:
                 (p.action as RemoteRunnerSnapshot['action']) || existing?.action || 'running',
               jumpY: typeof p.jumpY === 'number' ? p.jumpY : existing?.jumpY ?? 0,
               stumbling: typeof p.stumbling === 'boolean' ? p.stumbling : Boolean(existing?.stumbling),
               finished: typeof p.finished === 'boolean' ? p.finished : Boolean(existing?.finished),
               updatedAt: nowSyncMs,
-            });
+            };
+            remotePlayersRef.current.set(p.id, nextSnapshot);
+
+            if (nextServerRaceStatus === 'running' && !wsIsOpen && hasTelemetryChanged) {
+              const validation = telemetryValidatorRef.current.inspectTelemetry(
+                p.id,
+                p.name || p.id.slice(0, 10),
+                nextSnapshot,
+                nowSyncMs
+              );
+              if (validation.newlyFlagged) {
+                setInvestigatingCompetitors(telemetryValidatorRef.current.getInvestigations());
+              }
+              if (validation.newlyDesynced && validation.investigation) {
+                reportConsistentlyImpossibleMovement(validation.investigation);
+              }
+            }
           }
         });
+      }
+
+      if (Array.isArray(room.desyncAlerts) && room.desyncAlerts.length > 0) {
+        const targetRound = room.raceRound ?? activeRaceRoundRef.current;
+        const roundAlerts = room.desyncAlerts.filter(
+          (a) => !targetRound || a.raceRound === targetRound
+        );
+        if (roundAlerts.length > 0) {
+          roundAlerts.forEach((a) => upsertRoomDesyncAlert(a));
+        }
+      } else if (nextServerRaceStatus === 'idle') {
+        setRoomDesyncAlerts([]);
       }
 
       if (isSpectatingRef.current && nextServerRaceStatus === 'idle') {
@@ -3280,9 +3447,6 @@ export default function App() {
             finished: false,
             betAmount: shouldAdoptServerBet ? serverBet : betAmountRef.current,
           };
-          const localSimFriends = prev.filter(
-            (c) => !c.isPlayer && !c.isBot && c.id.startsWith('friend-')
-          );
           const existingBots = prev.filter((c) => c.isBot);
 
           const activeInvestigations = telemetryValidatorRef.current.getInvestigations();
@@ -3334,13 +3498,6 @@ export default function App() {
           for (const remoteFriend of humanCompetitors) {
             if (combined.length >= serverMax) break;
             combined.push(remoteFriend);
-          }
-          for (const simFriend of localSimFriends) {
-            if (combined.length >= serverMax) break;
-            combined.push({
-              ...simFriend,
-              betAmount: serverBet,
-            });
           }
           const shouldIncludeBots =
             room.fillWithBots ?? (cfg.fillWithBots || (serverAccess || cfg.accessMode) === 'random');
@@ -3457,6 +3614,7 @@ export default function App() {
         reporterId: myId,
       });
       telemetryValidatorRef.current.resetKinematicsForNewRound();
+      setRoomDesyncAlerts([]);
 
       if (isDemoRef.current && balanceRef.current < effectiveBet) {
         setDemoBalance((prev) => Math.max(prev, effectiveBet) - effectiveBet);
@@ -3694,6 +3852,8 @@ export default function App() {
           roomCode?: string;
           chatMessages?: RoomChatMessage[];
           message?: RoomChatMessage;
+          alert?: RoomDesyncAlert;
+          desyncAlerts?: RoomDesyncAlert[];
         };
 
         if (msg.type === 'room:pong' && typeof msg.serverTime === 'number') {
@@ -3899,6 +4059,39 @@ export default function App() {
               )
             );
           }
+          if (validation.newlyDesynced && validation.investigation) {
+            reportConsistentlyImpossibleMovement(validation.investigation);
+          }
+          return;
+        }
+
+        if (msg.type === 'room:desync-alert') {
+          const targetCode = (msg.roomCode || '').toUpperCase();
+          const currentCode = (roomConfigRef.current.code || '').toUpperCase();
+          if (targetCode && currentCode && targetCode !== currentCode) {
+            return;
+          }
+          const incomingAlerts = Array.isArray(msg.desyncAlerts)
+            ? msg.desyncAlerts
+            : msg.alert
+            ? [msg.alert]
+            : [];
+          incomingAlerts.forEach((entry) => {
+            if (!entry || !entry.competitorId) return;
+            if (
+              activeRaceRoundRef.current > 0 &&
+              entry.raceRound &&
+              entry.raceRound !== activeRaceRoundRef.current
+            ) {
+              return;
+            }
+            upsertRoomDesyncAlert(entry);
+            setCompetitors((prev) =>
+              prev.map((c) =>
+                c.id === entry.competitorId ? { ...c, sessionStatus: 'investigating' } : c
+              )
+            );
+          });
           return;
         }
 
@@ -4033,13 +4226,16 @@ export default function App() {
     mpStrings.onlyHostCanStart,
   ]);
 
-  // Fallback HTTP de segurança: força verificação via fetch a cada 1 segundo quando o WebSocket
-  // perde a conexão (ou ao retomar o separador), sincronizando a largada mesmo com latência
+  // Fallback HTTP de segurança: força verificação via fetch a cada 1 segundo (ou 450ms durante
+  // contagem/corrida se o WebSocket cair), sincronizando largada, telemetria e pódio mesmo com latência
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
-    if (status === 'starting' || status === 'running') return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    const wsDisconnected =
+      !serverRoomConnected || roomWsRef.current?.readyState !== WebSocket.OPEN;
+    if ((status === 'starting' || status === 'running') && !wsDisconnected) return;
 
     let cancelled = false;
     let inFlight = false;
@@ -4047,8 +4243,17 @@ export default function App() {
 
     const pollRoomSync = async () => {
       if (cancelled || inFlight) return;
-      if (statusRef.current === 'starting' || statusRef.current === 'running') return;
-      const targetCode = (roomConfigRef.current.code || '').trim().toUpperCase();
+      const wsNowDisconnected = roomWsRef.current?.readyState !== WebSocket.OPEN;
+      if ((statusRef.current === 'starting' || statusRef.current === 'running') && !wsNowDisconnected) {
+        return;
+      }
+      const targetCode = (
+        latestServerRoomRef.current?.code ||
+        roomConfigRef.current.code ||
+        ''
+      )
+        .trim()
+        .toUpperCase();
       if (!targetCode || targetCode === 'ARENA-AO-VIVO') return;
 
       inFlight = true;
@@ -4061,7 +4266,14 @@ export default function App() {
         const data = (await resp.json().catch(() => ({}))) as {
           ok?: boolean;
           serverTime?: number;
-          room?: Parameters<NonNullable<typeof beginSynchronizedCountdownRef.current>>[0]['room'];
+          room?: Parameters<NonNullable<typeof beginSynchronizedCountdownRef.current>>[0]['room'] & {
+            lastResults?: {
+              raceRound: number;
+              betAmount: number;
+              finishedAt: number;
+              rankings: RoomStandingEntry[];
+            };
+          };
         };
         if (!data.ok || !data.room || cancelled) return;
 
@@ -4104,6 +4316,45 @@ export default function App() {
             betAmount: data.room.betAmount,
             serverTime: data.serverTime,
           });
+        } else if (
+          statusRef.current === 'starting' &&
+          data.room.raceStatus === 'running' &&
+          roundNum === activeRaceRoundRef.current
+        ) {
+          forceSynchronizedRunRef.current?.();
+        } else if (
+          data.room.raceStatus === 'completed' &&
+          Array.isArray(data.room.lastResults?.rankings) &&
+          data.room.lastResults.raceRound === activeRaceRoundRef.current &&
+          (statusRef.current === 'running' || statusRef.current === 'starting' || isSpectatingRef.current) &&
+          !finalizedRoundSetRef.current.has(roundKey)
+        ) {
+          const finishedAsSpectator = isSpectatingRef.current;
+          const finalList = data.room.lastResults.rankings.map((r) => ({
+            id: r.id,
+            name: !finishedAsSpectator && r.id === myId ? `${r.name} ${t.youTag}` : r.name,
+            avatar: r.avatar,
+            avatarId: r.avatarId,
+            color: r.color,
+            lane: (Math.max(0, Math.min(4, r.lane)) as Lane),
+            targetLane: (Math.max(0, Math.min(4, r.lane)) as Lane),
+            laneX: LANE_CENTERS[Math.max(0, Math.min(4, r.lane)) as Lane],
+            yOffset: 0,
+            progressDistance: r.progressDistance,
+            action: 'running' as const,
+            jumpY: 0,
+            isBot: r.isBot,
+            isPlayer: !finishedAsSpectator && r.id === myId,
+            stumbling: false,
+            finished: true,
+          }));
+          applyCompletedRaceOutcomeRef.current(
+            finalList,
+            data.room.lastResults.betAmount ?? activeBetForRoundRef.current,
+            undefined,
+            data.room.lastResults.rankings,
+            finishedAsSpectator
+          );
         }
       } catch {
         // Ignora erro transitório de rede no polling de fallback
@@ -4112,8 +4363,6 @@ export default function App() {
       }
     };
 
-    const wsDisconnected =
-      !serverRoomConnected || roomWsRef.current?.readyState !== WebSocket.OPEN;
     if (wsDisconnected) {
       void pollRoomSync();
     }
@@ -4126,7 +4375,12 @@ export default function App() {
     window.addEventListener('focus', handleResumeSync);
     document.addEventListener('visibilitychange', handleResumeSync);
 
-    const intervalMs = wsDisconnected ? 1000 : 2500;
+    const intervalMs =
+      status === 'starting' || status === 'running'
+        ? 450
+        : wsDisconnected
+        ? 1000
+        : 2500;
     const timer = setInterval(() => {
       void pollRoomSync();
     }, intervalMs);
@@ -4137,7 +4391,7 @@ export default function App() {
       window.removeEventListener('focus', handleResumeSync);
       document.removeEventListener('visibilitychange', handleResumeSync);
     };
-  }, [wsRoomSessionKey, status, serverRoomConnected]);
+  }, [wsRoomSessionKey, status, serverRoomConnected, t.youTag]);
 
   const handleRemoveCompetitor = (id: string) => {
     if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
@@ -4378,6 +4632,8 @@ export default function App() {
         elapsedSeconds={elapsedSeconds}
         soundEnabled={soundEnabled}
         onToggleSound={() => setSoundEnabled((prev) => !prev)}
+        bgmEnabled={bgmEnabled}
+        onToggleBgm={handleToggleBgm}
         volume={volume}
         onVolumeChange={handleVolumeChange}
         onOpenProvablyFair={() => setIsProvablyFairOpen(true)}
@@ -4389,6 +4645,7 @@ export default function App() {
           setIsDemo((prev) => {
             const next = !prev;
             if (isAutoMatchRef.current) {
+              setIsLocalRoomHost(false);
               setWsRoomSessionKey(`AUTO_PUBLIC_${next ? 'DEMO' : 'REAL'}_${Date.now()}`);
             }
             return next;
@@ -4412,6 +4669,9 @@ export default function App() {
         isSpectating={isSpectating}
         onSpectate={handleEnterSpectatorMode}
         onOpenSpectatorOverview={() => setSpectatorOverviewOpen(true)}
+        top3Streak={top3Streak}
+        desyncAlerts={roomDesyncAlerts}
+        onDismissDesyncAlert={() => setRoomDesyncAlerts([])}
       />
 
       {/* 2. Área Central de Corrida */}

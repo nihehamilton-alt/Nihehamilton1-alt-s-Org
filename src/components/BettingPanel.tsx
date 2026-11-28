@@ -771,25 +771,40 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
               </div>
             )}
 
-            {/* Botão de Disputa */}
-            <motion.button
-              whileHover={{ scale: isMultiplayerGuest ? 1 : 1.015 }}
-              whileTap={{ scale: isMultiplayerGuest ? 1 : 0.985 }}
-              type="button"
-              onClick={onStartRound}
-              disabled={balanceKz < betAmountKz || Boolean(inputRangeError) || isMultiplayerGuest}
-              className="w-full py-4 rounded-xl font-black text-base game-btn-gold flex flex-col items-center justify-center cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed px-2 text-center"
-            >
-              <span className="text-[11px] uppercase tracking-wider font-extrabold text-amber-950 flex items-center gap-1.5">
-                <span>👑</span>{' '}
-                {isMultiplayerGuest
-                  ? mpStrings.waitingHostToStartBtn
-                  : t.betting.ctaTop}
-              </span>
-              <span className="text-lg font-mono font-black">
-                {t.betting.ctaBottom} {formatMoney(betAmountKz)}
-              </span>
-            </motion.button>
+            {/* Botão de Disputa (visível apenas para o criador/líder da sala) */}
+            {isMultiplayerGuest ? (
+              <div
+                data-testid="guest-waiting-host-banner"
+                className="w-full py-3.5 px-3 rounded-xl game-subplate border border-amber-500/40 text-amber-200 flex flex-col items-center justify-center text-center gap-1"
+              >
+                <span className="text-[11px] uppercase tracking-wider font-extrabold text-amber-300 flex items-center gap-1.5">
+                  <span>⏳</span>
+                  <span>
+                    {mpStrings.waitingHostToStartBtn}
+                    {hostName ? ` (${hostName})` : ''}
+                  </span>
+                </span>
+                <span className="text-[10px] font-mono text-zinc-400">
+                  👑 {mpStrings.onlyHostCanStart}
+                </span>
+              </div>
+            ) : (
+              <motion.button
+                whileHover={{ scale: 1.015 }}
+                whileTap={{ scale: 0.985 }}
+                type="button"
+                onClick={onStartRound}
+                disabled={balanceKz < betAmountKz || Boolean(inputRangeError)}
+                className="w-full py-4 rounded-xl font-black text-base game-btn-gold flex flex-col items-center justify-center cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed px-2 text-center"
+              >
+                <span className="text-[11px] uppercase tracking-wider font-extrabold text-amber-950 flex items-center gap-1.5">
+                  <span>👑</span> {t.betting.ctaTop}
+                </span>
+                <span className="text-lg font-mono font-black">
+                  {t.betting.ctaBottom} {formatMoney(betAmountKz)}
+                </span>
+              </motion.button>
+            )}
           </motion.div>
         ) : isStarting ? (
           // Contagem Regressiva

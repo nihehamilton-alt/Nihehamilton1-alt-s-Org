@@ -77,6 +77,19 @@ export interface TelemetryInvestigationEntry {
   detectedAt: number;
   peakSpeedMps?: number;
   switchesPerSec?: number;
+  anomalyCount?: number;
+  consecutiveAnomalies?: number;
+  desyncSuspected?: boolean;
+}
+
+export interface RoomDesyncAlert {
+  competitorId: string;
+  competitorName: string;
+  reason: TelemetryAnomalyReason;
+  detectedAt: number;
+  raceRound: number;
+  anomalyCount: number;
+  reportedBy?: string;
 }
 
 export interface TelemetryAnomalyLog {

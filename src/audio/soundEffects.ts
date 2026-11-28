@@ -4,6 +4,7 @@
 class SoundEngine {
   private ctx: AudioContext | null = null;
   public enabled: boolean = true;
+  public bgmEnabled: boolean = true;
   public volume: number = 0.7; // 0.0 a 1.0
   private bgmInterval: number | null = null;
   private bgmStep: number = 0;
@@ -138,6 +139,13 @@ class SoundEngine {
       }
     }
     this.activeCelebrationNodes = [];
+  }
+
+  public setBgmEnabled(enabled: boolean) {
+    this.bgmEnabled = enabled;
+    if (!enabled) {
+      this.stopRaceBgm();
+    }
   }
 
   public setVolume(val: number) {
@@ -1248,7 +1256,7 @@ class SoundEngine {
   }
 
   private bgmTick() {
-    if (!this.isBgmActive || !this.enabled || !this.ctx || this.volume <= 0) return;
+    if (!this.isBgmActive || !this.enabled || !this.bgmEnabled || !this.ctx || this.volume <= 0) return;
     const now = this.ctx.currentTime;
     const step = this.bgmStep % 16;
 
@@ -1344,7 +1352,7 @@ class SoundEngine {
 
   // Inicia a música de fundo
   playRaceBgm() {
-    if (!this.enabled || this.isBgmActive || this.volume <= 0) return;
+    if (!this.enabled || !this.bgmEnabled || this.isBgmActive || this.volume <= 0) return;
     this.initContext();
     if (!this.ctx) return;
 

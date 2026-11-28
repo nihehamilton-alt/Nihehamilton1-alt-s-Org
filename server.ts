@@ -122,12 +122,23 @@ interface ServerRoom {
   pendingStart?: boolean;
   participants: RoomParticipant[];
   kickedIds: string[];
+  desyncAlerts?: RoomDesyncAlertServer[];
   lastResults?: {
     raceRound: number;
     betAmount: number;
     finishedAt: number;
     rankings: RoomStandingEntryServer[];
   };
+}
+
+interface RoomDesyncAlertServer {
+  competitorId: string;
+  competitorName: string;
+  reason: TelemetryAnomalyReason;
+  detectedAt: number;
+  raceRound: number;
+  anomalyCount: number;
+  reportedBy?: string;
 }
 
 interface ServerDatabase {
@@ -435,43 +446,48 @@ async function startServer() {
   };
 
   const resolveRoomHostAndLanes = (room: ServerRoom) => {
-    // Regra estrita: quem criou a sala (creatorId) é o único e exclusivo líder.
-    // Mesmo se minimizar o browser para enviar o link no WhatsApp/Instagram, nenhum convidado assume a liderança.
-    if (room.creatorId) {
-      room.hostId = room.creatorId;
+    // Regra estrita: quem criou ou entrou primeiro na sala (creatorId) é o líder exclusivo.
+    // Reconexões transitórias ou minimizar o ecrã nunca transferem a liderança para outro jogador.
+    if (room.participants.length === 0) {
+      if (room.accessMode === 'random') {
+        room.creatorId = undefined;
+        room.hostId = undefined;
+      } else if (room.creatorId) {
+        room.hostId = room.creatorId;
+      }
+      return;
     }
 
-    if (room.participants.length === 0) return;
-
-    if (!room.creatorId) {
+    if (room.creatorId) {
+      room.hostId = room.creatorId;
+    } else {
       const currentHost = room.hostId
         ? room.participants.find((p) => p.id === room.hostId)
         : undefined;
       if (room.accessMode === 'random') {
-        const eligibleNonInvite = room.participants.filter((p) => !p.joinedViaInvite);
-        const preferredPool = eligibleNonInvite.length > 0 ? eligibleNonInvite : room.participants;
-        const hasConnectedOther = preferredPool.some((p) => p.connected !== false);
-        if (
-          !currentHost ||
-          currentHost.joinedViaInvite ||
-          (currentHost.connected === false && hasConnectedOther)
-        ) {
-          const connectedPreferred = preferredPool.find((p) => p.connected !== false);
-          const existingFlagHost = preferredPool.find((p) => p.isHost);
-          room.hostId = connectedPreferred
-            ? connectedPreferred.id
-            : existingFlagHost
-            ? existingFlagHost.id
-            : preferredPool[0]?.id;
+        // No modo global, ancora o criador no primeiro participante elegível (nunca transfere por oscilação de socket)
+        if (currentHost && !currentHost.joinedViaInvite) {
+          room.creatorId = currentHost.id;
+          room.hostId = currentHost.id;
+        } else {
+          const nonInviteFirst = room.participants.find((p) => !p.joinedViaInvite);
+          const chosen = nonInviteFirst || room.participants[0];
+          if (chosen) {
+            room.creatorId = chosen.id;
+            room.hostId = chosen.id;
+          }
         }
       } else {
         // Em salas privadas por convite, um convidado que entrou por link nunca pode assumir a liderança
         if (currentHost?.joinedViaInvite) {
           room.hostId = undefined;
         }
-        if (!room.hostId) {
+        if (room.hostId && currentHost && !currentHost.joinedViaInvite) {
+          room.creatorId = room.hostId;
+        } else {
           const nonInviteOwner = room.participants.find((p) => !p.joinedViaInvite);
           if (nonInviteOwner) {
+            room.creatorId = nonInviteOwner.id;
             room.hostId = nonInviteOwner.id;
           }
         }
@@ -537,22 +553,26 @@ async function startServer() {
     const lastSet = lastPublicOpponents.get(playerId) || new Set<string>();
     const recentList = recentPublicOpponents.get(playerId) || [];
 
-    const candidates = Object.values(db.rooms)
-      .filter((r) => {
-        pruneRoomParticipants(r);
-        if ((r.accessMode || 'invite-only') !== 'random') return false;
-        if (Boolean(r.isDemo) !== Boolean(isDemoMode)) return false;
-        if (r.raceStatus !== 'idle') return false;
-        if (clampRoomBet(r.betAmount, 500) !== safeBet) return false;
-        if (excludeClean && r.code === excludeClean) return false;
-        if (Array.isArray(r.kickedIds) && r.kickedIds.includes(playerId)) return false;
-        if (r.participants.some((p) => p.id === playerId)) return false;
-        if (r.participants.length >= (r.maxPlayers || 5)) return false;
-        const connectedOthers = r.participants.filter((p) => p.connected !== false);
-        const hasLastRepeat = connectedOthers.some((p) => lastSet.has(p.id));
-        if (hasLastRepeat) return false;
-        return true;
-      })
+    const baseCandidates = Object.values(db.rooms).filter((r) => {
+      pruneRoomParticipants(r);
+      if ((r.accessMode || 'invite-only') !== 'random') return false;
+      if (Boolean(r.isDemo) !== Boolean(isDemoMode)) return false;
+      if (r.raceStatus !== 'idle') return false;
+      if (clampRoomBet(r.betAmount, 500) !== safeBet) return false;
+      if (excludeClean && r.code === excludeClean) return false;
+      if (Array.isArray(r.kickedIds) && r.kickedIds.includes(playerId)) return false;
+      if (r.participants.some((p) => p.id === playerId)) return false;
+      if (r.participants.length >= (r.maxPlayers || 5)) return false;
+      return true;
+    });
+
+    const freshCandidates = baseCandidates.filter((r) => {
+      const connectedOthers = r.participants.filter((p) => p.connected !== false);
+      return !connectedOthers.some((p) => lastSet.has(p.id));
+    });
+    const pool = freshCandidates.length > 0 ? freshCandidates : baseCandidates;
+
+    const candidates = pool
       .map((r) => {
         const connectedOthers = r.participants.filter((p) => p.connected !== false);
         const recentOverlap = connectedOthers.filter((p) => recentList.includes(p.id)).length;
@@ -564,10 +584,10 @@ async function startServer() {
         };
       })
       .sort((a, b) => {
-        if (a.recentOverlap !== b.recentOverlap) return a.recentOverlap - b.recentOverlap;
         const aHasHumans = a.connectedCount > 0 ? 1 : 0;
         const bHasHumans = b.connectedCount > 0 ? 1 : 0;
         if (aHasHumans !== bHasHumans) return bHasHumans - aHasHumans;
+        if (a.recentOverlap !== b.recentOverlap) return a.recentOverlap - b.recentOverlap;
         return a.jitter - b.jitter;
       });
 
@@ -588,6 +608,7 @@ async function startServer() {
         existing.participants.length === 0
       ) {
         existing.betAmount = safeBet;
+        existing.creatorId = playerId;
         existing.hostId = playerId;
         existing.hostName = hostDisplayName || 'Anfitrião';
         existing.updatedAt = Date.now();
@@ -603,6 +624,7 @@ async function startServer() {
       title: isDemoMode ? 'Arena Pública ao Vivo (Demo)' : 'Arena Pública ao Vivo (Real)',
       hostName: hostDisplayName || 'Anfitrião',
       hostId: playerId,
+      creatorId: playerId,
       maxPlayers: 5,
       betAmount: safeBet,
       fillWithBots: true,
@@ -867,6 +889,7 @@ async function startServer() {
     room.syncedRaceStartAt = syncedStartAt;
     room.raceStartAt = syncedStartAt;
     room.lastResults = undefined;
+    room.desyncAlerts = [];
     room.updatedAt = now;
 
     const ordered = [
@@ -921,6 +944,50 @@ async function startServer() {
       serverTime: now,
     });
     return { started: true, waitingParticipants: [] };
+  };
+
+  const VALID_TELEMETRY_REASONS = new Set<TelemetryAnomalyReason>([
+    'impossible-speed',
+    'lane-switch-flood',
+    'position-teleport',
+  ]);
+
+  const recordAndBroadcastDesyncAlert = (
+    room: ServerRoom,
+    alert: RoomDesyncAlertServer
+  ) => {
+    const activeRound = room.raceRound || 1;
+    if (!Array.isArray(room.desyncAlerts)) {
+      room.desyncAlerts = [];
+    }
+    const existingIdx = room.desyncAlerts.findIndex(
+      (entry) => entry.competitorId === alert.competitorId && entry.raceRound === activeRound
+    );
+    const normalizedAlert: RoomDesyncAlertServer = {
+      ...alert,
+      raceRound: activeRound,
+      anomalyCount: Math.max(1, Math.round(alert.anomalyCount || 1)),
+    };
+    if (existingIdx >= 0) {
+      const prev = room.desyncAlerts[existingIdx];
+      room.desyncAlerts[existingIdx] = {
+        ...prev,
+        ...normalizedAlert,
+        anomalyCount: Math.max(prev.anomalyCount, normalizedAlert.anomalyCount),
+        detectedAt: Math.max(prev.detectedAt, normalizedAlert.detectedAt),
+      };
+    } else {
+      room.desyncAlerts.push(normalizedAlert);
+    }
+
+    broadcastToRoom(room.code, {
+      type: 'room:desync-alert',
+      roomCode: room.code,
+      raceRound: activeRound,
+      alert: normalizedAlert,
+      desyncAlerts: room.desyncAlerts,
+      serverTime: Date.now(),
+    });
   };
 
   // Healthcheck do servidor
@@ -1604,10 +1671,15 @@ async function startServer() {
 
     const body = req.body as {
       playerId?: string;
+      raceRound?: number;
       progressDistance?: number;
       lane?: number;
+      targetLane?: number;
+      laneX?: number;
       action?: string;
       jumpY?: number;
+      stumbling?: boolean;
+      finished?: boolean;
       raceStatus?: 'idle' | 'starting' | 'running' | 'completed';
     };
 
@@ -1615,12 +1687,25 @@ async function startServer() {
     if (typeof body.playerId === 'string' && body.playerId.trim()) {
       const pid = body.playerId.trim();
       const participant = room.participants.find((p) => p.id === pid);
-      if (participant && !participant.isSpectating) {
+      if (
+        participant &&
+        !participant.isSpectating &&
+        (typeof body.raceRound !== 'number' || !room.raceRound || body.raceRound === room.raceRound)
+      ) {
+        if (room.raceStatus === 'starting' && now >= (room.syncedRaceStartAt || 0)) {
+          room.raceStatus = 'running';
+        }
         if (typeof body.progressDistance === 'number' && Number.isFinite(body.progressDistance)) {
           participant.progressDistance = Math.max(0, Math.min(100_000, body.progressDistance));
         }
         if (typeof body.lane === 'number' && Number.isFinite(body.lane)) {
           participant.lane = Math.max(0, Math.min(4, Math.round(body.lane)));
+        }
+        if (typeof body.targetLane === 'number' && Number.isFinite(body.targetLane)) {
+          participant.targetLane = Math.max(0, Math.min(4, Math.round(body.targetLane)));
+        }
+        if (typeof body.laneX === 'number' && Number.isFinite(body.laneX)) {
+          participant.laneX = Math.max(-200, Math.min(2000, body.laneX));
         }
         if (typeof body.action === 'string' && VALID_RACE_ACTIONS.has(body.action)) {
           participant.action = body.action;
@@ -1628,7 +1713,25 @@ async function startServer() {
         if (typeof body.jumpY === 'number' && Number.isFinite(body.jumpY)) {
           participant.jumpY = Math.max(0, Math.min(500, body.jumpY));
         }
+        if (typeof body.stumbling === 'boolean') participant.stumbling = body.stumbling;
+        if (typeof body.finished === 'boolean') participant.finished = body.finished;
         participant.lastSeenAt = now;
+
+        broadcastToRoom(room.code, {
+          type: 'room:race-sync',
+          roomCode: room.code,
+          raceRound: room.raceRound,
+          playerId: participant.id,
+          progressDistance: participant.progressDistance,
+          lane: participant.lane,
+          targetLane: participant.targetLane ?? participant.lane,
+          laneX: participant.laneX,
+          action: participant.action,
+          jumpY: participant.jumpY,
+          stumbling: Boolean(participant.stumbling),
+          finished: Boolean(participant.finished),
+          serverTime: now,
+        });
       }
     }
 
@@ -1881,6 +1984,17 @@ async function startServer() {
         if (participant && participant.sessionStatus !== 'investigating') {
           participant.sessionStatus = 'investigating';
         }
+        if (summary.totalAnomalies >= 2 && (room.raceStatus === 'running' || room.raceStatus === 'starting')) {
+          recordAndBroadcastDesyncAlert(room, {
+            competitorId: cleanLog.competitorId,
+            competitorName: participant?.name || cleanLog.competitorName || cleanLog.competitorId.slice(0, 10),
+            reason: cleanLog.reason,
+            detectedAt: cleanLog.detectedAt,
+            raceRound: room.raceRound || 1,
+            anomalyCount: summary.totalAnomalies,
+            reportedBy: cleanLog.reporterId,
+          });
+        }
       }
     }
 
@@ -2061,6 +2175,11 @@ async function startServer() {
           stumbling?: boolean;
           finished?: boolean;
           text?: string;
+          competitorId?: string;
+          competitorName?: string;
+          reason?: TelemetryAnomalyReason;
+          detectedAt?: number;
+          anomalyCount?: number;
           bots?: Array<{
             id: string;
             name: string;
@@ -2112,6 +2231,8 @@ async function startServer() {
             if (oldRoom) {
               recordPublicMatchOpponents(oldRoom);
               oldRoom.participants = oldRoom.participants.filter((p) => p.id !== playerId);
+              if (oldRoom.creatorId === playerId) oldRoom.creatorId = undefined;
+              if (oldRoom.hostId === playerId) oldRoom.hostId = undefined;
               if (oldRoom.participants.length === 0) {
                 oldRoom.raceStatus = 'idle';
                 oldRoom.pendingStart = false;
@@ -2144,6 +2265,7 @@ async function startServer() {
 
           pruneRoomParticipants(nextRoom);
           if (nextRoom.participants.length === 0) {
+            nextRoom.creatorId = playerId;
             nextRoom.hostId = playerId;
             nextRoom.hostName = (msg.player?.name || msg.hostName || 'Corredor').trim();
           }
@@ -2201,7 +2323,8 @@ async function startServer() {
           let code: string;
           const explicitCreator =
             msg.isRoomCreator === true || Boolean(msg.creatorId && msg.creatorId.trim() === playerId);
-          if (msg.autoMatch) {
+          const requestedCode = typeof msg.roomCode === 'string' ? msg.roomCode.trim().toUpperCase() : '';
+          if (msg.autoMatch && (!requestedCode || requestedCode === 'ARENA-AO-VIVO')) {
             room = findOrCreatePublicRoom(
               Boolean(msg.isDemo ?? true),
               playerId,
@@ -2211,9 +2334,9 @@ async function startServer() {
             );
             code = room.code;
           } else {
-            code = msg.roomCode.trim().toUpperCase();
+            code = requestedCode || 'ARENA';
             room = db.rooms[code];
-            const isCreatorOnCreate = explicitCreator || !msg.viaInvite;
+            const isCreatorOnCreate = explicitCreator || (msg.autoMatch ? true : !msg.viaInvite);
             if (!room) {
               room = {
                 code,
@@ -2270,7 +2393,7 @@ async function startServer() {
               explicitCreator ||
               Boolean(room.creatorId && room.creatorId === playerId) ||
               Boolean(room.hostId && room.hostId === playerId) ||
-              (!room.creatorId && !room.hostId && room.participants.length === 0 && !msg.viaInvite);
+              (!room.creatorId && !room.hostId && room.participants.length === 0 && !isGuestViaInvite);
             if (room.accessMode === 'invite-only' && msg.viaInvite === false && !msg.autoMatch && !isCreator) {
               sendRoomWs(ws, { type: 'room:error', code: 'INVITE_ONLY', roomCode: code });
               return;
@@ -2279,9 +2402,11 @@ async function startServer() {
               sendRoomWs(ws, { type: 'room:error', code: 'ROOM_FULL', roomCode: code });
               return;
             }
-            if (isCreator) {
+            if (isCreator && !room.creatorId) {
+              room.creatorId = playerId;
               room.hostId = playerId;
-              if (!room.creatorId && !msg.autoMatch) room.creatorId = playerId;
+            } else if (isCreator && room.creatorId === playerId) {
+              room.hostId = playerId;
             }
             const joinedMidRace = room.raceStatus === 'running' || room.raceStatus === 'starting';
             room.participants.push({
@@ -2349,8 +2474,16 @@ async function startServer() {
           const ref = socketToRoomClient.get(ws);
           if (ref) {
             const leftRoom = db.rooms[ref.roomCode];
-            if (leftRoom && leftRoom.creatorId !== ref.playerId) {
+            if (leftRoom) {
               leftRoom.participants = leftRoom.participants.filter((p) => p.id !== ref.playerId);
+              if (leftRoom.creatorId === ref.playerId) leftRoom.creatorId = undefined;
+              if (leftRoom.hostId === ref.playerId) leftRoom.hostId = undefined;
+              if (leftRoom.participants.length === 0) {
+                leftRoom.raceStatus = 'idle';
+                leftRoom.pendingStart = false;
+                leftRoom.raceStartAt = null;
+                leftRoom.syncedRaceStartAt = null;
+              }
               resolveRoomHostAndLanes(leftRoom);
               leftRoom.updatedAt = Date.now();
               saveDb(db);
@@ -2533,6 +2666,39 @@ async function startServer() {
           return;
         }
 
+        if (msg.type === 'room:desync-alert' && participant) {
+          if (typeof msg.raceRound === 'number' && room.raceRound && msg.raceRound !== room.raceRound) {
+            return;
+          }
+          const targetId = typeof msg.competitorId === 'string' ? msg.competitorId.trim() : '';
+          if (!targetId) return;
+          const targetParticipant = room.participants.find((p) => p.id === targetId);
+          if (!targetParticipant) return;
+          const reason: TelemetryAnomalyReason =
+            msg.reason && VALID_TELEMETRY_REASONS.has(msg.reason)
+              ? msg.reason
+              : 'impossible-speed';
+          if (targetParticipant.sessionStatus !== 'investigating') {
+            targetParticipant.sessionStatus = 'investigating';
+          }
+          recordAndBroadcastDesyncAlert(room, {
+            competitorId: targetParticipant.id,
+            competitorName: targetParticipant.name || msg.competitorName || targetParticipant.id.slice(0, 10),
+            reason,
+            detectedAt:
+              typeof msg.detectedAt === 'number' && Number.isFinite(msg.detectedAt)
+                ? msg.detectedAt
+                : Date.now(),
+            raceRound: room.raceRound || 1,
+            anomalyCount:
+              typeof msg.anomalyCount === 'number' && Number.isFinite(msg.anomalyCount)
+                ? Math.max(2, Math.round(msg.anomalyCount))
+                : 2,
+            reportedBy: participant.id,
+          });
+          return;
+        }
+
         if (msg.type === 'room:race-finish' && participant) {
           if (participant.isSpectating) {
             return;
@@ -2604,6 +2770,7 @@ async function startServer() {
             room.pendingStart = false;
             room.raceStartAt = null;
             room.syncedRaceStartAt = null;
+            room.desyncAlerts = [];
             room.participants.forEach((p) => {
               p.progressDistance = 0;
               p.finished = false;

@@ -44,6 +44,9 @@ interface CompetitorTelemetryTracker {
   lastTargetLane: number;
   lastLaneX: number;
   consecutiveSpeedSpikes: number;
+  anomalyCount: number;
+  consecutiveAnomalies: number;
+  desyncAlerted: boolean;
   laneSwitchTimestamps: number[];
   sessionStatus: CompetitorSessionStatus;
   investigation?: TelemetryInvestigationEntry;
@@ -53,6 +56,8 @@ interface CompetitorTelemetryTracker {
 export interface TelemetryValidationResult {
   sessionStatus: CompetitorSessionStatus;
   newlyFlagged: boolean;
+  desyncSuspected: boolean;
+  newlyDesynced: boolean;
   investigation?: TelemetryInvestigationEntry;
   loggedAnomaly?: TelemetryAnomalyLog;
 }
@@ -140,6 +145,9 @@ export class ClientTelemetryValidator {
         tracker.lastTimestampMs = now;
         tracker.lastDistance = 0;
         tracker.consecutiveSpeedSpikes = 0;
+        tracker.anomalyCount = 0;
+        tracker.consecutiveAnomalies = 0;
+        tracker.desyncAlerted = false;
         tracker.laneSwitchTimestamps = [];
       }
     }
@@ -154,6 +162,16 @@ export class ClientTelemetryValidator {
     for (const [id, tracker] of this.trackers.entries()) {
       if (tracker.sessionStatus === 'investigating' && tracker.investigation) {
         out[id] = tracker.investigation;
+      }
+    }
+    return out;
+  }
+
+  getDesyncAlerts(): TelemetryInvestigationEntry[] {
+    const out: TelemetryInvestigationEntry[] = [];
+    for (const tracker of this.trackers.values()) {
+      if (tracker.desyncAlerted && tracker.investigation) {
+        out.push(tracker.investigation);
       }
     }
     return out;
@@ -178,11 +196,19 @@ export class ClientTelemetryValidator {
         lastTargetLane: snapshot.targetLane,
         lastLaneX: snapshot.laneX,
         consecutiveSpeedSpikes: 0,
+        anomalyCount: 0,
+        consecutiveAnomalies: 0,
+        desyncAlerted: false,
         laneSwitchTimestamps: [],
         sessionStatus: 'normal',
         lastLoggedAnomalyAt: 0,
       });
-      return { sessionStatus: 'normal', newlyFlagged: false };
+      return {
+        sessionStatus: 'normal',
+        newlyFlagged: false,
+        desyncSuspected: false,
+        newlyDesynced: false,
+      };
     }
 
     existing.competitorName = competitorName || existing.competitorName;
@@ -218,6 +244,7 @@ export class ClientTelemetryValidator {
 
     // 2. Verificação de velocidade em janela temporal estável (>= 140ms para ignorar packet bunching)
     const windowMs = nowMs - existing.anchorTimestampMs;
+    let evaluatedCleanVelocityWindow = false;
     if (!anomalyReason && windowMs >= VELOCITY_WINDOW_MIN_MS) {
       const windowDist = snapshot.progressDistance - existing.anchorDistance;
       const windowSpeedMps = windowDist / (windowMs / 1000);
@@ -233,6 +260,7 @@ export class ClientTelemetryValidator {
         }
       } else {
         existing.consecutiveSpeedSpikes = 0;
+        evaluatedCleanVelocityWindow = true;
       }
 
       existing.anchorTimestampMs = nowMs;
@@ -267,6 +295,13 @@ export class ClientTelemetryValidator {
 
     if (anomalyReason) {
       const wasAlreadyInvestigating = existing.sessionStatus === 'investigating';
+      const wasAlreadyDesynced = existing.desyncAlerted;
+      existing.anomalyCount += 1;
+      existing.consecutiveAnomalies += 1;
+      if (existing.consecutiveAnomalies >= 2 || existing.anomalyCount >= 3) {
+        existing.desyncAlerted = true;
+      }
+
       const entry: TelemetryInvestigationEntry = {
         competitorId,
         competitorName: existing.competitorName,
@@ -275,6 +310,9 @@ export class ClientTelemetryValidator {
         detectedAt: nowMs,
         peakSpeedMps: peakSpeedMps ?? existing.investigation?.peakSpeedMps,
         switchesPerSec: switchesPerSec ?? existing.investigation?.switchesPerSec,
+        anomalyCount: existing.anomalyCount,
+        consecutiveAnomalies: existing.consecutiveAnomalies,
+        desyncSuspected: existing.desyncAlerted,
       };
       existing.sessionStatus = 'investigating';
       existing.investigation = entry;
@@ -310,20 +348,33 @@ export class ClientTelemetryValidator {
       return {
         sessionStatus: 'investigating',
         newlyFlagged: !wasAlreadyInvestigating,
+        desyncSuspected: existing.desyncAlerted,
+        newlyDesynced: !wasAlreadyDesynced && existing.desyncAlerted,
         investigation: entry,
         loggedAnomaly,
       };
+    }
+
+    if (evaluatedCleanVelocityWindow) {
+      existing.consecutiveAnomalies = 0;
     }
 
     if (existing.sessionStatus === 'investigating') {
       return {
         sessionStatus: 'investigating',
         newlyFlagged: false,
+        desyncSuspected: existing.desyncAlerted,
+        newlyDesynced: false,
         investigation: existing.investigation,
       };
     }
 
-    return { sessionStatus: 'normal', newlyFlagged: false };
+    return {
+      sessionStatus: 'normal',
+      newlyFlagged: false,
+      desyncSuspected: existing.desyncAlerted,
+      newlyDesynced: false,
+    };
   }
 
   private enqueueAnomalyLog(log: TelemetryAnomalyLog): void {

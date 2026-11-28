@@ -1,7 +1,7 @@
 import React from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { Volume1, Volume2, VolumeX } from 'lucide-react';
-import { GameStatus, ViewMode, TimeMode } from '../types/game';
+import { AlertTriangle, Flame, Music, Volume1, Volume2, VolumeX, X } from 'lucide-react';
+import { GameStatus, RoomDesyncAlert, TelemetryAnomalyReason, TimeMode, ViewMode } from '../types/game';
 import { useI18n } from '../contexts/I18nContext';
 import { TOTAL_GAME_TIME_SECONDS, HARD_MODE_START_SECONDS } from '../game/constants';
 import { sounds } from '../audio/soundEffects';
@@ -11,6 +11,8 @@ interface GameHeaderProps {
   elapsedSeconds: number;
   soundEnabled: boolean;
   onToggleSound: () => void;
+  bgmEnabled?: boolean;
+  onToggleBgm?: () => void;
   volume: number;
   onVolumeChange: (vol: number) => void;
   onOpenProvablyFair: () => void;
@@ -33,6 +35,9 @@ interface GameHeaderProps {
   isSpectating?: boolean;
   onSpectate?: () => void;
   onOpenSpectatorOverview?: () => void;
+  top3Streak?: number;
+  desyncAlerts?: RoomDesyncAlert[];
+  onDismissDesyncAlert?: () => void;
 }
 
 export const GameHeader: React.FC<GameHeaderProps> = ({
@@ -40,6 +45,8 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
   elapsedSeconds,
   soundEnabled,
   onToggleSound,
+  bgmEnabled = true,
+  onToggleBgm,
   volume,
   onVolumeChange,
   onOpenProvablyFair,
@@ -62,14 +69,54 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
   isSpectating = false,
   onSpectate,
   onOpenSpectatorOverview,
+  top3Streak = 0,
+  desyncAlerts = [],
+  onDismissDesyncAlert,
 }) => {
   const [showVolumeSlider, setShowVolumeSlider] = React.useState<boolean>(false);
   const volumePopoverRef = React.useRef<HTMLDivElement | null>(null);
+  const prevStreakRef = React.useRef<number>(top3Streak);
+  const [streakPulseKey, setStreakPulseKey] = React.useState<number>(0);
+  const [newlyFilledIdx, setNewlyFilledIdx] = React.useState<number | null>(null);
   const shouldReduceMotion = useReducedMotion();
   const { t, lang, langMeta, currencyMeta, geoInfo, openModal } = useI18n();
   const remaining = Math.max(0, TOTAL_GAME_TIME_SECONDS - Math.floor(elapsedSeconds));
   const isHardMode = elapsedSeconds >= HARD_MODE_START_SECONDS;
   const langCode = (lang || 'pt').slice(0, 2);
+
+  React.useEffect(() => {
+    const prev = prevStreakRef.current;
+    if (top3Streak > prev) {
+      setStreakPulseKey((k) => k + 1);
+      setNewlyFilledIdx(Math.min(4, Math.max(0, top3Streak - 1)));
+      const clearTimer = setTimeout(() => {
+        setNewlyFilledIdx(null);
+      }, 1100);
+      prevStreakRef.current = top3Streak;
+      return () => clearTimeout(clearTimer);
+    }
+    prevStreakRef.current = top3Streak;
+    return undefined;
+  }, [top3Streak]);
+
+  const STREAK_SEGMENTS = 5;
+  const filledSegments = Math.max(0, Math.min(STREAK_SEGMENTS, top3Streak));
+  const streakLabel =
+    langCode === 'pt'
+      ? 'Série Top 3'
+      : langCode === 'es'
+      ? 'Racha Top 3'
+      : langCode === 'fr'
+      ? 'Série Top 3'
+      : 'Top 3 Streak';
+  const streakTooltip =
+    langCode === 'pt'
+      ? `Série consecutiva no pódio (Top 3): ${top3Streak} corrida(s)`
+      : langCode === 'es'
+      ? `Racha consecutiva en el podio (Top 3): ${top3Streak} carrera(s)`
+      : langCode === 'fr'
+      ? `Série consécutive sur le podium (Top 3) : ${top3Streak} course(s)`
+      : `Consecutive podium finishes (Top 3): ${top3Streak} race(s)`;
   const spectateLabel =
     langCode === 'pt'
       ? 'Assistir'
@@ -130,6 +177,77 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
     : langCode === 'fr'
     ? 'Effets sonores coupés — cliquer pour activer'
     : 'Race sound effects muted — click to unmute';
+  const isBgmPlayable = bgmEnabled && isSfxActive;
+  const bgmOnLabel = 'BGM On';
+  const bgmOffLabel = 'BGM Off';
+  const bgmToggleTooltip = bgmEnabled
+    ? !isSfxActive
+      ? langCode === 'pt'
+        ? 'BGM ativado (áudio geral silenciado) — clique para desligar a música de fundo'
+        : langCode === 'es'
+        ? 'BGM activado (audio general silenciado) — clic para apagar la música de fondo'
+        : langCode === 'fr'
+        ? 'BGM activé (son général coupé) — cliquer pour couper la musique de fond'
+        : 'Race BGM enabled (master sound muted) — click to turn off background music'
+      : langCode === 'pt'
+      ? 'Música de fundo da corrida (BGM) ativa — clique para desligar e ouvir a sua própria música'
+      : langCode === 'es'
+      ? 'Música de fondo (BGM) activa — clic para apagar y escuchar tu propia música'
+      : langCode === 'fr'
+      ? 'Musique de fond (BGM) active — cliquer pour couper et écouter votre propre musique'
+      : 'Background race music (BGM) active — click to turn off and play your own music'
+    : langCode === 'pt'
+    ? 'Música de fundo da corrida (BGM) desligada — clique para ativar'
+    : langCode === 'es'
+    ? 'Música de fondo (BGM) apagada — clic para activar'
+    : langCode === 'fr'
+    ? 'Musique de fond (BGM) coupée — cliquer pour activer'
+    : 'Background race music (BGM) off — click to turn on';
+
+  const formatAnomalyReason = (reason: TelemetryAnomalyReason): string => {
+    if (reason === 'impossible-speed') {
+      return langCode === 'pt'
+        ? 'Velocidade impossível'
+        : langCode === 'es'
+        ? 'Velocidad imposible'
+        : langCode === 'fr'
+        ? 'Vitesse impossible'
+        : 'Impossible speed';
+    }
+    if (reason === 'lane-switch-flood') {
+      return langCode === 'pt'
+        ? 'Troca de faixa excessiva'
+        : langCode === 'es'
+        ? 'Cambio de carril excesivo'
+        : langCode === 'fr'
+        ? 'Changements de voie excessifs'
+        : 'Lane switch flood';
+    }
+    return langCode === 'pt'
+      ? 'Teleporte de posição'
+      : langCode === 'es'
+      ? 'Teletransporte de posición'
+      : langCode === 'fr'
+      ? 'Téléportation de position'
+      : 'Position teleport';
+  };
+
+  const desyncBannerDetail = React.useMemo(() => {
+    if (!desyncAlerts || desyncAlerts.length === 0) return null;
+    const names = desyncAlerts.map((a) => a.competitorName).join(', ');
+    const latest = desyncAlerts[desyncAlerts.length - 1];
+    const reasonText = formatAnomalyReason(latest.reason);
+    if (langCode === 'pt') {
+      return `Movimento consistentemente impossível detetado na sala (${names} · ${reasonText})`;
+    }
+    if (langCode === 'es') {
+      return `Movimiento consistentemente imposible detectado en la sala (${names} · ${reasonText})`;
+    }
+    if (langCode === 'fr') {
+      return `Mouvement systématiquement impossible détecté dans la salle (${names} · ${reasonText})`;
+    }
+    return `Consistently impossible movement detected in room (${names} · ${reasonText})`;
+  }, [desyncAlerts, langCode]);
 
   const rttDisplay = React.useMemo(() => {
     const langCode = (lang || 'pt').slice(0, 2);
@@ -385,6 +503,127 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
               🪙 {coinsCollected}
             </span>
           </div>
+
+          <div className="h-6 w-px bg-white/10" />
+
+          {/* Top 3 Streak Segmented Indicator */}
+          <motion.div
+            data-testid="header-top3-streak"
+            data-streak-count={top3Streak}
+            animate={
+              newlyFilledIdx !== null && !shouldReduceMotion
+                ? { scale: [1, 1.08, 1] }
+                : { scale: 1 }
+            }
+            transition={{ duration: 0.42, ease: 'easeOut' }}
+            className="flex flex-col items-start gap-1"
+            title={streakTooltip}
+            aria-label={streakTooltip}
+          >
+            <div className="flex items-center justify-between gap-1.5 w-full leading-none">
+              <span className="text-[9px] uppercase font-bold text-orange-400/90 flex items-center gap-0.5">
+                <Flame
+                  className={`w-2.5 h-2.5 ${
+                    top3Streak > 0 ? 'text-orange-400 fill-orange-400/80' : 'text-zinc-500'
+                  }`}
+                  strokeWidth={2.4}
+                />
+                <span>{streakLabel}</span>
+              </span>
+              <motion.span
+                key={`streak-num-${top3Streak}`}
+                initial={
+                  streakPulseKey > 0 && !shouldReduceMotion
+                    ? { scale: 1.35, color: '#fde047' }
+                    : false
+                }
+                animate={{
+                  scale: 1,
+                  color: top3Streak > 0 ? '#fdba74' : '#71717a',
+                }}
+                transition={{ duration: 0.3 }}
+                className="text-[11px] font-black tabular-nums leading-none"
+              >
+                {top3Streak}x
+              </motion.span>
+            </div>
+
+            <div
+              className="flex items-center gap-1"
+              role="progressbar"
+              aria-label={streakLabel}
+              aria-valuemin={0}
+              aria-valuemax={STREAK_SEGMENTS}
+              aria-valuenow={filledSegments}
+              aria-valuetext={`${top3Streak}x`}
+            >
+              {Array.from({ length: STREAK_SEGMENTS }).map((_, idx) => {
+                const isFilled = idx < filledSegments;
+                const isJustFilled = idx === newlyFilledIdx && streakPulseKey > 0;
+                const isMaxed = top3Streak >= STREAK_SEGMENTS;
+                return (
+                  <div
+                    key={idx}
+                    data-testid={`streak-segment-${idx}`}
+                    data-filled={isFilled ? 'true' : 'false'}
+                    className={`relative w-3.5 h-1.5 rounded-full overflow-hidden border transition-colors duration-300 ${
+                      isFilled
+                        ? isMaxed
+                          ? 'bg-amber-950/80 border-amber-400/70 shadow-[0_0_8px_rgba(251,191,36,0.45)]'
+                          : 'bg-orange-950/70 border-orange-400/60 shadow-[0_0_6px_rgba(249,115,22,0.35)]'
+                        : 'bg-zinc-900/95 border-white/10'
+                    }`}
+                  >
+                    <AnimatePresence initial={false}>
+                      {isFilled && (
+                        <motion.div
+                          key={`fill-${idx}`}
+                          initial={
+                            shouldReduceMotion
+                              ? { opacity: 0 }
+                              : isJustFilled
+                              ? { scaleX: 0, opacity: 0.4 }
+                              : { scaleX: 1, opacity: 1 }
+                          }
+                          animate={{
+                            scaleX: 1,
+                            opacity: 1,
+                          }}
+                          exit={
+                            shouldReduceMotion
+                              ? { opacity: 0 }
+                              : { scaleX: 0, opacity: 0 }
+                          }
+                          transition={
+                            shouldReduceMotion
+                              ? { duration: 0.1 }
+                              : {
+                                  duration: isJustFilled ? 0.42 : 0.22,
+                                  ease: [0.22, 1, 0.36, 1],
+                                }
+                          }
+                          className={`w-full h-full origin-left rounded-full ${
+                            isMaxed
+                              ? 'bg-gradient-to-r from-amber-400 via-yellow-300 to-orange-400'
+                              : 'bg-gradient-to-r from-orange-500 via-amber-400 to-yellow-300'
+                          }`}
+                        />
+                      )}
+                    </AnimatePresence>
+                    {isJustFilled && !shouldReduceMotion && (
+                      <motion.div
+                        key={`flash-${streakPulseKey}`}
+                        initial={{ opacity: 0.9, scale: 1 }}
+                        animate={{ opacity: 0, scale: 1.4 }}
+                        transition={{ duration: 0.65, ease: 'easeOut' }}
+                        className="pointer-events-none absolute inset-0 rounded-full bg-yellow-200/80"
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </motion.div>
 
           {isDemo && status !== 'running' && status !== 'starting' && (
             <>
@@ -729,6 +968,64 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
             })()}
           </div>
 
+          {onToggleBgm && (
+            <motion.button
+              type="button"
+              data-testid="bgm-toggle-button"
+              data-bgm-state={bgmEnabled ? 'active' : 'off'}
+              onClick={() => {
+                if (!bgmEnabled) {
+                  sounds.unlockAudio();
+                }
+                onToggleBgm();
+              }}
+              whileTap={shouldReduceMotion ? undefined : { scale: 0.94 }}
+              animate={{
+                backgroundColor: bgmEnabled
+                  ? isBgmPlayable
+                    ? 'rgba(139, 92, 246, 0.22)'
+                    : 'rgba(139, 92, 246, 0.12)'
+                  : 'rgba(39, 39, 42, 0.8)',
+                borderColor: bgmEnabled
+                  ? isBgmPlayable
+                    ? 'rgba(167, 139, 250, 0.6)'
+                    : 'rgba(167, 139, 250, 0.35)'
+                  : 'rgba(113, 113, 122, 0.45)',
+              }}
+              transition={{ duration: shouldReduceMotion ? 0.05 : 0.22, ease: 'easeOut' }}
+              aria-pressed={bgmEnabled}
+              aria-label={bgmToggleTooltip}
+              title={bgmToggleTooltip}
+              className={`px-2.5 h-8 rounded-xl text-[11px] font-bold flex items-center gap-1.5 cursor-pointer border transition-colors duration-200 whitespace-nowrap shrink-0 ${
+                bgmEnabled
+                  ? 'hover:bg-violet-500/30 text-violet-200 shadow-[0_0_12px_rgba(139,92,246,0.22)]'
+                  : 'hover:bg-zinc-700/80 text-zinc-400'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full shrink-0 transition-colors ${
+                  bgmEnabled
+                    ? isBgmPlayable
+                      ? 'bg-violet-400 animate-pulse shadow-[0_0_6px_rgba(167,139,250,0.85)]'
+                      : 'bg-violet-400/55'
+                    : 'bg-zinc-500'
+                }`}
+              />
+              <span className="relative inline-flex items-center justify-center shrink-0">
+                <Music className="w-3.5 h-3.5 shrink-0" strokeWidth={2.3} />
+                {!bgmEnabled && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute w-4 h-[1.75px] bg-rose-400 rotate-[-45deg] rounded-full shadow-[0_0_2px_rgba(0,0,0,0.8)]"
+                  />
+                )}
+              </span>
+              <span className="font-mono uppercase tracking-tight text-[10px]">
+                {bgmEnabled ? bgmOnLabel : bgmOffLabel}
+              </span>
+            </motion.button>
+          )}
+
           <button
             type="button"
             onClick={onOpenProvablyFair}
@@ -749,6 +1046,79 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Room-Wide Flashing Suspected Desync Warning */}
+      <AnimatePresence>
+        {desyncAlerts.length > 0 && desyncBannerDetail && (
+          <motion.div
+            key="header-desync-warning"
+            data-testid="header-desync-warning"
+            role="alert"
+            aria-live="assertive"
+            initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: -8, scale: 0.98 }}
+            animate={
+              shouldReduceMotion
+                ? { opacity: 1 }
+                : {
+                    opacity: [1, 0.78, 1],
+                    y: 0,
+                    scale: 1,
+                    borderColor: [
+                      'rgba(244, 63, 94, 0.88)',
+                      'rgba(251, 191, 36, 0.92)',
+                      'rgba(244, 63, 94, 0.88)',
+                    ],
+                    boxShadow: [
+                      '0 0 18px rgba(244, 63, 94, 0.35)',
+                      '0 0 24px rgba(251, 191, 36, 0.45)',
+                      '0 0 18px rgba(244, 63, 94, 0.35)',
+                    ],
+                  }
+            }
+            exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.98 }}
+            transition={
+              shouldReduceMotion
+                ? { duration: 0.12 }
+                : {
+                    y: { duration: 0.22, ease: 'easeOut' },
+                    scale: { duration: 0.22, ease: 'easeOut' },
+                    opacity: { duration: 1.05, repeat: Infinity, ease: 'easeInOut' },
+                    borderColor: { duration: 1.05, repeat: Infinity, ease: 'easeInOut' },
+                    boxShadow: { duration: 1.05, repeat: Infinity, ease: 'easeInOut' },
+                  }
+            }
+            className="max-w-6xl mx-auto w-full rounded-xl border bg-gradient-to-r from-rose-950/90 via-red-950/85 to-amber-950/85 px-3 py-2 flex items-center justify-between gap-2.5 text-xs"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="w-7 h-7 rounded-lg bg-rose-500/25 border border-rose-400/60 flex items-center justify-center shrink-0">
+                <AlertTriangle
+                  className={`w-4 h-4 text-amber-300 ${shouldReduceMotion ? '' : 'animate-pulse'}`}
+                  strokeWidth={2.4}
+                />
+              </span>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
+                <span className="px-2 py-0.5 rounded-md bg-rose-500/30 border border-rose-400/60 text-rose-100 font-black uppercase tracking-wider text-[10px] shrink-0">
+                  Suspected desync
+                </span>
+                <span className="text-amber-100 font-semibold truncate sm:whitespace-normal">
+                  {desyncBannerDetail}
+                </span>
+              </div>
+            </div>
+
+            {onDismissDesyncAlert && (
+              <button
+                type="button"
+                onClick={onDismissDesyncAlert}
+                aria-label="Dismiss suspected desync alert"
+                className="w-6 h-6 rounded-lg bg-white/10 hover:bg-white/20 text-zinc-200 flex items-center justify-center shrink-0 cursor-pointer transition-colors"
+              >
+                <X className="w-3.5 h-3.5" strokeWidth={2.4} />
+              </button>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </header>
   );
 };

@@ -153,7 +153,6 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   const [activeTab, setActiveTab] = useState<'arena' | 'create' | 'scan'>('arena');
   const [copied, setCopied] = useState<boolean>(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
-  const [, setCountdownToAutoBot] = useState<number>(10);
   const [showQrModal, setShowQrModal] = useState<boolean>(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [confirmDeleteRoom, setConfirmDeleteRoom] = useState<boolean>(false);
@@ -399,20 +398,6 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
       cancelAnimationFrame(rafId);
     };
   }, [cameraActive, parseAndJoinInput]);
-
-  useEffect(() => {
-    if (!canControlRoom || competitors.length >= maxPlayers || !roomConfig.fillWithBots) return;
-    const interval = setInterval(() => {
-      setCountdownToAutoBot((prev) => {
-        if (prev <= 1) {
-          onAddFriendSimulation();
-          return 10;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [canControlRoom, competitors.length, maxPlayers, roomConfig.fillWithBots, onAddFriendSimulation]);
 
   const torneiras = calculateThreeTorneiras(roomConfig.betAmount, Math.max(2, competitors.length));
 
@@ -1025,14 +1010,16 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                     </div>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={onAddFriendSimulation}
-                    disabled={competitors.length >= maxPlayers}
-                    className="text-[11px] font-mono font-bold text-amber-400 hover:text-amber-300 underline cursor-pointer disabled:opacity-30 disabled:no-underline"
-                  >
-                    {t.lobby.simulateFriend}
-                  </button>
+                  {!serverConnected && (
+                    <button
+                      type="button"
+                      onClick={onAddFriendSimulation}
+                      disabled={competitors.length >= maxPlayers}
+                      className="text-[11px] font-mono font-bold text-amber-400 hover:text-amber-300 underline cursor-pointer disabled:opacity-30 disabled:no-underline"
+                    >
+                      {t.lobby.simulateFriend}
+                    </button>
+                  )}
                 </div>
               ) : (
                 <span className="text-[10px] font-mono text-amber-300/85">
@@ -1230,7 +1217,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                   );
                 }
 
-                return canControlRoom ? (
+                return canControlRoom && !serverConnected ? (
                   <button
                     key={`empty-${idx}`}
                     type="button"
@@ -1552,22 +1539,36 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             </div>
           )}
 
-          <button
-            type="button"
-            disabled={
-              competitors.length < 2 ||
-              !canControlRoom ||
-              Boolean(arenaBetError) ||
-              serverRaceStatus === 'running' ||
-              serverRaceStatus === 'starting'
-            }
-            onClick={onStartRace}
-            className="w-full py-4 rounded-2xl game-btn-gold text-zinc-950 font-black text-base uppercase tracking-wider cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed active:scale-[0.99]"
-          >
-            {!canControlRoom
-              ? mpStrings.waitingHostToStartBtn
-              : `${t.lobby.startArenaBtn} (${competitors.length}/${maxPlayers})`}
-          </button>
+          {canControlRoom ? (
+            <button
+              type="button"
+              disabled={
+                competitors.length < 2 ||
+                Boolean(arenaBetError) ||
+                serverRaceStatus === 'running' ||
+                serverRaceStatus === 'starting'
+              }
+              onClick={onStartRace}
+              className="w-full py-4 rounded-2xl game-btn-gold text-zinc-950 font-black text-base uppercase tracking-wider cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed active:scale-[0.99]"
+            >
+              {`${t.lobby.startArenaBtn} (${competitors.length}/${maxPlayers})`}
+            </button>
+          ) : (
+            <div
+              data-testid="lobby-waiting-host-banner"
+              className="w-full py-3.5 px-4 rounded-2xl game-subplate border border-amber-500/40 text-amber-200 flex flex-col items-center justify-center text-center gap-1"
+            >
+              <span className="text-xs font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                <span>⏳</span>
+                <span>
+                  {mpStrings.waitingHostToStartBtn} ({roomConfig.hostName})
+                </span>
+              </span>
+              <span className="text-[10px] font-mono text-zinc-400">
+                👑 {mpStrings.onlyHostCanStart}
+              </span>
+            </div>
+          )}
         </div>
       )}
 
