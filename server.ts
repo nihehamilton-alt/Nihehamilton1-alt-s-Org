@@ -49,6 +49,7 @@ interface RoomParticipant {
   betAmount?: number;
   sessionStatus?: 'normal' | 'investigating';
   isSpectating?: boolean;
+  joinedViaInvite?: boolean;
 }
 
 type TelemetryAnomalyReason = 'impossible-speed' | 'lane-switch-flood' | 'position-teleport';
@@ -446,15 +447,34 @@ async function startServer() {
       const currentHost = room.hostId
         ? room.participants.find((p) => p.id === room.hostId)
         : undefined;
-      const hasConnectedOther = room.participants.some((p) => p.connected !== false);
-      if (!currentHost || (room.accessMode === 'random' && currentHost.connected === false && hasConnectedOther)) {
-        const connectedPreferred = room.participants.find((p) => p.connected !== false);
-        const existingFlagHost = room.participants.find((p) => p.isHost);
-        room.hostId = connectedPreferred
-          ? connectedPreferred.id
-          : existingFlagHost
-          ? existingFlagHost.id
-          : room.participants[0].id;
+      if (room.accessMode === 'random') {
+        const eligibleNonInvite = room.participants.filter((p) => !p.joinedViaInvite);
+        const preferredPool = eligibleNonInvite.length > 0 ? eligibleNonInvite : room.participants;
+        const hasConnectedOther = preferredPool.some((p) => p.connected !== false);
+        if (
+          !currentHost ||
+          currentHost.joinedViaInvite ||
+          (currentHost.connected === false && hasConnectedOther)
+        ) {
+          const connectedPreferred = preferredPool.find((p) => p.connected !== false);
+          const existingFlagHost = preferredPool.find((p) => p.isHost);
+          room.hostId = connectedPreferred
+            ? connectedPreferred.id
+            : existingFlagHost
+            ? existingFlagHost.id
+            : preferredPool[0]?.id;
+        }
+      } else {
+        // Em salas privadas por convite, um convidado que entrou por link nunca pode assumir a liderança
+        if (currentHost?.joinedViaInvite) {
+          room.hostId = undefined;
+        }
+        if (!room.hostId) {
+          const nonInviteOwner = room.participants.find((p) => !p.joinedViaInvite);
+          if (nonInviteOwner) {
+            room.hostId = nonInviteOwner.id;
+          }
+        }
       }
     }
 
@@ -611,19 +631,76 @@ async function startServer() {
     const safeBet = Math.max(50, Math.min(5_000_000, Math.floor(betKz || 500)));
     const clampedPlayers = Math.max(2, Math.min(5, Math.round(playerCount || 5)));
     const totalPotKz = safeBet * clampedPlayers;
-    const winnersPotKz = Math.floor(totalPotKz * 0.7);
-    const houseFeeKz = Math.floor(totalPotKz * 0.2);
-    const creatorRoyaltyKz = Math.max(0, totalPotKz - winnersPotKz - houseFeeKz);
-    const firstPrizeKz = Math.floor(totalPotKz * 0.5);
-    const secondPrizeKz = Math.max(0, winnersPotKz - firstPrizeKz);
+
+    let firstPrizeKz = 0;
+    let secondPrizeKz = 0;
+    let thirdPrizeKz = 0;
+    let firstPercent = 50;
+    let secondPercent = 20;
+    let thirdPercent = 20;
+    let thirdKeepsStake = false;
+
+    if (clampedPlayers >= 5) {
+      firstPercent = 50;
+      secondPercent = 20;
+      thirdPercent = 20;
+      thirdKeepsStake = true;
+      firstPrizeKz = Math.floor(totalPotKz * 0.5);
+      secondPrizeKz = Math.floor(totalPotKz * 0.2);
+      thirdPrizeKz = safeBet;
+    } else if (clampedPlayers === 4) {
+      firstPercent = 40;
+      secondPercent = 27.5;
+      thirdPercent = 25;
+      thirdKeepsStake = true;
+      firstPrizeKz = Math.floor(totalPotKz * 0.4);
+      thirdPrizeKz = safeBet;
+      secondPrizeKz = Math.max(safeBet + 1, Math.floor(totalPotKz * 0.275));
+    } else if (clampedPlayers === 3) {
+      firstPercent = 50;
+      secondPercent = 40;
+      thirdPercent = 0;
+      thirdKeepsStake = false;
+      firstPrizeKz = Math.floor(totalPotKz * 0.5);
+      secondPrizeKz = Math.floor(totalPotKz * 0.4);
+      thirdPrizeKz = 0;
+    } else {
+      firstPercent = 85;
+      secondPercent = 0;
+      thirdPercent = 0;
+      thirdKeepsStake = false;
+      firstPrizeKz = Math.floor(totalPotKz * 0.85);
+      secondPrizeKz = 0;
+      thirdPrizeKz = 0;
+    }
+
+    const winnersPotKz = Math.min(totalPotKz, firstPrizeKz + secondPrizeKz + thirdPrizeKz);
+    const remainingKz = Math.max(0, totalPotKz - winnersPotKz);
+    const houseFeeKz = Math.floor((remainingKz * 2) / 3);
+    const creatorRoyaltyKz = Math.max(0, remainingKz - houseFeeKz);
+
+    const roundPct = (val: number) => Math.round(val * 10) / 10;
+    const winnersPercent = roundPct(firstPercent + secondPercent + thirdPercent);
+    const remainingPercent = roundPct(Math.max(0, 100 - winnersPercent));
+    const housePercent = roundPct((remainingPercent * 2) / 3);
+    const creatorPercent = roundPct(Math.max(0, remainingPercent - housePercent));
+
     return {
+      playerCount: clampedPlayers,
       totalPotKz,
       winnersPotKz,
       houseFeeKz,
       creatorRoyaltyKz,
       firstPrizeKz,
       secondPrizeKz,
-      thirdPrizeKz: 0,
+      thirdPrizeKz,
+      firstPercent,
+      secondPercent,
+      thirdPercent,
+      winnersPercent,
+      housePercent,
+      creatorPercent,
+      thirdKeepsStake,
     };
   };
 
@@ -681,7 +758,13 @@ async function startServer() {
     const rankings = combined.map((entry, idx) => {
       const rank = idx + 1;
       const payoutKz =
-        rank === 1 ? threeTorneiras.firstPrizeKz : rank === 2 ? threeTorneiras.secondPrizeKz : 0;
+        rank === 1
+          ? threeTorneiras.firstPrizeKz
+          : rank === 2
+          ? threeTorneiras.secondPrizeKz
+          : rank === 3
+          ? threeTorneiras.thirdPrizeKz
+          : 0;
       return {
         ...entry,
         rank,
@@ -1123,8 +1206,11 @@ async function startServer() {
       };
       db.rooms[code] = room;
     } else {
+      const isExplicitCreatorClaim = Boolean(!room.creatorId && body.creatorId && body.creatorId.trim() === callerId);
       const canMutateConfig =
-        (!room.creatorId && !room.hostId) || isLeaderOfRoom(room, callerId);
+        isExplicitCreatorClaim ||
+        (!room.creatorId && !room.hostId) ||
+        isLeaderOfRoom(room, callerId);
       if (canMutateConfig) {
         if (!room.creatorId && callerId) {
           room.creatorId = callerId;
@@ -1153,14 +1239,14 @@ async function startServer() {
     if (body.player && body.player.id) {
       const pid = body.player.id.trim();
       const idx = room.participants.findIndex((p) => p.id === pid);
-      if (!room.creatorId && !room.hostId) {
+      if (!room.creatorId && (!room.hostId || (body.creatorId && body.creatorId.trim() === pid))) {
         room.creatorId = pid;
         room.hostId = pid;
       }
       const participant: RoomParticipant = {
         id: pid.slice(0, 64),
         name: sanitizeText(body.player.name, room.hostName, 40),
-        avatar: sanitizeText(body.player.avatar, '👑', 8),
+        avatar: sanitizeText(body.player.avatar, '⚡', 8),
         avatarId: sanitizeText(body.player.avatarId, 'rei-zero', 32),
         color: sanitizeText(body.player.color, '#f59e0b', 24),
         isHost: (room.creatorId || room.hostId) === pid,
@@ -1172,6 +1258,7 @@ async function startServer() {
         jumpY: 0,
         profileReady: true,
         selectingProfile: false,
+        joinedViaInvite: false,
       };
       if (idx >= 0) room.participants[idx] = { ...room.participants[idx], ...participant };
       else if (room.participants.length < room.maxPlayers) room.participants.push(participant);
@@ -1310,12 +1397,13 @@ async function startServer() {
     let room = db.rooms[code];
     if (!room) {
       const firstId = body.player?.id?.trim().slice(0, 64);
+      const isCreatorJoin = body.viaInvite !== true;
       room = {
         code,
         title: sanitizeText(body.title, `Arena ${code}`, 64),
         hostName: sanitizeText(body.hostName || body.player?.name, 'Anfitrião', 40),
-        hostId: firstId,
-        creatorId: body.viaInvite ? undefined : firstId,
+        hostId: isCreatorJoin ? firstId : undefined,
+        creatorId: isCreatorJoin ? firstId : undefined,
         maxPlayers: clampMaxPlayers(body.maxPlayers, 5),
         betAmount: clampRoomBet(body.betAmount, 500),
         fillWithBots: body.fillWithBots ?? false,
@@ -1382,8 +1470,10 @@ async function startServer() {
         });
         return;
       } else {
-        const canClaimLeader = !room.creatorId && !room.hostId && room.participants.length === 0;
+        const isGuestInvite = body.viaInvite !== false;
+        const canClaimLeader = !isGuestInvite && !room.creatorId && !room.hostId && room.participants.length === 0;
         if (canClaimLeader) {
+          room.creatorId = pid;
           room.hostId = pid;
         }
         room.participants.push({
@@ -1392,7 +1482,7 @@ async function startServer() {
           avatar: body.player.avatar || '⚡',
           avatarId: body.player.avatarId || 'rei-zero',
           color: body.player.color || '#38bdf8',
-          isHost: (room.creatorId || room.hostId) === pid,
+          isHost: Boolean((room.creatorId || room.hostId) === pid),
           joinedAt: now,
           lastSeenAt: now,
           progressDistance: 0,
@@ -1400,6 +1490,7 @@ async function startServer() {
           action: 'running',
           jumpY: 0,
           isSpectating: room.raceStatus === 'running' || room.raceStatus === 'starting',
+          joinedViaInvite: isGuestInvite,
         });
       }
     }
@@ -2108,6 +2199,8 @@ async function startServer() {
 
           let room: ServerRoom;
           let code: string;
+          const explicitCreator =
+            msg.isRoomCreator === true || Boolean(msg.creatorId && msg.creatorId.trim() === playerId);
           if (msg.autoMatch) {
             room = findOrCreatePublicRoom(
               Boolean(msg.isDemo ?? true),
@@ -2120,15 +2213,14 @@ async function startServer() {
           } else {
             code = msg.roomCode.trim().toUpperCase();
             room = db.rooms[code];
-            const explicitCreator =
-              msg.isRoomCreator === true || Boolean(msg.creatorId && msg.creatorId.trim() === playerId);
+            const isCreatorOnCreate = explicitCreator || !msg.viaInvite;
             if (!room) {
               room = {
                 code,
                 title: (msg.title || `Arena ${code}`).trim(),
                 hostName: (msg.hostName || msg.player.name || 'Anfitrião').trim(),
-                hostId: explicitCreator || !msg.viaInvite ? playerId : undefined,
-                creatorId: explicitCreator || !msg.viaInvite ? playerId : undefined,
+                hostId: isCreatorOnCreate ? playerId : undefined,
+                creatorId: isCreatorOnCreate ? playerId : undefined,
                 maxPlayers: clampMaxPlayers(msg.maxPlayers, 5),
                 betAmount: clampRoomBet(msg.betAmount, 500),
                 fillWithBots: msg.fillWithBots ?? false,
@@ -2144,7 +2236,7 @@ async function startServer() {
                 kickedIds: [],
               };
               db.rooms[code] = room;
-            } else if (explicitCreator && !room.creatorId) {
+            } else if (explicitCreator && (!room.creatorId || room.creatorId === playerId)) {
               room.creatorId = playerId;
               room.hostId = playerId;
             }
@@ -2173,7 +2265,9 @@ async function startServer() {
 
           const existingIdx = room.participants.findIndex((p) => p.id === playerId);
           if (existingIdx < 0) {
+            const isGuestViaInvite = Boolean(msg.viaInvite) && !explicitCreator && !msg.autoMatch;
             const isCreator =
+              explicitCreator ||
               Boolean(room.creatorId && room.creatorId === playerId) ||
               Boolean(room.hostId && room.hostId === playerId) ||
               (!room.creatorId && !room.hostId && room.participants.length === 0 && !msg.viaInvite);
@@ -2196,7 +2290,7 @@ async function startServer() {
               avatar: msg.player.avatar || '⚡',
               avatarId: msg.player.avatarId || 'rei-zero',
               color: msg.player.color || '#38bdf8',
-              isHost: (room.creatorId || room.hostId) === playerId,
+              isHost: Boolean((room.creatorId || room.hostId) === playerId),
               joinedAt: now,
               lastSeenAt: now,
               progressDistance: 0,
@@ -2208,6 +2302,7 @@ async function startServer() {
               connected: true,
               betAmount: room.betAmount,
               isSpectating: joinedMidRace,
+              joinedViaInvite: isGuestViaInvite,
             });
           } else {
             const p = room.participants[existingIdx];
@@ -2218,6 +2313,9 @@ async function startServer() {
             p.lastSeenAt = now;
             p.connected = true;
             p.betAmount = room.betAmount;
+            if (explicitCreator || room.creatorId === playerId) {
+              p.joinedViaInvite = false;
+            }
             if (room.raceStatus === 'idle' || room.raceStatus === 'completed') {
               p.isSpectating = false;
             }

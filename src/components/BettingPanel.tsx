@@ -79,6 +79,125 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
 
   const activePlayerCount = Math.max(2, Math.min(5, competitors?.length || maxPlayers || 5));
   const torneiras = calculateThreeTorneiras(betAmountKz, activePlayerCount);
+  const winnersPct = torneiras.winnersPercent ?? 90;
+  const housePct = torneiras.housePercent ?? 6.7;
+  const creatorPct = torneiras.creatorPercent ?? 3.3;
+  const firstPct = torneiras.firstPercent ?? 50;
+  const secondPct = torneiras.secondPercent ?? 20;
+  const langCode = (lang || 'pt').slice(0, 2);
+  const potDynamicLabels = useMemo(() => {
+    const stripPct = (s: string) => s.replace(/\d+(?:[.,]\d+)?%\s*/g, '').trim();
+    const winnersNoun = stripPct(t.betting.winners70) || 'Vencedores';
+    const houseNoun = stripPct(t.betting.house20) || 'Casa';
+    const creatorNoun = stripPct(t.betting.creator10) || 'Criador';
+    if (langCode === 'en') {
+      return {
+        winnersNoun,
+        houseNoun,
+        creatorNoun,
+        potPrefix: `Total Pot (x${activePlayerCount} @ ${formatMoney(betAmountKz)}):`,
+        thirdKeep: `🛡️ 3rd (${formatMoney(torneiras.thirdPrizeKz)} = No loss)`,
+        losersText:
+          activePlayerCount === 5
+            ? '4th–5th Lose'
+            : activePlayerCount === 4
+            ? '4th Loses'
+            : activePlayerCount === 3
+            ? '3rd Loses'
+            : '2nd Loses (1v1)',
+        weightingBadge:
+          activePlayerCount === 5
+            ? '5P Standard'
+            : activePlayerCount === 4
+            ? '4P Auto-Weighted'
+            : activePlayerCount === 3
+            ? '3P Auto-Weighted'
+            : '2P 1v1 Duel',
+      };
+    }
+    if (langCode === 'es') {
+      return {
+        winnersNoun,
+        houseNoun,
+        creatorNoun,
+        potPrefix: `Bote Total (x${activePlayerCount} a ${formatMoney(betAmountKz)}):`,
+        thirdKeep: `🛡️ 3º (${formatMoney(torneiras.thirdPrizeKz)} = Sin pérdida)`,
+        losersText:
+          activePlayerCount === 5
+            ? '4º–5º Pierden'
+            : activePlayerCount === 4
+            ? '4º Pierde'
+            : activePlayerCount === 3
+            ? '3º Pierde'
+            : '2º Pierde (1v1)',
+        weightingBadge:
+          activePlayerCount === 5
+            ? '5J Estándar'
+            : activePlayerCount === 4
+            ? '4J Ponderado'
+            : activePlayerCount === 3
+            ? '3J Ponderado'
+            : '2J Duelo 1v1',
+      };
+    }
+    if (langCode === 'fr') {
+      return {
+        winnersNoun,
+        houseNoun,
+        creatorNoun,
+        potPrefix: `Cagnotte (x${activePlayerCount} à ${formatMoney(betAmountKz)}) :`,
+        thirdKeep: `🛡️ 3e (${formatMoney(torneiras.thirdPrizeKz)} = Sans perte)`,
+        losersText:
+          activePlayerCount === 5
+            ? '4e–5e Perdent'
+            : activePlayerCount === 4
+            ? '4e Perd'
+            : activePlayerCount === 3
+            ? '3e Perd'
+            : '2e Perd (1v1)',
+        weightingBadge:
+          activePlayerCount === 5
+            ? '5J Standard'
+            : activePlayerCount === 4
+            ? '4J Pondéré'
+            : activePlayerCount === 3
+            ? '3J Pondéré'
+            : '2J Duel 1v1',
+      };
+    }
+    return {
+      winnersNoun,
+      houseNoun,
+      creatorNoun,
+      potPrefix: `Pote Total (x${activePlayerCount} a ${formatMoney(betAmountKz)}):`,
+      thirdKeep: `🛡️ 3º (${formatMoney(torneiras.thirdPrizeKz)} = Mantém aposta)`,
+      losersText:
+        activePlayerCount === 5
+          ? '4º e 5º Perdem'
+          : activePlayerCount === 4
+          ? '4º Perde'
+          : activePlayerCount === 3
+          ? '3º Perde'
+          : '2º Perde (1v1)',
+      weightingBadge:
+        activePlayerCount === 5
+          ? 'Mesa 5J · Regra Base'
+          : activePlayerCount === 4
+          ? 'Mesa 4J · Ponderação Auto'
+          : activePlayerCount === 3
+          ? 'Mesa 3J · Ponderação Auto'
+          : 'Duelo 2J · Ponderação Auto',
+    };
+  }, [
+    activePlayerCount,
+    betAmountKz,
+    formatMoney,
+    langCode,
+    t.betting.creator10,
+    t.betting.house20,
+    t.betting.winners70,
+    torneiras.thirdPrizeKz,
+  ]);
   const timeLeft = Math.max(0, TOTAL_GAME_TIME_SECONDS - Math.floor(elapsedSeconds));
 
   const rateForCurrency = rates[currency] || currencyMeta.defaultKzPerUnit || 1;
@@ -535,28 +654,31 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
               </div>
             </div>
 
-            {/* As 3 Torneiras do Rei (Distribuição Matemática Oficial) */}
+            {/* As 3 Torneiras do Rei (Distribuição Matemática Oficial com Ponderação Automática) */}
             <div className="p-3 game-subplate rounded-xl border border-amber-500/30 flex flex-col gap-2.5">
-              <div className="flex items-center justify-between text-xs font-mono">
-                <span className="text-zinc-400">
-                  {t.betting.totalPotLabel} {formatMoney(betAmountKz)}):
-                </span>
-                <span className="font-black text-amber-300 text-sm">
+              <div className="flex items-center justify-between gap-2 text-xs font-mono">
+                <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                  <span className="text-zinc-400">{potDynamicLabels.potPrefix}</span>
+                  <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/40 text-[9px] font-bold text-amber-300">
+                    {potDynamicLabels.weightingBadge}
+                  </span>
+                </div>
+                <span className="font-black text-amber-300 text-sm shrink-0">
                   {formatMoney(torneiras.totalPotKz)}
                 </span>
               </div>
 
-              {/* Barra Visual Proporcional 70% / 20% / 10% */}
+              {/* Barra Visual Proporcional Dinâmica */}
               <div className="w-full h-1.5 rounded-full overflow-hidden flex bg-zinc-900 border border-white/5">
-                <div className="h-full bg-emerald-500" style={{ width: '70%' }} />
-                <div className="h-full bg-slate-500" style={{ width: '20%' }} />
-                <div className="h-full bg-amber-400" style={{ width: '10%' }} />
+                <div className="h-full bg-emerald-500" style={{ width: `${winnersPct}%` }} />
+                <div className="h-full bg-slate-500" style={{ width: `${housePct}%` }} />
+                <div className="h-full bg-amber-400" style={{ width: `${creatorPct}%` }} />
               </div>
 
               <div className="grid grid-cols-3 gap-1.5 pt-0.5 text-center font-mono">
                 <div className="game-panel p-2 rounded-lg border border-emerald-500/40">
                   <span className="text-[10px] text-emerald-400 font-bold block">
-                    {t.betting.winners70}
+                    {winnersPct}% {potDynamicLabels.winnersNoun}
                   </span>
                   <span className="text-xs font-black text-emerald-300">
                     {formatMoney(torneiras.winnersPotKz)}
@@ -564,7 +686,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                 </div>
                 <div className="game-panel p-2 rounded-lg border border-zinc-700/60">
                   <span className="text-[10px] text-zinc-400 font-bold block">
-                    {t.betting.house20}
+                    {housePct}% {potDynamicLabels.houseNoun}
                   </span>
                   <span className="text-xs font-black text-zinc-200">
                     {formatMoney(torneiras.houseFeeKz)}
@@ -572,7 +694,7 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                 </div>
                 <div className="game-panel p-2 rounded-lg border border-amber-500/40">
                   <span className="text-[10px] text-amber-400 font-bold block">
-                    {t.betting.creator10}
+                    {creatorPct}% {potDynamicLabels.creatorNoun}
                   </span>
                   <span className="text-xs font-black text-amber-300">
                     {formatMoney(torneiras.creatorRoyaltyKz)}
@@ -580,16 +702,21 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center justify-between text-[11px] text-zinc-400 border-t border-white/10 pt-1.5 font-mono gap-1">
+              <div className="flex flex-wrap items-center justify-between text-[11px] text-zinc-400 border-t border-white/10 pt-1.5 font-mono gap-x-2 gap-y-1">
                 <span>
-                  {t.betting.firstLabel}{' '}
+                  🥇 1º ({firstPct}%):{' '}
                   <strong className="text-emerald-400">{formatMoney(torneiras.firstPrizeKz)}</strong>
                 </span>
-                <span>
-                  {t.betting.secondLabel}{' '}
-                  <strong className="text-emerald-400">{formatMoney(torneiras.secondPrizeKz)}</strong>
-                </span>
-                <span className="text-zinc-500 truncate">{t.betting.fourthFifthLose}</span>
+                {activePlayerCount >= 3 && (
+                  <span>
+                    🥈 2º ({secondPct}%):{' '}
+                    <strong className="text-emerald-400">{formatMoney(torneiras.secondPrizeKz)}</strong>
+                  </span>
+                )}
+                {torneiras.thirdKeepsStake && (
+                  <span className="text-sky-300 font-semibold">{potDynamicLabels.thirdKeep}</span>
+                )}
+                <span className="text-rose-400/90 font-semibold">{potDynamicLabels.losersText}</span>
               </div>
             </div>
 
@@ -746,15 +873,20 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
                 />
               </div>
 
-              <div className="flex items-center justify-between text-xs text-zinc-400 pt-1 border-t border-white/10 font-mono">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400 pt-1 border-t border-white/10 font-mono">
                 <span>
-                  {t.betting.firstWins}{' '}
+                  🥇 1º ({firstPct}%):{' '}
                   <strong className="text-emerald-400">{formatMoney(torneiras.firstPrizeKz)}</strong>
                 </span>
-                <span>
-                  {t.betting.secondWins}{' '}
-                  <strong className="text-emerald-400">{formatMoney(torneiras.secondPrizeKz)}</strong>
-                </span>
+                {activePlayerCount >= 3 && (
+                  <span>
+                    🥈 2º ({secondPct}%):{' '}
+                    <strong className="text-emerald-400">{formatMoney(torneiras.secondPrizeKz)}</strong>
+                  </span>
+                )}
+                {torneiras.thirdKeepsStake && (
+                  <span className="text-sky-300 text-[11px]">{potDynamicLabels.thirdKeep}</span>
+                )}
               </div>
             </div>
 
@@ -774,8 +906,10 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             className={`p-3 rounded-xl border flex items-center justify-between text-xs ${
-              lastRank <= 2
+              lastPayoutKz !== null && lastPayoutKz > betAmountKz
                 ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-300'
+                : lastPayoutKz !== null && lastPayoutKz > 0
+                ? 'bg-sky-950/65 border-sky-500/50 text-sky-200'
                 : 'game-subplate text-zinc-300'
             }`}
           >
@@ -783,17 +917,27 @@ export const BettingPanel: React.FC<BettingPanelProps> = ({
               <span className="font-black block">
                 {lastRank === 1
                   ? t.betting.lastChampionTitle
-                  : lastRank === 2
+                  : lastRank === 2 && lastPayoutKz !== null && lastPayoutKz > 0
                   ? t.betting.lastRunnerUpTitle
+                  : lastRank === 3 && lastPayoutKz !== null && lastPayoutKz > 0
+                  ? '🛡️ 3º Lugar · Aposta Mantida'
                   : `${t.betting.lastFinishedPrefix} #${lastRank}`}
               </span>
               <span className="text-[10px] opacity-80">
-                {lastRank <= 2 ? t.betting.lastCreditedSub : t.betting.lastTop3Sub}
+                {lastPayoutKz !== null && lastPayoutKz > betAmountKz
+                  ? t.betting.lastCreditedSub
+                  : lastPayoutKz !== null && lastPayoutKz > 0
+                  ? 'Não ganhou lucro nem perdeu — aposta devolvida na conta.'
+                  : t.betting.lastTop3Sub}
               </span>
             </div>
             {lastPayoutKz !== null && lastPayoutKz > 0 && (
-              <span className="font-mono font-black text-emerald-400 text-base">
-                +{formatMoney(lastPayoutKz)}
+              <span
+                className={`font-mono font-black text-base ${
+                  lastPayoutKz > betAmountKz ? 'text-emerald-400' : 'text-sky-300'
+                }`}
+              >
+                {lastPayoutKz > betAmountKz ? `+${formatMoney(lastPayoutKz)}` : `=${formatMoney(lastPayoutKz)}`}
               </span>
             )}
           </motion.div>

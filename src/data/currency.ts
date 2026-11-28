@@ -139,23 +139,72 @@ export function getDefaultRatesMap(): ExchangeRatesMap {
 }
 
 /**
- * Distribuição Oficial "As 3 Torneiras do Rei":
- * 70% Vencedores (50% 1º Lugar, 20% 2º Lugar, 0% 3º Lugar), 20% Casa, 10% Criador.
+ * Distribuição Oficial "As 3 Torneiras do Rei" com Ponderação Automática por Lotação (2 a 5 jogadores):
+ * - 5 Jogadores: 1º = 50%, 2º = 20%, 3º = mantém exatamente a aposta (20%, sem perda), 4º e 5º perdem (0%), Casa+Criador = 10% (2:1).
+ * - 4 Jogadores: 1º = 40%, 2º = 27.5% (acima do 3º), 3º = mantém exatamente a aposta (25%, sem perda), 4º perde (0%), Casa+Criador = 7.5% (2:1).
+ * - 3 Jogadores: 1º = 50%, 2º = 40% (protegido acima da aposta), 3º (último) = perde (0%), Casa+Criador = 10% (2:1).
+ * - 2 Jogadores (1v1): 1º = 85%, 2º (último) = perde (0%), Casa+Criador = 15% (10% Casa / 5% Criador).
  */
 export function calculateThreeTorneiras(betKz: number, playerCount: number): ThreeTorneirasSplit {
   const safeBet = Math.max(0, Math.floor(Number.isFinite(betKz) ? betKz : 0));
   const clampedPlayers = Math.max(2, Math.min(5, Math.round(playerCount || 5)));
   const totalPotKz = safeBet * clampedPlayers;
 
-  const winnersPotKz = Math.floor(totalPotKz * 0.7);
-  const houseFeeKz = Math.floor(totalPotKz * 0.2);
-  const creatorRoyaltyKz = Math.max(0, totalPotKz - winnersPotKz - houseFeeKz);
+  let firstPrizeKz = 0;
+  let secondPrizeKz = 0;
+  let thirdPrizeKz = 0;
+  let firstPercent = 50;
+  let secondPercent = 20;
+  let thirdPercent = 20;
+  let thirdKeepsStake = false;
 
-  const firstPrizeKz = Math.floor(totalPotKz * 0.5);
-  const secondPrizeKz = Math.max(0, winnersPotKz - firstPrizeKz);
-  const thirdPrizeKz = 0;
+  if (clampedPlayers >= 5) {
+    firstPercent = 50;
+    secondPercent = 20;
+    thirdPercent = 20;
+    thirdKeepsStake = true;
+    firstPrizeKz = Math.floor(totalPotKz * 0.5);
+    secondPrizeKz = Math.floor(totalPotKz * 0.2);
+    thirdPrizeKz = safeBet;
+  } else if (clampedPlayers === 4) {
+    firstPercent = 40;
+    secondPercent = 27.5;
+    thirdPercent = 25;
+    thirdKeepsStake = true;
+    firstPrizeKz = Math.floor(totalPotKz * 0.4);
+    thirdPrizeKz = safeBet;
+    secondPrizeKz = safeBet > 0 ? Math.max(safeBet + 1, Math.floor(totalPotKz * 0.275)) : 0;
+  } else if (clampedPlayers === 3) {
+    firstPercent = 50;
+    secondPercent = 40;
+    thirdPercent = 0;
+    thirdKeepsStake = false;
+    firstPrizeKz = Math.floor(totalPotKz * 0.5);
+    secondPrizeKz = Math.floor(totalPotKz * 0.4);
+    thirdPrizeKz = 0;
+  } else {
+    firstPercent = 85;
+    secondPercent = 0;
+    thirdPercent = 0;
+    thirdKeepsStake = false;
+    firstPrizeKz = Math.floor(totalPotKz * 0.85);
+    secondPrizeKz = 0;
+    thirdPrizeKz = 0;
+  }
+
+  const winnersPotKz = Math.min(totalPotKz, firstPrizeKz + secondPrizeKz + thirdPrizeKz);
+  const remainingKz = Math.max(0, totalPotKz - winnersPotKz);
+  const houseFeeKz = Math.floor((remainingKz * 2) / 3);
+  const creatorRoyaltyKz = Math.max(0, remainingKz - houseFeeKz);
+
+  const roundPct = (val: number) => Math.round(val * 10) / 10;
+  const winnersPercent = roundPct(firstPercent + secondPercent + thirdPercent);
+  const remainingPercent = roundPct(Math.max(0, 100 - winnersPercent));
+  const housePercent = roundPct((remainingPercent * 2) / 3);
+  const creatorPercent = roundPct(Math.max(0, remainingPercent - housePercent));
 
   return {
+    playerCount: clampedPlayers,
     totalPotKz,
     winnersPotKz,
     houseFeeKz,
@@ -163,6 +212,13 @@ export function calculateThreeTorneiras(betKz: number, playerCount: number): Thr
     firstPrizeKz,
     secondPrizeKz,
     thirdPrizeKz,
+    firstPercent,
+    secondPercent,
+    thirdPercent,
+    winnersPercent,
+    housePercent,
+    creatorPercent,
+    thirdKeepsStake,
   };
 }
 

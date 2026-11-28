@@ -52,6 +52,7 @@ export interface MultiplayerStrings {
   roomChatOfflineHint: string;
   roomChatPlaceholder: string;
   roomChatSendBtn: string;
+  waitingMorePlayersToStart: string;
 }
 
 const PT_STRINGS: MultiplayerStrings = {
@@ -108,6 +109,7 @@ const PT_STRINGS: MultiplayerStrings = {
   roomChatOfflineHint: 'Liga-te a uma sala online para conversar em tempo real.',
   roomChatPlaceholder: 'Escreve uma mensagem para a sala...',
   roomChatSendBtn: 'Enviar',
+  waitingMorePlayersToStart: 'Aguarda pelo menos 2 jogadores entrarem na sala pelo link para começar!',
 };
 
 const EN_STRINGS: MultiplayerStrings = {
@@ -164,6 +166,7 @@ const EN_STRINGS: MultiplayerStrings = {
   roomChatOfflineHint: 'Connect to an online room to chat in real time.',
   roomChatPlaceholder: 'Type a message to the room...',
   roomChatSendBtn: 'Send',
+  waitingMorePlayersToStart: 'Wait for at least 2 players to join the room via link to start!',
 };
 
 const ES_STRINGS: MultiplayerStrings = {
@@ -220,6 +223,7 @@ const ES_STRINGS: MultiplayerStrings = {
   roomChatOfflineHint: 'Conéctate a una sala en línea para chatear en tiempo real.',
   roomChatPlaceholder: 'Escribe un mensaje para la sala...',
   roomChatSendBtn: 'Enviar',
+  waitingMorePlayersToStart: '¡Espera a que al menos 2 jugadores entren a la sala por enlace para empezar!',
 };
 
 const FR_STRINGS: MultiplayerStrings = {
@@ -276,6 +280,7 @@ const FR_STRINGS: MultiplayerStrings = {
   roomChatOfflineHint: 'Rejoignez une salle en ligne pour discuter en temps réel.',
   roomChatPlaceholder: 'Écrire un message à la salle...',
   roomChatSendBtn: 'Envoyer',
+  waitingMorePlayersToStart: 'Attends qu’au moins 2 joueurs rejoignent la salle par lien pour démarrer !',
 };
 
 export function getMultiplayerStrings(lang: SupportedLanguage): MultiplayerStrings {

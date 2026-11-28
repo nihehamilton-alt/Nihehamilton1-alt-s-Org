@@ -33,6 +33,7 @@ export function getDeviceId(): string {
 }
 
 const SESSION_PLAYER_ID_KEY = 'rei_run_session_player_id';
+const SESSION_CREATED_ROOMS_KEY = 'rei_run_created_rooms';
 
 export function getSessionPlayerId(): string {
   if (typeof window === 'undefined') return 'server';
@@ -45,6 +46,76 @@ export function getSessionPlayerId(): string {
     return id;
   } catch {
     return getDeviceId();
+  }
+}
+
+export function restoreSessionPlayerId(candidateId: string | undefined | null): string {
+  if (typeof window === 'undefined' || !candidateId) return getSessionPlayerId();
+  const clean = candidateId.trim();
+  if (!clean) return getSessionPlayerId();
+  try {
+    sessionStorage.setItem(SESSION_PLAYER_ID_KEY, clean);
+  } catch {
+    // Ignore storage errors
+  }
+  return clean;
+}
+
+export function markCreatedRoomSession(roomCode: string, creatorId: string): void {
+  if (typeof window === 'undefined' || !roomCode || !creatorId) return;
+  const code = roomCode.trim().toUpperCase();
+  try {
+    const raw = sessionStorage.getItem(SESSION_CREATED_ROOMS_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    map[code] = creatorId;
+    sessionStorage.setItem(SESSION_CREATED_ROOMS_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function getCreatedRoomCreatorId(roomCode: string): string | null {
+  if (typeof window === 'undefined' || !roomCode) return null;
+  const code = roomCode.trim().toUpperCase();
+  try {
+    const historyState = window.history.state as { reiCreatorRoom?: string; reiCreatorId?: string } | null;
+    if (
+      historyState &&
+      typeof historyState.reiCreatorRoom === 'string' &&
+      historyState.reiCreatorRoom.toUpperCase() === code &&
+      typeof historyState.reiCreatorId === 'string' &&
+      historyState.reiCreatorId.trim()
+    ) {
+      return historyState.reiCreatorId.trim();
+    }
+  } catch {
+    // Ignore history access errors
+  }
+  try {
+    const raw = sessionStorage.getItem(SESSION_CREATED_ROOMS_KEY);
+    if (!raw) return null;
+    const map = JSON.parse(raw) as Record<string, string>;
+    return typeof map[code] === 'string' && map[code].trim() ? map[code].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearCreatedRoomSession(roomCode?: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!roomCode) {
+      sessionStorage.removeItem(SESSION_CREATED_ROOMS_KEY);
+      return;
+    }
+    const code = roomCode.trim().toUpperCase();
+    const raw = sessionStorage.getItem(SESSION_CREATED_ROOMS_KEY);
+    if (!raw) return;
+    const map = JSON.parse(raw) as Record<string, string>;
+    delete map[code];
+    sessionStorage.setItem(SESSION_CREATED_ROOMS_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore
   }
 }
 

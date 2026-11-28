@@ -1,4 +1,5 @@
 import React from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { Volume1, Volume2, VolumeX } from 'lucide-react';
 import { GameStatus, ViewMode, TimeMode } from '../types/game';
 import { useI18n } from '../contexts/I18nContext';
@@ -62,6 +63,7 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
 }) => {
   const [showVolumeSlider, setShowVolumeSlider] = React.useState<boolean>(false);
   const volumePopoverRef = React.useRef<HTMLDivElement | null>(null);
+  const shouldReduceMotion = useReducedMotion();
   const { t, lang, langMeta, currencyMeta, geoInfo, openModal } = useI18n();
   const remaining = Math.max(0, TOTAL_GAME_TIME_SECONDS - Math.floor(elapsedSeconds));
   const isHardMode = elapsedSeconds >= HARD_MODE_START_SECONDS;
@@ -466,7 +468,7 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
             className="relative flex items-center game-subplate rounded-xl p-0.5 border border-white/10"
             ref={volumePopoverRef}
           >
-            <button
+            <motion.button
               type="button"
               data-testid="sfx-toggle-button"
               data-sfx-state={isSfxActive ? 'active' : 'muted'}
@@ -479,35 +481,88 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
                   onToggleSound();
                 }
               }}
+              whileTap={shouldReduceMotion ? undefined : { scale: 0.94 }}
+              animate={{
+                backgroundColor: isSfxActive
+                  ? 'rgba(16, 185, 129, 0.2)'
+                  : 'rgba(76, 5, 25, 0.8)',
+                borderColor: isSfxActive
+                  ? 'rgba(52, 211, 153, 0.55)'
+                  : 'rgba(244, 63, 94, 0.55)',
+              }}
+              transition={{ duration: shouldReduceMotion ? 0.05 : 0.25, ease: 'easeOut' }}
               aria-pressed={isSfxActive}
               aria-label={sfxToggleTooltip}
               title={sfxToggleTooltip}
-              className={`px-2.5 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-all active:scale-95 ${
+              className={`px-2.5 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer border transition-colors duration-300 ${
                 isSfxActive
-                  ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-400/55 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
-                  : 'bg-rose-950/80 hover:bg-rose-900/85 text-rose-200 border border-rose-500/55 shadow-[0_0_10px_rgba(244,63,94,0.16)]'
+                  ? 'hover:bg-emerald-500/30 text-emerald-200 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
+                  : 'hover:bg-rose-900/85 text-rose-200 shadow-[0_0_10px_rgba(244,63,94,0.16)]'
               }`}
             >
-              <span
+              <motion.span
+                animate={{
+                  backgroundColor: isSfxActive ? '#34d399' : '#fb7185',
+                  scale: shouldReduceMotion ? 1 : isSfxActive ? [1, 1.25, 1] : 1,
+                }}
+                transition={{ duration: shouldReduceMotion ? 0.05 : 0.3 }}
                 className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                   isSfxActive
-                    ? 'bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.85)]'
-                    : 'bg-rose-400'
+                    ? 'animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.85)]'
+                    : ''
                 }`}
               />
-              {isSfxActive ? (
-                volume > 0.5 ? (
-                  <Volume2 className="w-3.5 h-3.5 text-emerald-300 shrink-0" strokeWidth={2.3} />
-                ) : (
-                  <Volume1 className="w-3.5 h-3.5 text-emerald-300 shrink-0" strokeWidth={2.3} />
-                )
-              ) : (
-                <VolumeX className="w-3.5 h-3.5 text-rose-300 shrink-0" strokeWidth={2.3} />
-              )}
-              <span className="font-mono uppercase tracking-tight text-[10px]">
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.span
+                  key={isSfxActive ? (volume > 0.5 ? 'sfx-high' : 'sfx-low') : 'sfx-muted'}
+                  initial={
+                    shouldReduceMotion
+                      ? { opacity: 0 }
+                      : {
+                          opacity: 0,
+                          scale: 0.7,
+                          y: isSfxActive ? 3 : -3,
+                          rotate: isSfxActive ? -12 : 12,
+                        }
+                  }
+                  animate={
+                    shouldReduceMotion
+                      ? { opacity: 1 }
+                      : {
+                          opacity: 1,
+                          scale: [0.8, 1.18, 1],
+                          y: [isSfxActive ? 2 : -2, isSfxActive ? -1.5 : 1.5, 0],
+                          rotate: 0,
+                          color: isSfxActive ? '#6ee7b7' : '#fda4af',
+                        }
+                  }
+                  exit={
+                    shouldReduceMotion
+                      ? { opacity: 0 }
+                      : { opacity: 0, scale: 0.72, y: isSfxActive ? -2 : 2 }
+                  }
+                  transition={
+                    shouldReduceMotion
+                      ? { duration: 0.08 }
+                      : { duration: 0.24, ease: 'easeOut' }
+                  }
+                  className="inline-flex items-center justify-center shrink-0"
+                >
+                  {isSfxActive ? (
+                    volume > 0.5 ? (
+                      <Volume2 className="w-3.5 h-3.5 shrink-0" strokeWidth={2.3} />
+                    ) : (
+                      <Volume1 className="w-3.5 h-3.5 shrink-0" strokeWidth={2.3} />
+                    )
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5 shrink-0" strokeWidth={2.3} />
+                  )}
+                </motion.span>
+              </AnimatePresence>
+              <span className="font-mono uppercase tracking-tight text-[10px] transition-colors duration-200">
                 {isSfxActive ? sfxOnLabel : sfxMutedLabel}
               </span>
-            </button>
+            </motion.button>
 
             <button
               type="button"

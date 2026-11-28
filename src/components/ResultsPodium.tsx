@@ -561,6 +561,8 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
           ? threeTorneiras.firstPrizeKz
           : rank === 2
           ? threeTorneiras.secondPrizeKz
+          : rank === 3
+          ? threeTorneiras.thirdPrizeKz
           : 0);
       return {
         runner,
@@ -569,7 +571,14 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
         payoutKz: runnerPayout,
       };
     });
-  }, [sorted, authoritativeRankings, betAmountKz, threeTorneiras.firstPrizeKz, threeTorneiras.secondPrizeKz]);
+  }, [
+    sorted,
+    authoritativeRankings,
+    betAmountKz,
+    threeTorneiras.firstPrizeKz,
+    threeTorneiras.secondPrizeKz,
+    threeTorneiras.thirdPrizeKz,
+  ]);
 
   const netResultKz = userWonPayout - betAmountKz;
 
@@ -860,7 +869,7 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                 </motion.div>
               )}
 
-              {userWonPayout > 0 ? (
+              {userWonPayout > 0 && netResultKz > 0 ? (
                 <motion.div
                   initial={isCeremonyCalmMode ? false : { scale: 0.8, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
@@ -874,13 +883,27 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                     +{formatMoney(userWonPayout)}
                   </span>
                 </motion.div>
+              ) : userWonPayout > 0 && netResultKz === 0 ? (
+                <motion.div
+                  initial={isCeremonyCalmMode ? false : { scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ delay: 0.35, type: 'spring' }}
+                  className="my-2 px-4 py-2 rounded-2xl bg-sky-950/85 border border-sky-400/60 text-sky-200 flex items-center gap-2.5 shadow-[0_0_20px_rgba(56,189,248,0.2)]"
+                >
+                  <span className="text-xs font-bold uppercase tracking-wider">
+                    🛡️ #{userRank} · Aposta Mantida (Sem Perda):
+                  </span>
+                  <span className="font-mono font-black text-lg text-sky-300">
+                    ={formatMoney(userWonPayout)}
+                  </span>
+                </motion.div>
               ) : (
                 <div className="my-1.5 px-3 py-1 rounded-xl game-subplate text-xs text-zinc-400 font-mono">
                   {t.podium.finishedInSub} <strong className="text-amber-400 font-bold">#{userRank}</strong>
                 </div>
               )}
 
-              {/* Resumo Financeiro da Tua Partida: Apostaste · Ganhaste · Saldo Líquido */}
+              {/* Resumo Financeiro da Tua Partida: Apostaste · Recebeste · Saldo Líquido */}
               <div className="w-full grid grid-cols-3 gap-2 my-1 font-mono">
                 <div className="p-2 rounded-xl game-subplate border border-zinc-700/70 flex flex-col items-center">
                   <span className="text-[9px] uppercase text-zinc-400 font-bold">
@@ -892,8 +915,10 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                 </div>
                 <div
                   className={`p-2 rounded-xl border flex flex-col items-center ${
-                    userWonPayout > 0
+                    netResultKz > 0
                       ? 'bg-emerald-950/75 border-emerald-500/50'
+                      : userWonPayout > 0
+                      ? 'bg-sky-950/70 border-sky-500/50'
                       : 'game-subplate border-zinc-700/70'
                   }`}
                 >
@@ -902,10 +927,18 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                   </span>
                   <span
                     className={`text-xs sm:text-sm font-black tabular-nums ${
-                      userWonPayout > 0 ? 'text-emerald-400' : 'text-zinc-400'
+                      netResultKz > 0
+                        ? 'text-emerald-400'
+                        : userWonPayout > 0
+                        ? 'text-sky-300'
+                        : 'text-zinc-400'
                     }`}
                   >
-                    {userWonPayout > 0 ? `+${formatMoney(userWonPayout)}` : formatMoney(0)}
+                    {netResultKz > 0
+                      ? `+${formatMoney(userWonPayout)}`
+                      : userWonPayout > 0
+                      ? `=${formatMoney(userWonPayout)}`
+                      : formatMoney(0)}
                   </span>
                 </div>
                 <div
@@ -1081,9 +1114,15 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                         {Math.floor(second.progressDistance)}m · {mpStrings.stakePerRunnerShort}:{' '}
                         {formatMoney(breakdownRows[1]?.betAmount ?? betAmountKz)}
                       </span>
-                      <span className="text-[11px] font-mono font-black text-emerald-400 bg-emerald-950/90 px-2 py-0.5 rounded-md border border-emerald-800 mt-0.5">
-                        +{formatMoney(breakdownRows[1]?.payoutKz ?? threeTorneiras.secondPrizeKz)}
-                      </span>
+                      {(breakdownRows[1]?.payoutKz ?? threeTorneiras.secondPrizeKz) > 0 ? (
+                        <span className="text-[11px] font-mono font-black text-emerald-400 bg-emerald-950/90 px-2 py-0.5 rounded-md border border-emerald-800 mt-0.5">
+                          +{formatMoney(breakdownRows[1]?.payoutKz ?? threeTorneiras.secondPrizeKz)}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-mono font-bold text-rose-300 bg-rose-950/80 px-2 py-0.5 rounded-md border border-rose-800/80 mt-0.5">
+                          {formatMoney(0)}
+                        </span>
+                      )}
                     </motion.div>
 
                     <motion.div
@@ -1104,7 +1143,9 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-slate-300">
                         {t.podium.secondPlace}
                       </span>
-                      <span className="text-[8px] font-mono text-slate-400">20%</span>
+                      <span className="text-[8px] font-mono text-slate-400">
+                        {threeTorneiras.secondPercent ?? 20}%
+                      </span>
                     </motion.div>
                   </div>
                 )}
@@ -1227,7 +1268,9 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       <span className="text-[10px] font-mono uppercase tracking-wider font-black text-amber-950">
                         {t.podium.championBadge}
                       </span>
-                      <span className="text-[8px] font-mono text-amber-950/80 font-bold">50%</span>
+                      <span className="text-[8px] font-mono text-amber-950/80 font-bold">
+                        {threeTorneiras.firstPercent ?? 50}%
+                      </span>
                     </motion.div>
                   </div>
                 )}
@@ -1290,9 +1333,15 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                         {Math.floor(third.progressDistance)}m · {mpStrings.stakePerRunnerShort}:{' '}
                         {formatMoney(breakdownRows[2]?.betAmount ?? betAmountKz)}
                       </span>
-                      <span className="text-[10px] font-mono text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded-md border border-amber-800/80 mt-0.5">
-                        {t.podium.honorBadge}
-                      </span>
+                      {(breakdownRows[2]?.payoutKz ?? threeTorneiras.thirdPrizeKz) > 0 ? (
+                        <span className="text-[10px] font-mono font-bold text-sky-300 bg-sky-950/85 px-2 py-0.5 rounded-md border border-sky-500/60 mt-0.5">
+                          ={formatMoney(breakdownRows[2]?.payoutKz ?? threeTorneiras.thirdPrizeKz)}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-mono text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded-md border border-amber-800/80 mt-0.5">
+                          {t.podium.honorBadge}
+                        </span>
+                      )}
                     </motion.div>
 
                     <motion.div
@@ -1313,8 +1362,8 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                       <span className="text-[9px] font-mono uppercase tracking-wider font-bold text-amber-300">
                         {t.podium.thirdPlace}
                       </span>
-                      <span className="text-[8px] font-mono text-amber-400/80">
-                        {t.podium.honorBadge}
+                      <span className="text-[8px] font-mono text-sky-300/90">
+                        {threeTorneiras.thirdKeepsStake ? '0% Perda' : t.podium.honorBadge}
                       </span>
                     </motion.div>
                   </div>
@@ -1428,10 +1477,18 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
                 </span>
                 <span
                   className={`col-span-3 text-right text-[11px] font-black tabular-nums ${
-                    payoutKz > 0 ? 'text-emerald-400' : 'text-zinc-500'
+                    payoutKz > rBet
+                      ? 'text-emerald-400'
+                      : payoutKz > 0
+                      ? 'text-sky-300'
+                      : 'text-zinc-500'
                   }`}
                 >
-                  {payoutKz > 0 ? `+${formatMoney(payoutKz)}` : formatMoney(0)}
+                  {payoutKz > rBet
+                    ? `+${formatMoney(payoutKz)}`
+                    : payoutKz > 0
+                    ? `=${formatMoney(payoutKz)}`
+                    : formatMoney(0)}
                 </span>
               </motion.div>
             ))}
@@ -1475,14 +1532,16 @@ export const ResultsPodium: React.FC<ResultsPodiumProps> = ({
             </span>
             <span className="text-zinc-600">|</span>
             <span className="text-emerald-400">
-              {t.podium.winnersShare} ({formatMoney(threeTorneiras.winnersPotKz)})
+              {threeTorneiras.winnersPercent ?? 90}% ({formatMoney(threeTorneiras.winnersPotKz)})
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-zinc-500">{t.podium.houseShare}</span>
+            <span className="text-zinc-400">
+              {threeTorneiras.housePercent ?? 6.7}% ({formatMoney(threeTorneiras.houseFeeKz)})
+            </span>
             <span className="text-zinc-600">|</span>
             <span className="text-amber-400 font-bold">
-              {t.podium.creatorShare} ({formatMoney(threeTorneiras.creatorRoyaltyKz)})
+              {threeTorneiras.creatorPercent ?? 3.3}% ({formatMoney(threeTorneiras.creatorRoyaltyKz)})
             </span>
           </div>
         </motion.div>

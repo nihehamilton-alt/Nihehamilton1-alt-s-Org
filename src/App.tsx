@@ -35,6 +35,7 @@ import { GameHeader } from './components/GameHeader';
 import { GameCanvas } from './components/GameCanvas';
 import { BettingPanel } from './components/BettingPanel';
 import { RulesModal } from './components/RulesModal';
+import { HowToPlayTutorialModal } from './components/HowToPlayTutorialModal';
 import { LobbyRoom } from './components/LobbyRoom';
 import { ResultsPodium } from './components/ResultsPodium';
 import { RankingModal } from './components/RankingModal';
@@ -57,7 +58,14 @@ import {
   loadDailyMissionsState,
   saveDailyMissionsState,
 } from './data/missions';
-import { saveRaceRecord, getSessionPlayerId } from './utils/offlineSync';
+import {
+  saveRaceRecord,
+  getSessionPlayerId,
+  restoreSessionPlayerId,
+  markCreatedRoomSession,
+  getCreatedRoomCreatorId,
+  clearCreatedRoomSession,
+} from './utils/offlineSync';
 import { InviteOnboardingModal } from './components/InviteOnboardingModal';
 import { PerformanceAnalysisWidget } from './components/PerformanceAnalysisWidget';
 import { AiCoachPanel } from './components/AiCoachPanel';
@@ -258,6 +266,8 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [volume, setVolume] = useState<number>(0.7);
   const [rulesOpen, setRulesOpen] = useState<boolean>(false);
+  const [howToPlayTutorialOpen, setHowToPlayTutorialOpen] = useState<boolean>(false);
+  const tutorialShownThisSessionRef = useRef<boolean>(false);
   const [lobbyOpen, setLobbyOpen] = useState<boolean>(false);
   const [showPodium, setShowPodium] = useState<boolean>(false);
   const [rankingOpen, setRankingOpen] = useState<boolean>(false);
@@ -391,8 +401,14 @@ export default function App() {
       new URLSearchParams(window.location.search).get('room') ||
         new URLSearchParams(window.location.search).get('sala')
     );
+  const initialCreatedCreatorId =
+    typeof window !== 'undefined' ? getCreatedRoomCreatorId(roomConfig.code) : null;
+  if (initialCreatedCreatorId) {
+    restoreSessionPlayerId(initialCreatedCreatorId);
+  }
+  const isInitialLocalCreator = Boolean(initialHasUrlRoom && initialCreatedCreatorId);
   const isAutoMatchRef = useRef<boolean>(!initialHasUrlRoom);
-  const isRoomCreatorRef = useRef<boolean>(false);
+  const isRoomCreatorRef = useRef<boolean>(isInitialLocalCreator);
   const [wsRoomSessionKey, setWsRoomSessionKey] = useState<string>(() =>
     initialHasUrlRoom
       ? `EXPLICIT_${roomConfig.code}`
@@ -412,6 +428,7 @@ export default function App() {
   const forceSynchronizedRunRef = useRef<(() => void) | null>(null);
   const startRequestLockUntilRef = useRef<number>(0);
   const activeRaceRoundRef = useRef<number>(0);
+  const activeRaceSeedRef = useRef<number | null>(null);
   const [activeRaceRound, setActiveRaceRound] = useState<number>(0);
   const startedRoundSetRef = useRef<Set<string>>(new Set());
   const finalizedRoundSetRef = useRef<Set<string>>(new Set());
@@ -421,7 +438,9 @@ export default function App() {
   const serverHumansCountRef = useRef<number>(1);
   const [raceSeed, setRaceSeed] = useState<number | null>(null);
   const [syncedRaceStartAt, setSyncedRaceStartAt] = useState<number | null>(null);
-  const [isLocalRoomHost, setIsLocalRoomHost] = useState<boolean>(() => !initialHasUrlRoom);
+  const [isLocalRoomHost, setIsLocalRoomHost] = useState<boolean>(
+    () => !initialHasUrlRoom || isInitialLocalCreator
+  );
   const [isEditingRoomOrProfile, setIsEditingRoomOrProfile] = useState<boolean>(false);
   const [waitingForOpponent, setWaitingForOpponent] = useState<boolean>(false);
   const [waitingOpponentNames, setWaitingOpponentNames] = useState<string[]>([]);
@@ -558,22 +577,73 @@ export default function App() {
   const [qrInviteCopied, setQrInviteCopied] = useState<boolean>(false);
   const qrCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const roomInviteUrl = useMemo(() => {
-    const access = roomConfig.accessMode || 'invite-only';
-    const maxPlayers = Math.max(2, Math.min(5, roomConfig.maxPlayers || 5));
-    if (typeof window !== 'undefined') {
-      return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
-        roomConfig.code
-      )}&host=${encodeURIComponent(roomConfig.hostName)}&title=${encodeURIComponent(
-        roomConfig.title
-      )}&bet=${roomConfig.betAmount}&max=${maxPlayers}&mode=${isDemo ? 'demo' : 'real'}&access=${access}`;
+  const buildInviteUrlFromConfig = useCallback(
+    (cfg: RoomConfig): string => {
+      const access = cfg.accessMode || 'invite-only';
+      const maxPlayers = Math.max(2, Math.min(5, cfg.maxPlayers || 5));
+      const botsFlag = cfg.fillWithBots ? 'true' : 'false';
+      if (typeof window !== 'undefined') {
+        return `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(
+          cfg.code
+        )}&host=${encodeURIComponent(cfg.hostName)}&title=${encodeURIComponent(
+          cfg.title
+        )}&bet=${cfg.betAmount}&max=${maxPlayers}&bots=${botsFlag}&mode=${isDemo ? 'demo' : 'real'}&access=${access}`;
+      }
+      return `https://rei-run.app/?room=${encodeURIComponent(cfg.code)}&max=${maxPlayers}&bots=${botsFlag}&access=${access}`;
+    },
+    [isDemo]
+  );
+
+  const roomInviteUrl = useMemo(
+    () => buildInviteUrlFromConfig(roomConfig),
+    [buildInviteUrlFromConfig, roomConfig]
+  );
+
+  const handleCreateRoomRef = useRef<((cfg: RoomConfig) => void) | null>(null);
+
+  const ensureShareableCreatorRoom = useCallback((): string => {
+    const needsPromotionToDedicatedRoom =
+      isAutoMatchRef.current ||
+      wsRoomSessionKey.startsWith('SOLO_IDLE_') ||
+      roomConfig.code === 'ARENA-AO-VIVO' ||
+      roomConfig.code.startsWith('ARENA-AO-VIVO-');
+
+    // Convidado numa sala existente partilha apenas o link da própria sala em que está
+    if (!needsPromotionToDedicatedRoom || (!isLocalRoomHost && !wsRoomSessionKey.startsWith('SOLO_IDLE_'))) {
+      return buildInviteUrlFromConfig(roomConfig);
     }
-    return `https://rei-run.app/?room=${encodeURIComponent(roomConfig.code)}&max=${maxPlayers}&access=${access}`;
-  }, [roomConfig.code, roomConfig.hostName, roomConfig.title, roomConfig.betAmount, roomConfig.maxPlayers, roomConfig.accessMode, isDemo]);
+
+    const freshCode =
+      roomConfig.code &&
+      roomConfig.code !== 'ARENA-AO-VIVO' &&
+      !roomConfig.code.startsWith('ARENA-AO-VIVO-')
+        ? roomConfig.code
+        : `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
+    const cleanHost = playerName.trim() || 'Hamilton O Zero';
+    const cleanTitle =
+      !roomConfig.title || roomConfig.title === 'Arena Pública ao Vivo'
+        ? `Arena de ${cleanHost}`
+        : roomConfig.title;
+    const promotedConfig: RoomConfig = {
+      ...roomConfig,
+      code: freshCode,
+      title: cleanTitle,
+      hostName: cleanHost,
+      maxPlayers: clampRoomMax(roomConfig.maxPlayers, 5),
+      minPlayers: 2,
+      betAmount: clampBetKz(betAmount),
+      fillWithBots: isAutoMatchRef.current ? false : Boolean(roomConfig.fillWithBots),
+      isDemo,
+      isPrivate: true,
+      accessMode: 'invite-only',
+    };
+    handleCreateRoomRef.current?.(promotedConfig);
+    return buildInviteUrlFromConfig(promotedConfig);
+  }, [betAmount, buildInviteUrlFromConfig, isDemo, isLocalRoomHost, playerName, roomConfig, wsRoomSessionKey]);
 
   const handleShareRoomUrl = useCallback(async () => {
     if (typeof window === 'undefined') return;
-    const urlToCopy = roomInviteUrl;
+    const urlToCopy = ensureShareableCreatorRoom();
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(urlToCopy);
@@ -607,7 +677,7 @@ export default function App() {
     shareCopyTimerRef.current = setTimeout(() => {
       setRoomUrlCopied(false);
     }, 2500);
-  }, [roomInviteUrl]);
+  }, [ensureShareableCreatorRoom]);
 
   useEffect(() => {
     let cancelled = false;
@@ -640,12 +710,13 @@ export default function App() {
   }, [showTrackQr]);
 
   const handleCopyQrInviteUrl = useCallback(async () => {
+    const urlToCopy = ensureShareableCreatorRoom();
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(roomInviteUrl);
+        await navigator.clipboard.writeText(urlToCopy);
       } else {
         const textarea = document.createElement('textarea');
-        textarea.value = roomInviteUrl;
+        textarea.value = urlToCopy;
         textarea.style.position = 'fixed';
         textarea.style.opacity = '0';
         document.body.appendChild(textarea);
@@ -656,7 +727,7 @@ export default function App() {
       }
     } catch {
       const textarea = document.createElement('textarea');
-      textarea.value = roomInviteUrl;
+      textarea.value = urlToCopy;
       textarea.style.position = 'fixed';
       textarea.style.opacity = '0';
       document.body.appendChild(textarea);
@@ -669,7 +740,7 @@ export default function App() {
     setQrInviteCopied(true);
     if (qrCopyTimerRef.current) clearTimeout(qrCopyTimerRef.current);
     qrCopyTimerRef.current = setTimeout(() => setQrInviteCopied(false), 2500);
-  }, [roomInviteUrl]);
+  }, [ensureShareableCreatorRoom]);
 
   const handleDownloadTrackQr = useCallback(() => {
     if (!trackQrDataUrl) return;
@@ -735,6 +806,7 @@ export default function App() {
   }, [t.lobby.cameraHint, t.lobby.manualCodeLabel]);
   const [needsInviteOnboarding, setNeedsInviteOnboarding] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
+    if (isInitialLocalCreator) return false;
     const params = new URLSearchParams(window.location.search);
     const hasRoom = Boolean(params.get('room') || params.get('sala'));
     if (!hasRoom) return false;
@@ -744,17 +816,12 @@ export default function App() {
   });
   const removedLocalIdsRef = useRef<Set<string>>(new Set());
   const startedFromRoomRef = useRef<boolean>(false);
-  const viaInviteRef = useRef<boolean>(
-    typeof window !== 'undefined' &&
-      Boolean(
-        new URLSearchParams(window.location.search).get('room') ||
-          new URLSearchParams(window.location.search).get('sala')
-      )
-  );
+  const viaInviteRef = useRef<boolean>(initialHasUrlRoom && !isInitialLocalCreator);
   const hasAutoOpenedInviteLobbyRef = useRef<boolean>(false);
 
-  const isLocalActivityBusy =
-    needsInviteOnboarding || shopOpen || rulesOpen || isEditingRoomOrProfile || showTrackQr;
+  // Apenas o onboarding inicial de nome/avatar de um convidado bloqueia a largada;
+  // abrir modais informativos (Regras, Loja, Tutorial, QR) nunca pode travar a sala inteira.
+  const isLocalActivityBusy = needsInviteOnboarding;
 
   useEffect(() => {
     if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
@@ -813,6 +880,36 @@ export default function App() {
     }
     return undefined;
   }, [needsInviteOnboarding]);
+
+  // Modal tutorial "Como Jogar" — exibido automaticamente apenas na primeira visita direta (não em links de convite)
+  useEffect(() => {
+    if (
+      typeof window === 'undefined' ||
+      tutorialShownThisSessionRef.current ||
+      isLoadingScreen ||
+      needsInviteOnboarding ||
+      initialHasUrlRoom ||
+      viaInviteRef.current ||
+      isAdminRoute ||
+      lobbyOpen ||
+      showPodium ||
+      status !== 'idle'
+    ) {
+      return;
+    }
+    try {
+      const alreadySeen = localStorage.getItem('rei_zero_how_to_play_seen_v1') === 'true';
+      if (alreadySeen) {
+        tutorialShownThisSessionRef.current = true;
+        return;
+      }
+      tutorialShownThisSessionRef.current = true;
+      localStorage.setItem('rei_zero_how_to_play_seen_v1', 'true');
+      setHowToPlayTutorialOpen(true);
+    } catch {
+      tutorialShownThisSessionRef.current = true;
+    }
+  }, [isLoadingScreen, needsInviteOnboarding, initialHasUrlRoom, isAdminRoute, lobbyOpen, showPodium, status]);
 
   // 10. 5 Concorrentes nas 5 Faixas (Largam juntos na mesma linha: yOffset = 0, distance = 0)
   const [competitors, setCompetitors] = useState<Competitor[]>(() => {
@@ -1102,6 +1199,9 @@ export default function App() {
 
   // Retorno limpo ao lobby ou sala após o fim da corrida (mantendo todos os participantes unidos na mesma sala)
   const handleReturnToLobby = useCallback(() => {
+    if (statusRef.current === 'starting' || statusRef.current === 'running') {
+      return;
+    }
     const returningFromSpectator = isSpectatingRef.current || wasSpectatorOutcome;
     const isPublicMatch = isAutoMatchRef.current || roomConfig.accessMode === 'random';
     const shouldRotateBotsInRoom = isPublicMatch && publicRoundCompletedRef.current;
@@ -1216,12 +1316,61 @@ export default function App() {
       const myId = getSessionPlayerId();
       const effectiveBet = clampBetKz(usedBet);
 
+      const resolveWeightedPayoutForOutcome = (
+        targetRank: number,
+        racers: Competitor[],
+        stakeKz: number
+      ) => {
+        const nonSpectators = racers.filter((c) => !c.isSpectating);
+        const rawCount = nonSpectators.length > 0 ? nonSpectators.length : racers.length;
+        // Valida explicitamente partidas de 2, 3, 4 ou 5 jogadores
+        const validatedPlayerCount: 2 | 3 | 4 | 5 =
+          rawCount <= 2 ? 2 : rawCount === 3 ? 3 : rawCount === 4 ? 4 : 5;
+
+        const split = calculateThreeTorneiras(stakeKz, validatedPlayerCount);
+
+        // Garante integridade matemática das porcentagens (100%) e conservação exata do pote
+        const pctSum =
+          Math.round(
+            ((split.firstPercent ?? 0) +
+              (split.secondPercent ?? 0) +
+              (split.thirdPercent ?? 0) +
+              (split.housePercent ?? 0) +
+              (split.creatorPercent ?? 0)) *
+              10
+          ) / 10;
+        const potSum =
+          split.firstPrizeKz +
+          split.secondPrizeKz +
+          split.thirdPrizeKz +
+          split.houseFeeKz +
+          split.creatorRoyaltyKz;
+
+        if (pctSum !== 100 || potSum !== split.totalPotKz) {
+          const safePot = stakeKz * validatedPlayerCount;
+          const fallbackFirst = Math.floor(safePot * 0.5);
+          const fallbackThird = validatedPlayerCount >= 4 ? stakeKz : 0;
+          const fallbackSecond =
+            validatedPlayerCount >= 3
+              ? Math.max(0, Math.min(safePot - fallbackFirst - fallbackThird, Math.floor(safePot * 0.2)))
+              : 0;
+          if (targetRank === 1) return fallbackFirst;
+          if (targetRank === 2) return fallbackSecond;
+          if (targetRank === 3) return fallbackThird;
+          return 0;
+        }
+
+        if (targetRank === 1) return split.firstPrizeKz;
+        if (targetRank === 2) return split.secondPrizeKz;
+        if (targetRank === 3) return split.thirdPrizeKz; // Devolução da aposta em 4–5J; 0 em 3J (último)
+        return 0; // 4º e 5º lugares perdem sempre
+      };
+
       let displayCompetitors = finalCompetitors;
       let rank = 1;
       let payout = 0;
 
       if (serverRankings && serverRankings.length > 0) {
-        setAuthoritativeRankings(serverRankings);
         const mergedById = new Map(serverRankings.map((r) => [r.id, r]));
         displayCompetitors = serverRankings.map((r) => {
           const localMatch = finalCompetitors.find(
@@ -1245,30 +1394,47 @@ export default function App() {
             isPlayer: isMeActive,
             stumbling: false,
             finished: true,
+            rank: r.rank,
           };
         });
+
+        const normalizedServerRankings: RoomStandingEntry[] = serverRankings.map((entry) => ({
+          ...entry,
+          betAmount: entry.betAmount || effectiveBet,
+          payoutKz: resolveWeightedPayoutForOutcome(
+            entry.rank,
+            displayCompetitors,
+            entry.betAmount || effectiveBet
+          ),
+        }));
+        setAuthoritativeRankings(normalizedServerRankings);
+
         if (!spectatedOutcome) {
           const myEntry = mergedById.get(myId);
           if (myEntry) {
             rank = myEntry.rank;
-            payout = myEntry.payoutKz;
+            payout = resolveWeightedPayoutForOutcome(rank, displayCompetitors, effectiveBet);
           } else {
             const sortedLocal = [...displayCompetitors].sort(
               (a, b) => b.progressDistance - a.progressDistance
             );
             rank = Math.max(1, sortedLocal.findIndex((c) => c.isPlayer) + 1);
-            const torneiras = calculateThreeTorneiras(effectiveBet, displayCompetitors.length);
-            payout = rank === 1 ? torneiras.firstPrizeKz : rank === 2 ? torneiras.secondPrizeKz : 0;
+            payout = resolveWeightedPayoutForOutcome(rank, displayCompetitors, effectiveBet);
           }
         }
       } else {
         setAuthoritativeRankings(null);
+        const sorted = [...finalCompetitors].sort(
+          (a, b) => b.progressDistance - a.progressDistance
+        );
+        const rankById = new Map(sorted.map((c, idx) => [c.id, idx + 1]));
+        displayCompetitors = finalCompetitors.map((c) => ({
+          ...c,
+          rank: rankById.get(c.id) ?? c.rank,
+        }));
         if (!spectatedOutcome) {
-          const torneiras = calculateThreeTorneiras(effectiveBet, finalCompetitors.length);
-          const sorted = [...finalCompetitors].sort((a, b) => b.progressDistance - a.progressDistance);
           rank = Math.max(1, sorted.findIndex((c) => c.isPlayer) + 1);
-          if (rank === 1) payout = torneiras.firstPrizeKz;
-          else if (rank === 2) payout = torneiras.secondPrizeKz;
+          payout = resolveWeightedPayoutForOutcome(rank, displayCompetitors, effectiveBet);
         }
       }
 
@@ -1319,7 +1485,7 @@ export default function App() {
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         betAmount: effectiveBet,
         timeSeconds: TOTAL_GAME_TIME_SECONDS,
-        won: payout > 0,
+        won: payout > effectiveBet,
         payout,
         playerRank: rank,
         totalPlayers: displayCompetitors.length,
@@ -1570,9 +1736,18 @@ export default function App() {
     setLobbyOpen(true);
   }, [clearCountdownTimers, resetCompetitors, roomConfig.code]);
 
-  // Início da corrida de 40 segundos (exclusivo do líder em salas sincronizadas)
+  // Início da corrida (exclusivo do líder criador em salas sincronizadas)
   const handleStartRound = (fromRoom = false) => {
     if (isSpectatingRef.current) return;
+    const inMultiplayerContext =
+      !wsRoomSessionKey.startsWith('SOLO_IDLE_') ||
+      viaInviteRef.current ||
+      initialHasUrlRoom;
+    if (inMultiplayerContext && !isLocalRoomHost) {
+      setRoomNotice(mpStrings.onlyHostCanStart);
+      return;
+    }
+
     const effectiveBet = clampBetKz(fromRoom ? roomConfig.betAmount : betAmount);
     if (balance < effectiveBet || status === 'running' || status === 'starting') return;
     if (Date.now() < startRequestLockUntilRef.current) return;
@@ -1583,6 +1758,7 @@ export default function App() {
       !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
       (serverRoomConnected ||
         viaInviteRef.current ||
+        initialHasUrlRoom ||
         connectedHumansCount > 1 ||
         serverHumansCountRef.current > 1 ||
         !isAutoMatchRef.current);
@@ -1600,6 +1776,15 @@ export default function App() {
       }
       if (!isLocalRoomHost) {
         setRoomNotice(mpStrings.onlyHostCanStart);
+        return;
+      }
+      if (
+        !isPublicMatch &&
+        !roomConfig.fillWithBots &&
+        competitorsRef.current.length < 2 &&
+        serverHumansCountRef.current < 2
+      ) {
+        setRoomNotice(mpStrings.waitingMorePlayersToStart);
         return;
       }
       if (isPublicMatch) {
@@ -1660,8 +1845,11 @@ export default function App() {
           .catch(() => {
             setWsReconnectNonce((n) => n + 1);
           });
-        return;
+      } else {
+        setWsReconnectNonce((n) => n + 1);
       }
+      // Nunca cair para partida local isolada quando o jogador está numa sala multijogador
+      return;
     }
 
     if (betAmount !== effectiveBet) {
@@ -2046,6 +2234,8 @@ export default function App() {
       accessMode,
       isPrivate: accessMode === 'invite-only',
     };
+    const myId = getSessionPlayerId();
+    markCreatedRoomSession(normalizedConfig.code, myId);
     removedLocalIdsRef.current.clear();
     isAutoMatchRef.current = false;
     viaInviteRef.current = false;
@@ -2074,12 +2264,16 @@ export default function App() {
       url.searchParams.set('title', normalizedConfig.title);
       url.searchParams.set('bet', normalizedConfig.betAmount.toString());
       url.searchParams.set('max', String(cap));
+      url.searchParams.set('bots', normalizedConfig.fillWithBots ? 'true' : 'false');
       url.searchParams.set('access', accessMode);
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(
+        { reiCreatorRoom: normalizedConfig.code.toUpperCase(), reiCreatorId: myId },
+        '',
+        url.toString()
+      );
     }
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
-      const myId = getSessionPlayerId();
       fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2115,6 +2309,7 @@ export default function App() {
       }
     }
   };
+  handleCreateRoomRef.current = handleCreateRoom;
 
   const betSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -2141,7 +2336,7 @@ export default function App() {
         const url = new URL(window.location.href);
         if (url.searchParams.has('room') || url.searchParams.has('sala')) {
           url.searchParams.set('bet', clamped.toString());
-          window.history.replaceState({}, '', url.toString());
+          window.history.replaceState(window.history.state, '', url.toString());
         }
       }
       const ws = roomWsRef.current;
@@ -2190,7 +2385,7 @@ export default function App() {
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
       url.searchParams.set('max', String(cap));
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
     const ws = roomWsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -2237,7 +2432,7 @@ export default function App() {
         url.searchParams.set('room', roomConfig.code);
       }
       url.searchParams.set('access', nextMode);
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
     const ws = roomWsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -2288,6 +2483,7 @@ export default function App() {
         clearTimeout(finishFallbackTimerRef.current);
         finishFallbackTimerRef.current = null;
       }
+      clearCreatedRoomSession(roomConfigRef.current.code);
       setConfirmDeleteMain(false);
       startedFromRoomRef.current = false;
       isAutoMatchRef.current = false;
@@ -2353,7 +2549,7 @@ export default function App() {
 
       if (typeof window !== 'undefined') {
         const url = new URL(window.location.href);
-        ['room', 'sala', 'host', 'title', 'max', 'bet', 'access', 'new', 'onboard'].forEach((k) =>
+        ['room', 'sala', 'host', 'title', 'max', 'bots', 'bet', 'access', 'new', 'onboard'].forEach((k) =>
           url.searchParams.delete(k)
         );
         window.history.replaceState({}, '', url.toString());
@@ -2465,6 +2661,7 @@ export default function App() {
       if (payload.hostName) url.searchParams.set('host', payload.hostName);
       if (payload.title) url.searchParams.set('title', payload.title);
       url.searchParams.set('max', String(cap));
+      url.searchParams.set('bots', shouldFillBots ? 'true' : 'false');
       url.searchParams.set('bet', updatedConfig.betAmount.toString());
       url.searchParams.set('access', accessMode);
       window.history.replaceState({}, '', url.toString());
@@ -2485,6 +2682,7 @@ export default function App() {
         hostName?: string;
         maxPlayers?: number;
         betAmount?: number;
+        fillWithBots?: boolean;
         isDemo?: boolean;
         accessMode?: RoomAccessMode;
         viaInvite?: boolean;
@@ -2506,6 +2704,9 @@ export default function App() {
               title: url.searchParams.get('title') || undefined,
               maxPlayers: !isNaN(maxNum) ? Math.max(2, Math.min(5, maxNum)) : undefined,
               betAmount: isNaN(betNum) ? undefined : clampBetKz(betNum),
+              fillWithBots: url.searchParams.has('bots')
+                ? url.searchParams.get('bots') === 'true'
+                : undefined,
               isDemo: url.searchParams.get('mode') ? url.searchParams.get('mode') !== 'real' : undefined,
               accessMode: accessParam === 'random' ? 'random' : 'invite-only',
               viaInvite: true,
@@ -2822,11 +3023,18 @@ export default function App() {
       const meOnServer =
         activeServerHumans.find((p) => p.id === myId) ||
         room.participants.find((p) => p.id === myId);
-      const localIsHost = meOnServer
-        ? Boolean(meOnServer.isHost)
-        : room.creatorId
+      if (room.creatorId && room.creatorId === myId) {
+        isRoomCreatorRef.current = true;
+        viaInviteRef.current = false;
+        markCreatedRoomSession(room.code || roomConfigRef.current.code, myId);
+      }
+      const localIsHost = room.creatorId
         ? room.creatorId === myId
-        : isRoomCreatorRef.current || !viaInviteRef.current;
+        : meOnServer
+        ? Boolean(meOnServer.isHost)
+        : room.hostId
+        ? room.hostId === myId
+        : isRoomCreatorRef.current && !viaInviteRef.current;
       setIsLocalRoomHost(localIsHost);
       serverHumansCountRef.current = activeServerHumans.filter((p) => p.isSpectating !== true).length;
 
@@ -2845,6 +3053,8 @@ export default function App() {
       const cfg = roomConfigRef.current;
       const serverMax = clampRoomMax(room.maxPlayers, cfg.maxPlayers);
       const serverAccess = room.accessMode;
+      const serverFillBots =
+        typeof room.fillWithBots === 'boolean' ? room.fillWithBots : cfg.fillWithBots;
       const serverCode = room.code ? room.code.toUpperCase() : cfg.code;
       const serverTitle = room.title || cfg.title;
       const serverHostName = room.hostName || cfg.hostName;
@@ -2859,6 +3069,7 @@ export default function App() {
         serverTitle !== cfg.title ||
         serverHostName !== cfg.hostName ||
         serverMax !== cfg.maxPlayers ||
+        serverFillBots !== cfg.fillWithBots ||
         (serverAccess && serverAccess !== cfg.accessMode) ||
         shouldAdoptServerBet
       ) {
@@ -2868,6 +3079,7 @@ export default function App() {
           title: serverTitle,
           hostName: serverHostName,
           maxPlayers: serverMax,
+          fillWithBots: serverFillBots,
           betAmount: shouldAdoptServerBet ? serverBet : prev.betAmount,
           accessMode: serverAccess || prev.accessMode,
           isPrivate: (serverAccess || prev.accessMode) === 'invite-only',
@@ -2877,7 +3089,7 @@ export default function App() {
           const url = new URL(window.location.href);
           if (url.searchParams.has('room') || url.searchParams.has('sala')) {
             url.searchParams.set('bet', serverBet.toString());
-            window.history.replaceState({}, '', url.toString());
+            window.history.replaceState(window.history.state, '', url.toString());
           }
         }
       }
@@ -3061,6 +3273,15 @@ export default function App() {
     }) => {
       const roundRoomCode = (payload.room.code || roomConfigRef.current.code || 'ARENA').toUpperCase();
       const roundTrackKey = `${roundRoomCode}:${payload.raceRound}`;
+      if (
+        payload.raceRound < activeRaceRoundRef.current ||
+        (payload.raceRound === activeRaceRoundRef.current &&
+          activeRaceSeedRef.current !== null &&
+          payload.raceSeed !== activeRaceSeedRef.current)
+      ) {
+        startedRoundSetRef.current.clear();
+        finalizedRoundSetRef.current.clear();
+      }
       if (startedRoundSetRef.current.has(roundTrackKey)) return;
       startedRoundSetRef.current.add(roundTrackKey);
       publicRoundCompletedRef.current = false;
@@ -3077,6 +3298,7 @@ export default function App() {
       setWasSpectatorOutcome(false);
 
       activeRaceRoundRef.current = payload.raceRound;
+      activeRaceSeedRef.current = payload.raceSeed;
       setActiveRaceRound(payload.raceRound);
       activeBetForRoundRef.current = effectiveBet;
       remotePlayersRef.current.clear();
@@ -3117,6 +3339,7 @@ export default function App() {
       setShowPodium(false);
       setShowTrackQr(false);
       setRulesOpen(false);
+      setHowToPlayTutorialOpen(false);
       setShopOpen(false);
       setNeedsInviteOnboarding(false);
       setAuthoritativeRankings(null);
@@ -3661,6 +3884,78 @@ export default function App() {
     mpStrings.onlyHostCanStart,
   ]);
 
+  // Rede de segurança HTTP para garantir contagem decrescente e largada sincronizada
+  // mesmo se um pacote WebSocket se perder ao trocar de app no telemóvel
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
+    if (status === 'starting' || status === 'running') return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    let cancelled = false;
+    const myId = getSessionPlayerId();
+    const pollRoomSync = async () => {
+      if (cancelled) return;
+      if (statusRef.current === 'starting' || statusRef.current === 'running') return;
+      const targetCode = (roomConfigRef.current.code || '').trim().toUpperCase();
+      if (!targetCode || targetCode === 'ARENA-AO-VIVO') return;
+      try {
+        const resp = await fetch(`/api/rooms/${encodeURIComponent(targetCode)}`, {
+          cache: 'no-store',
+        });
+        if (!resp.ok || cancelled) return;
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          serverTime?: number;
+          room?: Parameters<NonNullable<typeof beginSynchronizedCountdownRef.current>>[0]['room'];
+        };
+        if (!data.ok || !data.room || cancelled) return;
+        latestServerRoomRef.current = data.room;
+        applyServerRoomStateRef.current?.(false);
+
+        const meInRoom = data.room.participants.find((p) => p.id === myId);
+        const startAt = data.room.syncedRaceStartAt ?? data.room.raceStartAt;
+        const roundNum = data.room.raceRound;
+        const seedVal = data.room.raceSeed;
+        const roundKey = `${(data.room.code || targetCode).toUpperCase()}:${roundNum}`;
+        if (
+          (data.room.raceStatus === 'starting' ||
+            (data.room.raceStatus === 'running' && meInRoom && meInRoom.isSpectating !== true)) &&
+          typeof startAt === 'number' &&
+          typeof roundNum === 'number' &&
+          typeof seedVal === 'number' &&
+          (statusRef.current === 'idle' || statusRef.current === 'completed') &&
+          !isSpectatingRef.current &&
+          (!startedRoundSetRef.current.has(roundKey) ||
+            roundNum < activeRaceRoundRef.current ||
+            (roundNum === activeRaceRoundRef.current &&
+              activeRaceSeedRef.current !== null &&
+              seedVal !== activeRaceSeedRef.current))
+        ) {
+          beginSynchronizedCountdownRef.current?.({
+            room: data.room,
+            raceRound: roundNum,
+            raceSeed: seedVal,
+            raceStartAt: startAt,
+            betAmount: data.room.betAmount,
+            serverTime: data.serverTime,
+          });
+        }
+      } catch {
+        // Ignora erro transitório de rede no polling de reserva
+      }
+    };
+
+    const intervalMs = serverRoomConnected ? 2200 : 1200;
+    const timer = setInterval(() => {
+      void pollRoomSync();
+    }, intervalMs);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [wsRoomSessionKey, status, serverRoomConnected]);
+
   const handleRemoveCompetitor = (id: string) => {
     if (!wsRoomSessionKey.startsWith('SOLO_IDLE_') && !isLocalRoomHost) {
       setRoomNotice(mpStrings.onlyLeaderControlsRoom);
@@ -3692,6 +3987,13 @@ export default function App() {
     const nextFill = !roomConfig.fillWithBots;
     setRoomConfig((prev) => ({ ...prev, fillWithBots: nextFill }));
     setCompetitors((prev) => fitCompetitorsToCapacity(prev, roomConfig.maxPlayers, nextFill));
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('room') || url.searchParams.has('sala')) {
+        url.searchParams.set('bots', nextFill ? 'true' : 'false');
+        window.history.replaceState(window.history.state, '', url.toString());
+      }
+    }
     const ws = roomWsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(
@@ -3702,6 +4004,21 @@ export default function App() {
         })
       );
     }
+    if (
+      !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+      typeof navigator !== 'undefined' &&
+      navigator.onLine
+    ) {
+      fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: roomConfig.code,
+          requesterId: getSessionPlayerId(),
+          fillWithBots: nextFill,
+        }),
+      }).catch(() => {});
+    }
   };
 
   const handleRegenerateRoomCode = () => {
@@ -3710,20 +4027,43 @@ export default function App() {
       return;
     }
     const newCode = `ARENA-${Math.floor(1000 + Math.random() * 9000)}`;
+    const myId = getSessionPlayerId();
+    markCreatedRoomSession(newCode, myId);
     isAutoMatchRef.current = false;
     viaInviteRef.current = false;
     isRoomCreatorRef.current = true;
     setIsLocalRoomHost(true);
     setWsRoomSessionKey(`EXPLICIT_${newCode}_${Date.now()}`);
-    setRoomConfig((prev) => {
-      const updated = { ...prev, code: newCode };
-      if (typeof window !== 'undefined') {
-        const url = new URL(window.location.href);
-        url.searchParams.set('room', newCode);
-        window.history.replaceState({}, '', url.toString());
-      }
-      return updated;
-    });
+    const updatedCfg: RoomConfig = { ...roomConfig, code: newCode };
+    setRoomConfig(updatedCfg);
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', newCode);
+      window.history.replaceState(
+        { reiCreatorRoom: newCode.toUpperCase(), reiCreatorId: myId },
+        '',
+        url.toString()
+      );
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      const myAvatar = AVATARS.find((a) => a.id === selectedAvatarId) || AVATARS[0];
+      fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...updatedCfg,
+          creatorId: myId,
+          requesterId: myId,
+          player: {
+            id: myId,
+            name: playerName,
+            avatar: myAvatar.avatar,
+            avatarId: myAvatar.id,
+            color: myAvatar.color,
+          },
+        }),
+      }).catch(() => {});
+    }
   };
 
   // Seleção e Compra de Avatares
@@ -3795,7 +4135,10 @@ export default function App() {
   };
 
   const currentAvatar = getLocalizedAvatar(selectedAvatarId, lang);
-  const torneirasPool = calculateThreeTorneiras(betAmount, competitors.length);
+  const activePoolBet = showPodium ? activeBetForRoundRef.current || betAmount : betAmount;
+  const activePoolPlayers =
+    competitors.filter((c) => !c.isSpectating).length || competitors.length;
+  const torneirasPool = calculateThreeTorneiras(activePoolBet, activePoolPlayers);
 
   // Rota Administrativa /admin-rei-zero
   if (isAdminRoute) {
@@ -3995,7 +4338,12 @@ export default function App() {
                 variants={roomControlItemVariants}
                 whileTap={{ scale: 0.97 }}
                 type="button"
-                onClick={() => setShowTrackQr((prev) => !prev)}
+                onClick={() => {
+                  if (!showTrackQr) {
+                    ensureShareableCreatorRoom();
+                  }
+                  setShowTrackQr((prev) => !prev);
+                }}
                 className={`w-full px-2 py-2 sm:py-1.5 rounded-xl border text-[10px] font-mono font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
                   showTrackQr
                     ? 'bg-amber-500 text-zinc-950 border-amber-300 font-black'
@@ -4282,6 +4630,7 @@ export default function App() {
               onDeleteRoom={handleDeleteRoom}
               onLeaveRoom={handleLeaveRoom}
               onFindRandomRoom={handleFindRandomRoom}
+              onEnsureShareableRoom={ensureShareableCreatorRoom}
               onEditingStateChange={setIsEditingRoomOrProfile}
               roomNotice={roomNotice}
               playerName={playerName}
@@ -4352,6 +4701,20 @@ export default function App() {
       />
 
       <RulesModal isOpen={rulesOpen} onClose={() => setRulesOpen(false)} />
+
+      <HowToPlayTutorialModal
+        isOpen={howToPlayTutorialOpen}
+        onClose={() => {
+          setHowToPlayTutorialOpen(false);
+          if (typeof window !== 'undefined') {
+            try {
+              localStorage.setItem('rei_zero_how_to_play_seen_v1', 'true');
+            } catch {
+              // Ignore storage errors
+            }
+          }
+        }}
+      />
 
       {/* 3.1 Modal de Verificação Provably Fair iGaming */}
       <ProvablyFairModal

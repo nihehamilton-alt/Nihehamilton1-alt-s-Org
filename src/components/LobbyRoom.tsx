@@ -48,6 +48,7 @@ interface JoinRoomPayload {
   hostName?: string;
   maxPlayers?: number;
   betAmount?: number;
+  fillWithBots?: boolean;
   isDemo?: boolean;
   accessMode?: RoomAccessMode;
   viaInvite?: boolean;
@@ -69,6 +70,7 @@ interface LobbyRoomProps {
   onDeleteRoom?: () => void;
   onLeaveRoom?: () => void;
   onFindRandomRoom?: () => Promise<void> | void;
+  onEnsureShareableRoom?: () => string;
   onEditingStateChange?: (isEditing: boolean) => void;
   roomNotice?: string | null;
   playerName?: string;
@@ -113,6 +115,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   onDeleteRoom,
   onLeaveRoom,
   onFindRandomRoom,
+  onEnsureShareableRoom,
   onEditingStateChange,
   roomNotice = null,
   playerName = 'REI ZERO',
@@ -305,6 +308,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
               title: url.searchParams.get('title') || undefined,
               maxPlayers: !isNaN(maxNum) ? Math.max(2, Math.min(5, maxNum)) : undefined,
               betAmount: isNaN(betNum) ? undefined : clampBetKz(betNum),
+              fillWithBots: url.searchParams.has('bots') ? url.searchParams.get('bots') === 'true' : undefined,
               isDemo: url.searchParams.get('mode') ? url.searchParams.get('mode') !== 'real' : undefined,
               accessMode: accessParam === 'random' ? 'random' : 'invite-only',
               viaInvite: true,
@@ -416,8 +420,12 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
           roomConfig.code
         )}&host=${encodeURIComponent(roomConfig.hostName)}&title=${encodeURIComponent(
           roomConfig.title
-        )}&bet=${roomConfig.betAmount}&max=${maxPlayers}&mode=${isDemo ? 'demo' : 'real'}&access=${currentAccessMode}`
-      : `https://rei-run.app/?room=${roomConfig.code}&max=${maxPlayers}&access=${currentAccessMode}`;
+        )}&bet=${roomConfig.betAmount}&max=${maxPlayers}&bots=${
+          roomConfig.fillWithBots ? 'true' : 'false'
+        }&mode=${isDemo ? 'demo' : 'real'}&access=${currentAccessMode}`
+      : `https://rei-run.app/?room=${roomConfig.code}&max=${maxPlayers}&bots=${
+          roomConfig.fillWithBots ? 'true' : 'false'
+        }&access=${currentAccessMode}`;
 
   useEffect(() => {
     QRCode.toDataURL(shareUrl, {
@@ -443,12 +451,13 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   };
 
   const handleCopyLink = async () => {
+    const targetUrl = onEnsureShareableRoom ? onEnsureShareableRoom() : shareUrl;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(shareUrl);
+        await navigator.clipboard.writeText(targetUrl);
       } else {
         const textarea = document.createElement('textarea');
-        textarea.value = shareUrl;
+        textarea.value = targetUrl;
         textarea.style.position = 'fixed';
         textarea.style.opacity = '0';
         document.body.appendChild(textarea);
@@ -484,23 +493,26 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   };
 
   const handleShareWhatsApp = () => {
-    const text = `👑 REI RUN · ${roomConfig.title} (${roomConfig.code})\n👤 ${t.lobby.hostLabel} ${roomConfig.hostName}\n💰 ${t.lobby.betLabel} ${formatMoney(roomConfig.betAmount)}\n🏁 ${t.lobby.sameMatchNote}\n👉 ${shareUrl}`;
+    const targetUrl = onEnsureShareableRoom ? onEnsureShareableRoom() : shareUrl;
+    const text = `👑 REI RUN · ${roomConfig.title} (${roomConfig.code})\n👤 ${t.lobby.hostLabel} ${roomConfig.hostName}\n💰 ${t.lobby.betLabel} ${formatMoney(roomConfig.betAmount)}\n🏁 ${t.lobby.sameMatchNote}\n👉 ${targetUrl}`;
     const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
     openExternalShare(url);
   };
 
   const handleShareFacebook = () => {
-    const url = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareUrl)}`;
+    const targetUrl = onEnsureShareableRoom ? onEnsureShareableRoom() : shareUrl;
+    const url = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(targetUrl)}`;
     openExternalShare(url);
   };
 
   const handleShareInstagramOrNative = async () => {
+    const targetUrl = onEnsureShareableRoom ? onEnsureShareableRoom() : shareUrl;
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
           title: `REI RUN — ${roomConfig.title}`,
           text: `👑 ${roomConfig.title} (${roomConfig.code}) · ${formatMoney(roomConfig.betAmount)} · ${t.officialPhrase}`,
-          url: shareUrl,
+          url: targetUrl,
         });
         return;
       } catch {
@@ -911,7 +923,10 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
 
               <button
                 type="button"
-                onClick={() => setShowQrModal(true)}
+                onClick={() => {
+                  onEnsureShareableRoom?.();
+                  setShowQrModal(true);
+                }}
                 className="py-2.5 px-2 rounded-xl game-btn-gold text-zinc-950 font-black text-xs font-mono flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
               >
                 <QrCode size={15} />
@@ -937,7 +952,10 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
 
             <button
               type="button"
-              onClick={() => setShowQrModal(true)}
+              onClick={() => {
+                onEnsureShareableRoom?.();
+                setShowQrModal(true);
+              }}
               className="mt-1 p-2.5 bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/30 hover:border-amber-500/60 rounded-xl flex items-center justify-between gap-3 text-left transition-all cursor-pointer group"
             >
               <div className="flex items-center gap-2.5">
@@ -1443,18 +1461,43 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
             </div>
           )}
 
-          <div className="p-3 game-subplate rounded-2xl border border-amber-500/35 flex items-center justify-between text-xs font-mono">
-            <div>
-              <span className="text-zinc-500 block text-[10px]">{t.lobby.arenaPot}</span>
-              <span className="font-black text-amber-400 text-sm">
-                {formatMoney(torneiras.totalPotKz)}
-              </span>
+          <div className="p-3 game-subplate rounded-2xl border border-amber-500/35 flex flex-col gap-1.5 text-xs font-mono">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-500 block text-[10px]">
+                  {t.lobby.arenaPot} (x{torneiras.playerCount ?? Math.max(2, competitors.length)})
+                </span>
+                <span className="font-black text-amber-400 text-sm">
+                  {formatMoney(torneiras.totalPotKz)}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-zinc-500 block text-[10px]">
+                  🥇 1º ({torneiras.firstPercent ?? 50}%)
+                </span>
+                <span className="font-black text-emerald-400 text-sm">
+                  {formatMoney(torneiras.firstPrizeKz)}
+                </span>
+              </div>
             </div>
-            <div className="text-right">
-              <span className="text-zinc-500 block text-[10px]">{t.lobby.championPrize}</span>
-              <span className="font-black text-emerald-400 text-sm">
-                {formatMoney(torneiras.firstPrizeKz)}
-              </span>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-400 border-t border-white/10 pt-1">
+              {torneiras.secondPrizeKz > 0 ? (
+                <span>
+                  🥈 2º ({torneiras.secondPercent ?? 20}%):{' '}
+                  <strong className="text-emerald-300">{formatMoney(torneiras.secondPrizeKz)}</strong>
+                </span>
+              ) : (
+                <span className="text-rose-400/90">🥈 2º: 0 Kz (1v1)</span>
+              )}
+              {torneiras.thirdKeepsStake ? (
+                <span className="text-sky-300">
+                  🛡️ 3º: {formatMoney(torneiras.thirdPrizeKz)} (0% perda)
+                </span>
+              ) : (
+                <span className="text-zinc-500">
+                  {(torneiras.playerCount ?? 2) === 3 ? '🥉 3º perde' : '🏆 Duelo 1v1'}
+                </span>
+              )}
             </div>
           </div>
 

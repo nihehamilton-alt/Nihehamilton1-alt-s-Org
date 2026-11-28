@@ -74,9 +74,13 @@ export const MatchHistoryCard: React.FC<MatchHistoryCardProps> = ({ history }) =
                 </div>
 
                 <div className="text-right shrink-0 font-mono tabular-nums">
-                  {item.payout > 0 ? (
+                  {item.payout > item.betAmount ? (
                     <span className="font-black text-emerald-400 text-xs">
                       +{formatMoney(item.payout)}
+                    </span>
+                  ) : item.payout > 0 ? (
+                    <span className="font-bold text-sky-300 text-xs">
+                      ={formatMoney(item.payout)}
                     </span>
                   ) : (
                     <span className="text-[11px] font-bold text-zinc-500">—</span>

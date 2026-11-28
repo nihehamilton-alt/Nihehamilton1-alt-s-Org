@@ -249,13 +249,21 @@ export interface RoomConfig {
 }
 
 export interface ThreeTorneirasSplit {
+  playerCount?: number;
   totalPotKz: number;
-  winnersPotKz: number; // 70%
-  houseFeeKz: number;    // 20%
-  creatorRoyaltyKz: number; // 10% para Hamilton David Nihefe Muenda - O Zero
-  firstPrizeKz: number;  // Maior fatia dos vencedores
-  secondPrizeKz: number; // Segunda fatia
-  thirdPrizeKz: number;  // Terceira fatia
+  winnersPotKz: number; // Soma retornada aos corredores (1º + 2º + reembolso 3º quando aplicável)
+  houseFeeKz: number; // Taxa da Casa (proporção 2:1 sobre o saldo restante)
+  creatorRoyaltyKz: number; // Royalties do Criador (Hamilton David Nihefe Muenda - O Zero)
+  firstPrizeKz: number; // Prémio do 1º Lugar
+  secondPrizeKz: number; // Prémio do 2º Lugar
+  thirdPrizeKz: number; // Devolução da aposta do 3º Lugar (4–5 jogadores) ou 0 (2–3 jogadores)
+  firstPercent?: number;
+  secondPercent?: number;
+  thirdPercent?: number;
+  winnersPercent?: number;
+  housePercent?: number;
+  creatorPercent?: number;
+  thirdKeepsStake?: boolean;
 }
 
 export interface RacePerformanceMetrics {
