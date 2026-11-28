@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   GameStatus,
   RoundHistory,
@@ -20,7 +20,7 @@ import {
 } from './types/game';
 import { getMultiplayerStrings } from './utils/multiplayerStrings';
 import { ClientTelemetryValidator } from './utils/telemetryValidator';
-import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy, Camera, LogOut } from 'lucide-react';
+import { Trash2, Shuffle, Lock, Users, Share2, Check, QrCode, Download, X, Copy, Camera, LogOut, Loader2 } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { TOTAL_GAME_TIME_SECONDS, LANE_CENTERS, RIVAL_LANE_SLOTS } from './game/constants';
@@ -36,6 +36,11 @@ import { GameCanvas } from './components/GameCanvas';
 import { BettingPanel } from './components/BettingPanel';
 import { RulesModal } from './components/RulesModal';
 import { HowToPlayTutorialModal } from './components/HowToPlayTutorialModal';
+import { SpectatorOverviewModal } from './components/SpectatorOverviewModal';
+import {
+  Top3StreakCelebrationOverlay,
+  Top3CelebrationPayload,
+} from './components/Top3StreakCelebrationOverlay';
 import { LobbyRoom } from './components/LobbyRoom';
 import { ResultsPodium } from './components/ResultsPodium';
 import { RankingModal } from './components/RankingModal';
@@ -180,6 +185,7 @@ export default function App() {
     }
     return true;
   });
+  const shouldReduceMotion = useReducedMotion();
 
   // 5. Saldos em Kwanzas (KZ)
   const [demoBalance, setDemoBalance] = useState<number>(() => {
@@ -233,8 +239,12 @@ export default function App() {
     }
     return 0;
   });
+  const top3StreakRef = useRef<number>(top3Streak);
+  const [top3Celebration, setTop3Celebration] = useState<Top3CelebrationPayload | null>(null);
+  const handleDismissTop3Celebration = useCallback(() => setTop3Celebration(null), []);
 
   useEffect(() => {
+    top3StreakRef.current = top3Streak;
     localStorage.setItem('rei_zero_top3_streak', top3Streak.toString());
   }, [top3Streak]);
 
@@ -456,6 +466,9 @@ export default function App() {
   const isSpectatingRef = useRef<boolean>(false);
   const [spectatedRunnerId, setSpectatedRunnerId] = useState<string | null>(null);
   const [wasSpectatorOutcome, setWasSpectatorOutcome] = useState<boolean>(false);
+  const [spectatorOverviewOpen, setSpectatorOverviewOpen] = useState<boolean>(false);
+  const [liveCanvasRunners, setLiveCanvasRunners] = useState<Competitor[]>([]);
+  const [spectatorOverviewTick, setSpectatorOverviewTick] = useState<number>(0);
   const previousPublicBotIdsRef = useRef<string[]>([]);
   const publicRoundCompletedRef = useRef<boolean>(false);
   const rotatePublicBotsInCompetitorsRef = useRef<
@@ -1215,6 +1228,7 @@ export default function App() {
     setIsSpectating(false);
     setSpectatedRunnerId(null);
     setWasSpectatorOutcome(false);
+    setTop3Celebration(null);
     setShowPodium(false);
     setPendingSyncPodium(false);
     setAuthoritativeRankings(null);
@@ -1467,15 +1481,21 @@ export default function App() {
         sounds.playTopThreeCelebration(rank);
       }
 
-      if (rank >= 1 && rank <= 3) {
-        setTop3Streak((prev) => {
-          const newStreak = prev + 1;
-          localStorage.setItem('rei_zero_top3_streak', newStreak.toString());
-          return newStreak;
+      if (rank === 1 || rank === 2 || rank === 3) {
+        const nextStreak = top3StreakRef.current + 1;
+        top3StreakRef.current = nextStreak;
+        setTop3Streak(nextStreak);
+        localStorage.setItem('rei_zero_top3_streak', nextStreak.toString());
+        setTop3Celebration({
+          key: Date.now(),
+          rank,
+          streak: nextStreak,
         });
       } else {
+        top3StreakRef.current = 0;
         setTop3Streak(0);
         localStorage.setItem('rei_zero_top3_streak', '0');
+        setTop3Celebration(null);
       }
 
       setShowPodium(true);
@@ -1700,6 +1720,16 @@ export default function App() {
     }
   }, [alignTrackToTop, clearCountdownTimers, roomConfig.code, wsRoomSessionKey]);
 
+  const handleEnterSpectatorWithFocus = useCallback(
+    (focusRunnerId?: string | null) => {
+      handleEnterSpectatorMode();
+      if (focusRunnerId) {
+        setSpectatedRunnerId(focusRunnerId);
+      }
+    },
+    [handleEnterSpectatorMode]
+  );
+
   const handleExitSpectatorMode = useCallback(() => {
     clearCountdownTimers();
     if (finishFallbackTimerRef.current) {
@@ -1710,6 +1740,8 @@ export default function App() {
     setIsSpectating(false);
     setSpectatedRunnerId(null);
     setWasSpectatorOutcome(false);
+    setSpectatorOverviewOpen(false);
+    setLiveCanvasRunners([]);
     setCountdownValue(null);
     statusRef.current = 'idle';
     setStatus('idle');
@@ -1736,6 +1768,112 @@ export default function App() {
     setLobbyOpen(true);
   }, [clearCountdownTimers, resetCompetitors, roomConfig.code]);
 
+  useEffect(() => {
+    if (showPodium && spectatorOverviewOpen) {
+      setSpectatorOverviewOpen(false);
+    }
+  }, [showPodium, spectatorOverviewOpen]);
+
+  useEffect(() => {
+    if (!spectatorOverviewOpen) return;
+    if (isSpectating) return;
+    if (serverRaceStatus !== 'running' && serverRaceStatus !== 'starting') return;
+
+    const timer = setInterval(() => {
+      setSpectatorOverviewTick((tick) => tick + 1);
+    }, 220);
+    return () => clearInterval(timer);
+  }, [spectatorOverviewOpen, isSpectating, serverRaceStatus]);
+
+  const { overviewRunners, overviewElapsedSeconds } = useMemo(() => {
+    void spectatorOverviewTick;
+    if (isSpectating) {
+      const source = liveCanvasRunners.length > 0 ? liveCanvasRunners : competitors;
+      return {
+        overviewRunners: source,
+        overviewElapsedSeconds: elapsedSeconds,
+      };
+    }
+
+    const myId = getSessionPlayerId();
+    const serverRoom = latestServerRoomRef.current;
+    const activeInvestigations = telemetryValidatorRef.current.getInvestigations();
+    const serverParticipants = (serverRoom?.participants || []).filter(
+      (p) => p.connected !== false && p.isSpectating !== true
+    );
+
+    let mergedRunners: Competitor[] = [];
+    if (serverParticipants.length > 0) {
+      mergedRunners = serverParticipants.map((p, idx) => {
+        const snap = remotePlayersRef.current.get(p.id);
+        const laneVal = (typeof (snap?.lane ?? p.lane) === 'number'
+          ? Math.max(0, Math.min(4, Number(snap?.lane ?? p.lane)))
+          : (RIVAL_LANE_SLOTS[idx % RIVAL_LANE_SLOTS.length] as Lane)) as Lane;
+        const targetLaneVal = (typeof (snap?.targetLane ?? p.targetLane ?? laneVal) === 'number'
+          ? Math.max(0, Math.min(4, Number(snap?.targetLane ?? p.targetLane ?? laneVal)))
+          : laneVal) as Lane;
+        const distVal = snap?.progressDistance ?? Number(p.progressDistance || 0);
+        const laneXVal =
+          typeof (snap?.laneX ?? p.laneX) === 'number'
+            ? Number(snap?.laneX ?? p.laneX)
+            : LANE_CENTERS[targetLaneVal];
+
+        return {
+          id: p.id,
+          name: p.id === myId ? `${p.name} ${t.youTag}` : p.name,
+          avatar: p.avatar,
+          avatarId: p.avatarId,
+          color: p.color,
+          lane: laneVal,
+          targetLane: targetLaneVal,
+          laneX: laneXVal,
+          yOffset: 0,
+          progressDistance: distVal,
+          action: (snap?.action ?? (p.action as PlayerAction)) || 'running',
+          jumpY: snap?.jumpY ?? Number(p.jumpY || 0),
+          isBot: false,
+          isPlayer: p.id === myId,
+          isHost: p.isHost,
+          isRemoteHuman: p.id !== myId,
+          profileReady: p.profileReady !== false && !p.selectingProfile,
+          betAmount:
+            typeof p.betAmount === 'number'
+              ? clampBetKz(p.betAmount)
+              : serverRoom?.betAmount ?? betAmountRef.current,
+          sessionStatus: activeInvestigations[p.id]?.sessionStatus ?? p.sessionStatus ?? 'normal',
+          stumbling: Boolean(snap?.stumbling ?? p.stumbling),
+          finished: Boolean(snap?.finished ?? p.finished),
+        };
+      });
+    } else {
+      mergedRunners = competitors.filter((c) => !c.isSpectating);
+    }
+
+    const rawStartAt =
+      serverRaceStartAtRef.current ?? serverRoom?.syncedRaceStartAt ?? serverRoom?.raceStartAt;
+    const localStartAt =
+      typeof rawStartAt === 'number' ? rawStartAt - serverClockOffsetRef.current : null;
+    const computedElapsed =
+      serverRaceStatus === 'completed'
+        ? TOTAL_GAME_TIME_SECONDS
+        : localStartAt && (serverRaceStatus === 'running' || serverRaceStatus === 'starting')
+        ? Math.max(0, Math.min(TOTAL_GAME_TIME_SECONDS, (Date.now() - localStartAt) / 1000))
+        : elapsedSeconds;
+
+    return {
+      overviewRunners: mergedRunners,
+      overviewElapsedSeconds: computedElapsed,
+    };
+  }, [
+    spectatorOverviewTick,
+    isSpectating,
+    liveCanvasRunners,
+    competitors,
+    elapsedSeconds,
+    serverRaceStatus,
+    t.youTag,
+  ]);
+
   // Início da corrida (exclusivo do líder criador em salas sincronizadas)
   const handleStartRound = (fromRoom = false) => {
     if (isSpectatingRef.current) return;
@@ -1753,6 +1891,7 @@ export default function App() {
     if (Date.now() < startRequestLockUntilRef.current) return;
 
     sounds.unlockAudio();
+    setTop3Celebration(null);
 
     const inServerRoomSession =
       !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
@@ -2987,24 +3126,34 @@ export default function App() {
       }
 
       if (nextServerRaceStatus === 'running' || nextServerRaceStatus === 'starting') {
+        const nowSyncMs = Date.now();
         room.participants.forEach((p) => {
           if (p.id === myId || p.isSpectating || p.connected === false) return;
-          if (!remotePlayersRef.current.has(p.id)) {
-            const pLane = (typeof p.lane === 'number' ? Math.max(0, Math.min(4, p.lane)) : 1) as Lane;
+          const existing = remotePlayersRef.current.get(p.id);
+          const serverDist = Number(p.progressDistance || 0);
+          if (
+            !existing ||
+            nowSyncMs - existing.updatedAt > 900 ||
+            serverDist > existing.progressDistance
+          ) {
+            const pLane = (typeof p.lane === 'number'
+              ? Math.max(0, Math.min(4, p.lane))
+              : existing?.lane ?? 1) as Lane;
             const pTarget = (typeof p.targetLane === 'number'
               ? Math.max(0, Math.min(4, p.targetLane))
-              : pLane) as Lane;
+              : existing?.targetLane ?? pLane) as Lane;
             remotePlayersRef.current.set(p.id, {
               playerId: p.id,
-              progressDistance: Number(p.progressDistance || 0),
+              progressDistance: Math.max(existing?.progressDistance ?? 0, serverDist),
               lane: pLane,
               targetLane: pTarget,
-              laneX: typeof p.laneX === 'number' ? p.laneX : LANE_CENTERS[pTarget],
-              action: (p.action as RemoteRunnerSnapshot['action']) || 'running',
-              jumpY: Number(p.jumpY || 0),
-              stumbling: Boolean(p.stumbling),
-              finished: Boolean(p.finished),
-              updatedAt: Date.now(),
+              laneX: typeof p.laneX === 'number' ? p.laneX : existing?.laneX ?? LANE_CENTERS[pTarget],
+              action:
+                (p.action as RemoteRunnerSnapshot['action']) || existing?.action || 'running',
+              jumpY: typeof p.jumpY === 'number' ? p.jumpY : existing?.jumpY ?? 0,
+              stumbling: typeof p.stumbling === 'boolean' ? p.stumbling : Boolean(existing?.stumbling),
+              finished: typeof p.finished === 'boolean' ? p.finished : Boolean(existing?.finished),
+              updatedAt: nowSyncMs,
             });
           }
         });
@@ -3884,8 +4033,8 @@ export default function App() {
     mpStrings.onlyHostCanStart,
   ]);
 
-  // Rede de segurança HTTP para garantir contagem decrescente e largada sincronizada
-  // mesmo se um pacote WebSocket se perder ao trocar de app no telemóvel
+  // Fallback HTTP de segurança: força verificação via fetch a cada 1 segundo quando o WebSocket
+  // perde a conexão (ou ao retomar o separador), sincronizando a largada mesmo com latência
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (wsRoomSessionKey.startsWith('SOLO_IDLE_')) return;
@@ -3893,12 +4042,17 @@ export default function App() {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
     let cancelled = false;
+    let inFlight = false;
     const myId = getSessionPlayerId();
+
     const pollRoomSync = async () => {
-      if (cancelled) return;
+      if (cancelled || inFlight) return;
       if (statusRef.current === 'starting' || statusRef.current === 'running') return;
       const targetCode = (roomConfigRef.current.code || '').trim().toUpperCase();
       if (!targetCode || targetCode === 'ARENA-AO-VIVO') return;
+
+      inFlight = true;
+      const reqSentAt = Date.now();
       try {
         const resp = await fetch(`/api/rooms/${encodeURIComponent(targetCode)}`, {
           cache: 'no-store',
@@ -3910,6 +4064,16 @@ export default function App() {
           room?: Parameters<NonNullable<typeof beginSynchronizedCountdownRef.current>>[0]['room'];
         };
         if (!data.ok || !data.room || cancelled) return;
+
+        if (typeof data.serverTime === 'number') {
+          const rtt = Math.max(0, Date.now() - reqSentAt);
+          if (!hasCalibratedClockRef.current || rtt < bestRttRef.current) {
+            bestRttRef.current = Math.min(bestRttRef.current, rtt);
+            serverClockOffsetRef.current = data.serverTime - (reqSentAt + rtt * 0.5);
+            hasCalibratedClockRef.current = true;
+          }
+        }
+
         latestServerRoomRef.current = data.room;
         applyServerRoomStateRef.current?.(false);
 
@@ -3942,17 +4106,36 @@ export default function App() {
           });
         }
       } catch {
-        // Ignora erro transitório de rede no polling de reserva
+        // Ignora erro transitório de rede no polling de fallback
+      } finally {
+        inFlight = false;
       }
     };
 
-    const intervalMs = serverRoomConnected ? 2200 : 1200;
+    const wsDisconnected =
+      !serverRoomConnected || roomWsRef.current?.readyState !== WebSocket.OPEN;
+    if (wsDisconnected) {
+      void pollRoomSync();
+    }
+
+    const handleResumeSync = () => {
+      if (typeof document === 'undefined' || !document.hidden) {
+        void pollRoomSync();
+      }
+    };
+    window.addEventListener('focus', handleResumeSync);
+    document.addEventListener('visibilitychange', handleResumeSync);
+
+    const intervalMs = wsDisconnected ? 1000 : 2500;
     const timer = setInterval(() => {
       void pollRoomSync();
     }, intervalMs);
+
     return () => {
       cancelled = true;
       clearInterval(timer);
+      window.removeEventListener('focus', handleResumeSync);
+      document.removeEventListener('visibilitychange', handleResumeSync);
     };
   }, [wsRoomSessionKey, status, serverRoomConnected]);
 
@@ -4228,6 +4411,7 @@ export default function App() {
         }
         isSpectating={isSpectating}
         onSpectate={handleEnterSpectatorMode}
+        onOpenSpectatorOverview={() => setSpectatorOverviewOpen(true)}
       />
 
       {/* 2. Área Central de Corrida */}
@@ -4428,6 +4612,38 @@ export default function App() {
             </div>
           )}
 
+          {status === 'idle' &&
+            !isSpectating &&
+            !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+            (serverRaceStatus === 'running' || serverRaceStatus === 'starting') && (
+              <div
+                data-testid="inactive-spectator-banner"
+                className="w-full px-3 py-2.5 rounded-2xl bg-sky-950/75 border border-sky-400/55 text-sky-100 text-xs font-mono flex flex-wrap items-center justify-between gap-2 shadow-lg"
+              >
+                <span className="font-semibold flex items-center gap-1.5 min-w-0">
+                  <span>👻</span>
+                  <span className="truncate">{mpStrings.raceInProgressBanner}</span>
+                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="main-spectator-overview-btn"
+                    onClick={() => setSpectatorOverviewOpen(true)}
+                    className="px-3 py-1.5 rounded-xl bg-sky-500/25 hover:bg-sky-500/40 border border-sky-300/60 text-sky-100 font-black text-[11px] uppercase cursor-pointer transition-colors whitespace-nowrap"
+                  >
+                    📊 {mpStrings.spectatorOverviewBtn}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEnterSpectatorMode}
+                    className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-sky-400 to-cyan-300 hover:from-sky-300 hover:to-cyan-200 text-zinc-950 font-black text-[11px] uppercase cursor-pointer transition-colors whitespace-nowrap"
+                  >
+                    👻 {mpStrings.watchLiveRaceBtn}
+                  </button>
+                </div>
+              </div>
+            )}
+
           {pendingSyncPodium && status === 'completed' && !showPodium && (
             <div className="w-full px-3 py-2 rounded-xl bg-emerald-950/70 border border-emerald-400/50 text-emerald-200 text-xs font-mono font-bold flex items-center justify-center gap-2">
               <span className="animate-spin">⏳</span>
@@ -4447,10 +4663,11 @@ export default function App() {
             onFinish={handleRaceFinish}
             onCoinCollected={handleCoinCollected}
             onTimeUpdate={(sec) => setElapsedSeconds(sec)}
+            onCompetitorsProgress={isSpectating ? setLiveCanvasRunners : undefined}
             onRankUpdate={(rank) => setUserRank(rank)}
             onRestart={handleReturnToLobby}
             roundNonce={roundNonce}
-            pause3d={showPodium || lobbyOpen || showTrackQr}
+            pause3d={showPodium || lobbyOpen || showTrackQr || spectatorOverviewOpen}
             isDemo={isDemo}
             betAmountKz={betAmount}
             raceSeed={raceSeed}
@@ -4461,6 +4678,7 @@ export default function App() {
             spectatedRunnerId={spectatedRunnerId}
             onSelectSpectatedRunner={setSpectatedRunnerId}
             onExitSpectator={handleExitSpectatorMode}
+            onOpenSpectatorOverview={() => setSpectatorOverviewOpen(true)}
           />
         </section>
 
@@ -4650,6 +4868,10 @@ export default function App() {
                 (serverRaceStatus === 'running' || serverRaceStatus === 'starting')
               }
               onEnterSpectatorMode={handleEnterSpectatorMode}
+              onOpenSpectatorOverview={() => {
+                setLobbyOpen(false);
+                setSpectatorOverviewOpen(true);
+              }}
               chatMessages={roomChatMessages}
               onSendChatMessage={handleSendRoomChatMessage}
               localPlayerId={getSessionPlayerId()}
@@ -4686,6 +4908,11 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      <Top3StreakCelebrationOverlay
+        celebration={top3Celebration}
+        onDismiss={handleDismissTop3Celebration}
+      />
+
       <RankingModal isOpen={rankingOpen} onClose={() => setRankingOpen(false)} />
 
       <ShopModal
@@ -4714,6 +4941,27 @@ export default function App() {
             }
           }
         }}
+      />
+
+      <SpectatorOverviewModal
+        isOpen={spectatorOverviewOpen}
+        onClose={() => setSpectatorOverviewOpen(false)}
+        runners={overviewRunners}
+        isSpectating={isSpectating}
+        canSpectate={
+          status === 'idle' &&
+          !wsRoomSessionKey.startsWith('SOLO_IDLE_') &&
+          (serverRaceStatus === 'running' || serverRaceStatus === 'starting')
+        }
+        spectatedRunnerId={spectatedRunnerId}
+        onSelectSpectatedRunner={setSpectatedRunnerId}
+        onEnterSpectatorMode={handleEnterSpectatorWithFocus}
+        roomCode={roomConfig.code}
+        raceRound={activeRaceRound || serverRaceRoundRef.current || 1}
+        raceStatus={isSpectating ? status : serverRaceStatus}
+        elapsedSeconds={overviewElapsedSeconds}
+        betAmountKz={roomConfig.betAmount}
+        serverConnected={serverRoomConnected}
       />
 
       {/* 3.1 Modal de Verificação Provably Fair iGaming */}
@@ -4956,10 +5204,36 @@ export default function App() {
               className="relative z-10 flex flex-col items-center max-w-md w-full game-panel-gold rounded-3xl p-7"
             >
               <div className="relative mb-4">
-                <div className="w-24 h-24 rounded-full bg-gradient-to-b from-amber-400/25 to-amber-600/10 border-2 border-amber-400/60 flex items-center justify-center shadow-[0_0_32px_rgba(245,158,11,0.45)]">
-                  <span className="text-6xl filter drop-shadow-[0_0_18px_rgba(245,158,11,0.9)]">
+                <div className="relative w-24 h-24 rounded-full bg-gradient-to-b from-amber-400/25 to-amber-600/10 border border-amber-400/40 flex items-center justify-center shadow-[0_0_32px_rgba(245,158,11,0.45)]">
+                  <motion.div
+                    aria-hidden="true"
+                    data-testid="splash-loading-ring"
+                    animate={shouldReduceMotion ? undefined : { rotate: 360 }}
+                    transition={
+                      shouldReduceMotion
+                        ? undefined
+                        : { duration: 2.6, repeat: Infinity, ease: 'linear' }
+                    }
+                    style={{ willChange: 'transform' }}
+                    className="absolute -inset-1 rounded-full border-2 border-transparent border-t-amber-300 border-r-amber-400/70 pointer-events-none"
+                  />
+                  <motion.span
+                    data-testid="splash-loading-icon"
+                    animate={
+                      shouldReduceMotion
+                        ? undefined
+                        : { rotate: [-6, 6, -6], scale: [1, 1.05, 1] }
+                    }
+                    transition={
+                      shouldReduceMotion
+                        ? undefined
+                        : { duration: 2.2, repeat: Infinity, ease: 'easeInOut' }
+                    }
+                    style={{ willChange: 'transform' }}
+                    className="inline-block text-6xl filter drop-shadow-[0_0_18px_rgba(245,158,11,0.9)]"
+                  >
                     👑
-                  </span>
+                  </motion.span>
                 </div>
                 <span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 text-[10px] bg-gradient-to-b from-amber-300 to-amber-500 text-zinc-950 font-black px-2.5 py-0.5 rounded-full border border-amber-200 shadow-md whitespace-nowrap">
                   REI ZERO
@@ -4994,9 +5268,23 @@ export default function App() {
                 />
               </div>
 
-              <div className="flex items-center justify-between w-full text-[10px] font-mono text-zinc-400 mb-6">
-                <span>{t.loading.statsLine}</span>
-                <span className="text-amber-400 font-bold">{t.loading.skill100}</span>
+              <div className="flex items-center justify-between w-full text-[10px] font-mono text-zinc-400 mb-6 gap-2">
+                <span className="inline-flex items-center gap-1.5 min-w-0">
+                  <motion.span
+                    aria-hidden="true"
+                    animate={shouldReduceMotion ? undefined : { rotate: 360 }}
+                    transition={
+                      shouldReduceMotion
+                        ? undefined
+                        : { duration: 1.4, repeat: Infinity, ease: 'linear' }
+                    }
+                    className="inline-flex shrink-0"
+                  >
+                    <Loader2 className="w-3.5 h-3.5 text-amber-400" />
+                  </motion.span>
+                  <span className="truncate">{t.loading.statsLine}</span>
+                </span>
+                <span className="text-amber-400 font-bold shrink-0">{t.loading.skill100}</span>
               </div>
 
               <button

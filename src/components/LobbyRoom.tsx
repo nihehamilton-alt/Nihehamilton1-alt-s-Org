@@ -86,6 +86,7 @@ interface LobbyRoomProps {
   serverRaceStatus?: ServerRaceStatus;
   canSpectate?: boolean;
   onEnterSpectatorMode?: () => void;
+  onOpenSpectatorOverview?: () => void;
   chatMessages?: RoomChatMessage[];
   onSendChatMessage?: (text: string) => void;
   localPlayerId?: string;
@@ -131,6 +132,7 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
   serverRaceStatus = 'idle',
   canSpectate = false,
   onEnterSpectatorMode,
+  onOpenSpectatorOverview,
   chatMessages = [],
   onSendChatMessage,
   localPlayerId = '',
@@ -1526,14 +1528,27 @@ export const LobbyRoom: React.FC<LobbyRoomProps> = ({
                   {mpStrings.noBetSpectatorNote}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={onEnterSpectatorMode}
-                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-zinc-950 font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg flex items-center justify-center gap-2 transition-all"
-              >
-                <span>👻</span>
-                <span>{mpStrings.watchLiveRaceBtn}</span>
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={onEnterSpectatorMode}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-zinc-950 font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg flex items-center justify-center gap-2 transition-all whitespace-nowrap"
+                >
+                  <span>👻</span>
+                  <span>{mpStrings.watchLiveRaceBtn}</span>
+                </button>
+                {onOpenSpectatorOverview && (
+                  <button
+                    type="button"
+                    data-testid="lobby-spectator-overview-btn"
+                    onClick={onOpenSpectatorOverview}
+                    className="w-full py-2.5 px-4 rounded-xl bg-sky-500/20 hover:bg-sky-500/35 border border-sky-400/60 text-sky-100 font-black text-xs uppercase tracking-wider cursor-pointer flex items-center justify-center gap-2 transition-all whitespace-nowrap"
+                  >
+                    <span>📊</span>
+                    <span>{mpStrings.spectatorOverviewBtn}</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

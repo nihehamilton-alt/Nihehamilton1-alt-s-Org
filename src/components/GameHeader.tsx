@@ -32,6 +32,7 @@ interface GameHeaderProps {
   canSpectate?: boolean;
   isSpectating?: boolean;
   onSpectate?: () => void;
+  onOpenSpectatorOverview?: () => void;
 }
 
 export const GameHeader: React.FC<GameHeaderProps> = ({
@@ -60,6 +61,7 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
   canSpectate = false,
   isSpectating = false,
   onSpectate,
+  onOpenSpectatorOverview,
 }) => {
   const [showVolumeSlider, setShowVolumeSlider] = React.useState<boolean>(false);
   const volumePopoverRef = React.useRef<HTMLDivElement | null>(null);
@@ -92,6 +94,22 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
       : langCode === 'fr'
       ? 'Regarder les coureurs en direct (Mode Spectateur)'
       : 'Watch live runners (Spectator Mode)';
+  const overviewLabel =
+    langCode === 'pt'
+      ? 'Visão Geral'
+      : langCode === 'es'
+      ? 'Vista Espectador'
+      : langCode === 'fr'
+      ? 'Aperçu'
+      : 'Overview';
+  const overviewTooltip =
+    langCode === 'pt'
+      ? 'Abrir classificação, faixas e estado ao vivo dos corredores'
+      : langCode === 'es'
+      ? 'Abrir clasificación, carriles y estado en vivo'
+      : langCode === 'fr'
+      ? 'Ouvrir le classement, les voies et le statut en direct'
+      : 'Open live leaderboard of runners, lanes, and status';
   const isSfxActive = soundEnabled && volume > 0;
   const sfxOnLabel =
     langCode === 'pt' ? 'Som On' : langCode === 'es' ? 'Sonido' : langCode === 'fr' ? 'Son On' : 'SFX On';
@@ -414,12 +432,25 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
 
           {isSpectating && !canSpectate && (
             <span
-              className="px-2.5 h-8 rounded-xl bg-cyan-950/85 border border-cyan-400/60 text-cyan-200 text-xs font-black flex items-center gap-1.5"
+              className="px-2.5 h-8 rounded-xl bg-cyan-950/85 border border-cyan-400/60 text-cyan-200 text-xs font-black flex items-center gap-1.5 whitespace-nowrap shrink-0"
               title={spectateTooltip}
             >
               <span>👻</span>
               <span className="hidden sm:inline">{spectatingActiveLabel}</span>
             </span>
+          )}
+
+          {(canSpectate || isSpectating) && onOpenSpectatorOverview && (
+            <button
+              type="button"
+              data-testid="header-spectator-overview-btn"
+              onClick={onOpenSpectatorOverview}
+              className="px-2.5 h-8 rounded-xl bg-sky-500/20 hover:bg-sky-500/35 border border-sky-400/60 text-sky-100 text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-sm transition-colors whitespace-nowrap shrink-0"
+              title={overviewTooltip}
+            >
+              <span>📊</span>
+              <span>{overviewLabel}</span>
+            </button>
           )}
 
           <button
@@ -465,7 +496,7 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
           </button>
 
           <div
-            className="relative flex items-center game-subplate rounded-xl p-0.5 border border-white/10"
+            className="relative flex items-center gap-1.5 game-subplate rounded-xl p-0.5 pr-1.5 border border-white/10"
             ref={volumePopoverRef}
           >
             <motion.button
@@ -494,7 +525,7 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
               aria-pressed={isSfxActive}
               aria-label={sfxToggleTooltip}
               title={sfxToggleTooltip}
-              className={`px-2.5 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer border transition-colors duration-300 ${
+              className={`px-2.5 h-7 rounded-lg text-[11px] font-bold flex items-center gap-1.5 cursor-pointer border transition-colors duration-300 whitespace-nowrap shrink-0 ${
                 isSfxActive
                   ? 'hover:bg-emerald-500/30 text-emerald-200 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
                   : 'hover:bg-rose-900/85 text-rose-200 shadow-[0_0_10px_rgba(244,63,94,0.16)]'
@@ -564,63 +595,138 @@ export const GameHeader: React.FC<GameHeaderProps> = ({
               </span>
             </motion.button>
 
-            <button
-              type="button"
-              onClick={() => setShowVolumeSlider((prev) => !prev)}
-              className="px-1.5 h-7 rounded-lg text-[10px] text-amber-400 font-mono font-bold hover:bg-white/5 flex items-center gap-0.5 cursor-pointer transition-colors"
-              title={t.header.volumeTitle}
-              aria-label={t.header.volumeTitle}
-              aria-expanded={showVolumeSlider}
-            >
-              <span className="tabular-nums">
-                {isSfxActive ? `${Math.round(volume * 100)}%` : '0%'}
-              </span>
-              <span className="text-[9px] text-zinc-400">▾</span>
-            </button>
+            {/* Visual Progress-Style Volume Slider */}
+            {(() => {
+              const displayVolumePct = isSfxActive ? Math.round(volume * 100) : 0;
+              const fillScale = Math.max(0, Math.min(1, displayVolumePct / 100));
+              const handlePrecisionVolume = (nextPct: number) => {
+                const clamped = Math.max(0, Math.min(100, Math.round(nextPct)));
+                const nextVol = clamped / 100;
+                sounds.unlockAudio();
+                onVolumeChange(nextVol);
+                if (clamped > 0 && !soundEnabled) {
+                  onToggleSound();
+                } else if (clamped === 0 && soundEnabled) {
+                  onToggleSound();
+                }
+              };
 
-            {showVolumeSlider && (
-              <div className="absolute right-0 top-10 z-50 game-panel-gold rounded-xl p-3 flex flex-col gap-2.5 w-48">
-                <div className="flex items-center justify-between text-[11px] font-mono">
-                  <span className="font-bold text-zinc-200">{t.header.volumeTitle}</span>
+              return (
+                <>
+                  <div
+                    className="relative flex items-center w-20 sm:w-28 h-6 px-1 group/vol select-none shrink-0"
+                    title={`${t.header.volumeTitle}: ${displayVolumePct}%`}
+                  >
+                    <div className="relative w-full h-2 rounded-full bg-zinc-900/95 border border-white/15 overflow-hidden shadow-inner">
+                      <div
+                        className={`h-full w-full origin-left transition-transform duration-100 ease-out rounded-full ${
+                          isSfxActive
+                            ? 'bg-gradient-to-r from-emerald-400 via-amber-400 to-yellow-300'
+                            : 'bg-zinc-600/50'
+                        }`}
+                        style={{ transform: `scaleX(${fillScale})` }}
+                      />
+                    </div>
+                    <div
+                      aria-hidden="true"
+                      className={`pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full border transition-[transform,background-color,border-color] duration-100 group-hover/vol:scale-110 group-focus-within/vol:scale-115 ${
+                        isSfxActive
+                          ? 'bg-amber-300 border-zinc-950 shadow-[0_0_8px_rgba(251,191,36,0.7)]'
+                          : 'bg-zinc-400 border-zinc-900'
+                      }`}
+                      style={{ left: `calc(4px + (100% - 8px) * ${fillScale})` }}
+                    />
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={displayVolumePct}
+                      data-testid="header-volume-slider"
+                      aria-label={t.header.volumeTitle}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={displayVolumePct}
+                      aria-valuetext={`${displayVolumePct}%`}
+                      onChange={(e) => handlePrecisionVolume(Number(e.target.value))}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 m-0"
+                    />
+                  </div>
+
                   <button
                     type="button"
-                    onClick={onToggleSound}
-                    className="text-[10px] text-amber-400 hover:underline cursor-pointer"
+                    onClick={() => setShowVolumeSlider((prev) => !prev)}
+                    className="px-1.5 h-7 rounded-lg text-[10px] text-amber-300 font-mono font-bold hover:bg-white/5 flex items-center gap-0.5 cursor-pointer transition-colors whitespace-nowrap shrink-0"
+                    title={t.header.volumeTitle}
+                    aria-label={t.header.volumeTitle}
+                    aria-expanded={showVolumeSlider}
                   >
-                    {soundEnabled ? t.header.mute : t.header.unmute}
+                    <span className="tabular-nums min-w-[2.3rem] text-right">{displayVolumePct}%</span>
+                    <span className="text-[9px] text-zinc-400">▾</span>
                   </button>
-                </div>
 
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={soundEnabled ? Math.round(volume * 100) : 0}
-                  onChange={(e) => {
-                    const val = Number(e.target.value) / 100;
-                    onVolumeChange(val);
-                    if (!soundEnabled && val > 0) onToggleSound();
-                  }}
-                  className="w-full accent-amber-500 cursor-pointer"
-                />
+                  {showVolumeSlider && (
+                    <div className="absolute right-0 top-10 z-50 game-panel-gold rounded-xl p-3 flex flex-col gap-2.5 w-52 shadow-2xl">
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="font-bold text-zinc-200">{t.header.volumeTitle}</span>
+                        <span className="font-black text-amber-300 tabular-nums">
+                          {displayVolumePct}%
+                        </span>
+                      </div>
 
-                <div className="flex items-center justify-between text-[9px] font-mono text-zinc-400">
-                  {[0, 25, 50, 75, 100].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => {
-                        onVolumeChange(preset / 100);
-                        if (!soundEnabled && preset > 0) onToggleSound();
-                      }}
-                      className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 hover:text-amber-300 cursor-pointer"
-                    >
-                      {preset}%
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+                      <div className="relative flex items-center w-full h-6 group/popvol select-none">
+                        <div className="relative w-full h-2.5 rounded-full bg-zinc-900/95 border border-white/15 overflow-hidden shadow-inner">
+                          <div
+                            className={`h-full w-full origin-left transition-transform duration-100 ease-out rounded-full ${
+                              isSfxActive
+                                ? 'bg-gradient-to-r from-emerald-400 via-amber-400 to-yellow-300'
+                                : 'bg-zinc-600/50'
+                            }`}
+                            style={{ transform: `scaleX(${fillScale})` }}
+                          />
+                        </div>
+                        <div
+                          aria-hidden="true"
+                          className={`pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-4 h-4 rounded-full border transition-transform duration-100 group-hover/popvol:scale-110 ${
+                            isSfxActive
+                              ? 'bg-amber-300 border-zinc-950 shadow-[0_0_10px_rgba(251,191,36,0.75)]'
+                              : 'bg-zinc-400 border-zinc-900'
+                          }`}
+                          style={{ left: `calc(6px + (100% - 12px) * ${fillScale})` }}
+                        />
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={displayVolumePct}
+                          aria-label={t.header.volumeTitle}
+                          onChange={(e) => handlePrecisionVolume(Number(e.target.value))}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 m-0"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 gap-1">
+                        {[0, 25, 50, 75, 100].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => handlePrecisionVolume(preset)}
+                            className={`flex-1 py-1 rounded-lg cursor-pointer transition-colors tabular-nums ${
+                              displayVolumePct === preset
+                                ? 'bg-amber-500 text-zinc-950 font-black'
+                                : 'bg-zinc-800 hover:bg-zinc-700 hover:text-amber-300'
+                            }`}
+                          >
+                            {preset}%
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
 
           <button

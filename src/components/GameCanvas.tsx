@@ -85,6 +85,7 @@ interface GameCanvasProps {
   spectatedRunnerId?: string | null;
   onSelectSpectatedRunner?: (id: string | null) => void;
   onExitSpectator?: () => void;
+  onOpenSpectatorOverview?: () => void;
 }
 
 interface Particle {
@@ -140,6 +141,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   spectatedRunnerId = null,
   onSelectSpectatedRunner,
   onExitSpectator,
+  onOpenSpectatorOverview,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const { t, lang, formatMoney } = useI18n();
@@ -2476,7 +2478,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           // Atualiza barra compacta de corredores & apostas ao vivo (~8Hz durante a corrida)
           if (currentTime - lastHudRunnersEmitRef.current >= 120) {
             lastHudRunnersEmitRef.current = currentTime;
-            setLiveHudRunners(s.competitorsList.map((c) => ({ ...c })));
+            const snapshot = s.competitorsList.map((c) => ({ ...c }));
+            setLiveHudRunners(snapshot);
+            if (spectatingNow && onCompetitorsProgressRef.current) {
+              onCompetitorsProgressRef.current(snapshot);
+            }
           }
 
           // 5. Renderiza o Jogador com o Avatar/Roupa selecionada (ou emblema Fantasma em modo espectador)
@@ -3175,15 +3181,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 </strong>
               </span>
             </div>
-            {onExitSpectator && (
-              <button
-                type="button"
-                onClick={onExitSpectator}
-                className="px-3 py-1.5 rounded-xl bg-rose-950/90 hover:bg-rose-600 border border-rose-500/50 text-rose-200 hover:text-white font-mono font-black text-[11px] uppercase cursor-pointer transition-colors shrink-0"
-              >
-                ✕ {mpStrings.exitSpectatorBtn}
-              </button>
-            )}
+            <div className="flex items-center gap-2 shrink-0">
+              {onOpenSpectatorOverview && (
+                <button
+                  type="button"
+                  data-testid="canvas-spectator-overview-btn"
+                  onClick={onOpenSpectatorOverview}
+                  className="px-3 py-1.5 rounded-xl bg-sky-500/20 hover:bg-sky-500/35 border border-sky-400/60 text-sky-200 hover:text-white font-mono font-black text-[11px] uppercase cursor-pointer transition-colors whitespace-nowrap shrink-0"
+                >
+                  📊 {mpStrings.spectatorOverviewBtn}
+                </button>
+              )}
+              {onExitSpectator && (
+                <button
+                  type="button"
+                  onClick={onExitSpectator}
+                  className="px-3 py-1.5 rounded-xl bg-rose-950/90 hover:bg-rose-600 border border-rose-500/50 text-rose-200 hover:text-white font-mono font-black text-[11px] uppercase cursor-pointer transition-colors whitespace-nowrap shrink-0"
+                >
+                  ✕ {mpStrings.exitSpectatorBtn}
+                </button>
+              )}
+            </div>
           </div>
 
           {onSelectSpectatedRunner && (

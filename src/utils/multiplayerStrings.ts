@@ -53,6 +53,7 @@ export interface MultiplayerStrings {
   roomChatPlaceholder: string;
   roomChatSendBtn: string;
   waitingMorePlayersToStart: string;
+  spectatorOverviewBtn: string;
 }
 
 const PT_STRINGS: MultiplayerStrings = {
@@ -110,6 +111,7 @@ const PT_STRINGS: MultiplayerStrings = {
   roomChatPlaceholder: 'Escreve uma mensagem para a sala...',
   roomChatSendBtn: 'Enviar',
   waitingMorePlayersToStart: 'Aguarda pelo menos 2 jogadores entrarem na sala pelo link para começar!',
+  spectatorOverviewBtn: 'Visão Geral ao Vivo',
 };
 
 const EN_STRINGS: MultiplayerStrings = {
@@ -167,6 +169,7 @@ const EN_STRINGS: MultiplayerStrings = {
   roomChatPlaceholder: 'Type a message to the room...',
   roomChatSendBtn: 'Send',
   waitingMorePlayersToStart: 'Wait for at least 2 players to join the room via link to start!',
+  spectatorOverviewBtn: 'Spectator Overview',
 };
 
 const ES_STRINGS: MultiplayerStrings = {
@@ -224,6 +227,7 @@ const ES_STRINGS: MultiplayerStrings = {
   roomChatPlaceholder: 'Escribe un mensaje para la sala...',
   roomChatSendBtn: 'Enviar',
   waitingMorePlayersToStart: '¡Espera a que al menos 2 jugadores entren a la sala por enlace para empezar!',
+  spectatorOverviewBtn: 'Vista de Espectador',
 };
 
 const FR_STRINGS: MultiplayerStrings = {
@@ -281,6 +285,7 @@ const FR_STRINGS: MultiplayerStrings = {
   roomChatPlaceholder: 'Écrire un message à la salle...',
   roomChatSendBtn: 'Envoyer',
   waitingMorePlayersToStart: 'Attends qu’au moins 2 joueurs rejoignent la salle par lien pour démarrer !',
+  spectatorOverviewBtn: 'Aperçu Spectateur',
 };
 
 export function getMultiplayerStrings(lang: SupportedLanguage): MultiplayerStrings {
